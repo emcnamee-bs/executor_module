@@ -1,0 +1,317 @@
+# HANDOFF — executor_module
+
+**Written 2026-08-24 for an agent with ZERO prior context.** This repo is brand new —
+empty except for this file and `CLAUDE.md`. Do not assume any earlier conversation, and do
+not assume any code exists yet. It doesn't. This is a from-scratch build.
+
+---
+
+## 0. What this project is FOR
+
+A live, AI-driven trading system for one Kalshi market to start:
+`https://kalshi.com/markets/kxaprpotus/president-rcp-approval-rating-this-week/kxaprpotus-26aug28`
+— a weekly presidential approval-rating market. **Do not assume you know its exact
+resolution mechanics (what "RCP approval rating" means, how the strike/settlement is
+computed, when it closes).** Pull the live market spec from Kalshi's API before designing
+any signal or sizing logic around it. Treat every assumption about this market the same
+way its sibling project treats every assumption about a data source: verify before you
+build on it.
+
+The intended pipeline, as specified by the operator (not yet built, any part of it):
+
+1. A scanner watches news-outlet output for a curated list of AI-generated keyphrases —
+   matched against an article's **title and first paragraph**.
+2. A match dispatches a cheap/fast model (**Haiku**) to read the article and produce a
+   synopsis of what it's actually about.
+3. **Sonnet** does a light, fast pass to verify the synopsis against the article (a
+   cross-check, not a rebuild).
+4. **Sonnet** decides the trade: direction (for/against), and whether to buy, sell, or
+   hold — using a sizing/decision method still to be designed.
+5. The decision is executed as a **real order against a real Kalshi market.** This is
+   live money from the point execution is wired up. There is no simulation mode implied
+   by this repo's existence — if a dry-run/paper mode is wanted, it must be built and
+   explicitly chosen, not assumed to exist by default.
+
+**Nothing above exists yet.** No scanner, no model calls, no decision code, no Kalshi
+client, in this repo. Building all of it is the job.
+
+---
+
+## 1. The sibling project this depends on: Internet_Info_Plug
+
+Path: `/Users/eamonmcnamee/Downloads/Internet_Info_Plug` (also reachable at
+`/Users/eamonmcnamee/downloads/Internet_Info_Plug` — case-insensitive alias on this Mac).
+
+**Read its own `HANDOFF.md` and `CLAUDE.md` if you need more depth than this section
+gives you** — but you should not need to modify anything in that repo to build this one.
+Treat it as a read-only upstream dependency: a news-ingestion daemon called `iip/` that
+polls government feeds, wire services, and social sources, and publishes normalized items
+to a Redis stream. This project (`executor_module`) is meant to be **a new consumer of
+that stream**, not a fork or extension of anything inside it.
+
+### 1.1 Two hard boundaries that belong to that repo, not this one — respect them anyway
+
+`Internet_Info_Plug` has a component called `executor/` that looks superficially like
+what you're building here — it's a decision/sizing engine that reads the same kind of
+stream data and computes simulated trades. **It is not a starting point, and it is not
+extendable into this.** It's a measurement harness for a research question ("does latency
+buy trading edge?") and is *deliberately, permanently* incapable of live trading — locked
+venv (13 pinned dependencies, no HTTP client, no signing library), a network guard armed
+at import, no live-mode flag anywhere, and a test suite that fails on purpose if any of
+that is loosened. **Do not import from it, do not vendor its code by copying files, and
+do not ask an agent working in that repo to weaken any of those guards.** Its `decide/`
+module (rung-based stake ladder, Kelly sizing, notional ceilings — see §3 below) is worth
+reading as **design inspiration only**, the way you'd read a paper, not a library.
+
+The other boundary: `Internet_Info_Plug`'s ingestion layer (`iip/`) enforces "market
+ignorance" — no keyword or rule encoding a specific market's resolution condition is
+allowed to enter that codebase. That's their rule to keep the daemon a generic
+news-listener rather than a piece of trading infrastructure. **This project is exactly
+the trading infrastructure that rule is designed to keep separate** — which is the whole
+reason it lives in its own repo. Your market-specific keyphrases, your `KXAPRPOTUS`
+logic, your RCP-approval-rating-specific rules: all of it belongs here, never in
+`iip/`. If you find yourself wanting to add a market-specific keyword to
+`Internet_Info_Plug/config/sources.yaml` or anywhere under `Internet_Info_Plug/iip/`,
+stop — that's a sign the thing you're building belongs in this repo instead.
+
+### 1.2 The interface you actually consume: the Redis stream
+
+`iip/emit.py` publishes to a Redis stream named **`iip:items`** (there is also
+`iip:alerts` for daemon health alerts, likely less relevant here) via `XADD`. Each stream
+entry has these fields:
+
+| Field | Contents |
+|---|---|
+| `item_id` | time-sortable id, e.g. `1755999999999-a1b2c3d4e5f6` |
+| `source_id` | which configured source emitted this (e.g. `bbc_world`, `reddit_geopolitics`) |
+| `adapter` | adapter type: `feed`, `primary`, `bluesky`, etc. |
+| `trust_tier` | `1` (official/government) through `5` (unverified); **in the current archive only 1 and 3 are ever used** |
+| `event_type` | `item` (new item) or `item_amended` (a correction/retraction/headline change to a prior item) |
+| `headline` | the headline text — **check `provenance_gaps` in the JSON payload before trusting this is real editorial text**; some adapters synthesize it |
+| `json` | the full item, as JSON. This is where everything else lives — parse this. |
+
+The full `json` payload (Pydantic model `Item` in `Internet_Info_Plug/iip/schema.py`) has
+these fields worth knowing about before you build a consumer:
+
+- `headline`, `snippet`, `url`, `raw_url`, `enrich_url`, `author`, `lang`
+- `body_state` (`absent` / `fetching` / `present` / `paywalled` / `failed`) and `body` —
+  full article text is fetched **on demand**, not always populated. Check `body_state`
+  before assuming `body` is there.
+- `source_publish_ts`, `first_seen_ts`, `emitted_ts`, `latency_ms` — timing. Note
+  `event_time` is **reserved and always None** — there is no true event timestamp, only
+  sighting timestamps.
+- `story_key` — a clustering id across sources reporting the same story, and
+  `corroborations` — how many other sources hit the same story. **Currently `story_key`
+  is `None` on essentially all historical items** (it was only recently wired up at emit
+  time), so don't design a decision step that hard-depends on corroboration being
+  populated without checking it's actually there for a given item.
+- `provenance_gaps` — a tuple that may contain `synthetic_headline` (the headline was
+  invented by the adapter, not written by a human — matching rules against it is matching
+  against nobody's words), `no_article_url`, `title_not_headline`. **Check this before
+  running your keyphrase match or handing the item to Haiku** — a synthetic headline
+  should probably be treated differently (or skipped) rather than analyzed as if a
+  journalist wrote it.
+- `replay: bool` — `True` on items republished by that project's replay/backtest harness.
+  **A real trading consumer must never act on a replayed item.** If you ever run their
+  replay tooling against a shared Redis instance, filter this field or use an isolated
+  Redis for testing.
+- `amends_item_id` / `amendment_kind` (`headline_changed` / `removed`) — set together when
+  `event_type == item_amended`. This is the daemon's retraction/correction mechanism. A
+  trading system built on news should have an opinion about what happens to an open
+  position when the story it was based on gets amended or removed — that's currently
+  undesigned here.
+
+Consume with a Redis consumer group (`XREADGROUP`) rather than a bare read, so you get
+at-least-once delivery and can track your own offset independent of the daemon's own
+process.
+
+### 1.3 Prior art worth reading, not reusing: `executor/decide/` and `executor/rules.d/`
+
+Even though you can't import this code, the *concepts* it encodes are a reasonable
+starting point for your own decision design, refined over real iteration on real (if
+synthetic) data:
+
+- **A keyword-rule format** (`executor/rules.d/example.json`): each rule has an
+  `all_of`/`any_of`/`none_of` token match (prefix, word-anchored — not substring, not
+  exact — see that file's `_prefix_matching_evidence` block for why), a `market_id`, a
+  `side`, a `min_rung` gate, and a `base_move_pts` estimate of how much the market should
+  move if the rule fires. Worth adapting for your keyphrase list, but your matching will
+  presumably be softer/AI-driven rather than pure token rules.
+- **A rung ladder** (`executor/decide/sizing.py`): stake scales with evidentiary
+  confidence — `rumor` (0%), `reported` (25%), `corroborated` (50%), `confirmed` (100%) —
+  kept deliberately separate from trust tier, because "this outlet is usually right" and
+  "this story is well-established" are different facts and conflating them was an
+  identified design mistake in that project.
+- **Kelly-fraction sizing against a fair-value estimate** (same file): `(100·p − c)/(100 −
+  c)` for a binary contract priced in cents, floored at 0 rather than flipping direction
+  on a negative result.
+- **A notional/contract ceiling enforced redundantly at multiple layers**
+  (`executor/models.py`, `executor/decide/gates.py`) — the lesson recorded there is that a
+  single risk cap checked in only one place is fragile; check it at construction, at
+  sizing, and at persistence (DB constraint), and pin all of them with tests.
+- **`confirmed_sources` as a privileged, dangerous shortcut** — a hand-edited allowlist
+  that changes both size limits and gate behavior was flagged as "an unprotected
+  privileged surface" in that project because editing it doesn't look like a risk
+  decision. Worth deciding deliberately here whether you want anything like it, and if so,
+  protecting it with tests from day one rather than by convention.
+- **Provenance-of-decisions as code, not prose** (`executor/decide/provenance.py`) — that
+  project ships a machine-checked declaration of which of its functions model something
+  real versus which are stand-ins, printed above every report. Given this project touches
+  real money, an equivalent discipline — a report that states plainly what each number is
+  and isn't — seems directly worth carrying over.
+
+None of the above is load-bearing design guidance — brainstorm the actual decision method
+with the operator rather than porting this wholesale. It's here so you don't have to
+rediscover the vocabulary from zero.
+
+---
+
+## 2. What else exists on this machine relevant to live Kalshi execution
+
+Four other repos in `/Users/eamonmcnamee/Downloads/` reference real Kalshi API
+credentials and (per `Internet_Info_Plug/HANDOFF.md`'s credential-hygiene notes) may
+already contain working, signed Kalshi clients:
+
+- `Fast99Follower/` — `src/kalshiClient.js`
+- `InsiderTradeFollower/`
+- `Personal_Fingerprinter/` — `helpers/kalshi_client.py`, `tools/fetch_kalshi_history.py`
+- `kalshi-spine/` — `poller.js`
+
+**None of this has been inspected as part of writing this doc.** The operator was
+explicit, in the sibling project, that its executor must never execute, import, or
+subprocess those specific files — but that restriction belongs to that project's charter
+(it must stay structurally incapable of trading). **This project is different: it is
+*supposed* to authenticate to Kalshi and place real orders.** So the right first move is
+almost certainly to **look at what execution capability already exists in those four
+repos** before writing a Kalshi client from scratch — there is no reason to reinvent
+RSA-PSS request signing if a working implementation already exists two folders over.
+
+The canonical private key, per that same handoff, lives at `~/.kalshi-spine/kalshi_key.pem`,
+**mode 600**, with `Fast99Follower/` and `InsiderTradeFollower/` holding their own copies
+(also mode 600) — the file(s) an execution client here would need to read. That key ID and
+its bytes have never been committed anywhere on this machine, and that discipline should
+continue here without exception:
+
+- **Never commit `kalshi_key.pem` or any file containing `-----BEGIN`** to this repo.
+- **Never hardcode a key ID or path as a fallback default** in tracked code — read
+  `KALSHI_API_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH` from the environment or a git-ignored
+  `.env`, and fail loudly naming the missing variable if absent (this is the pattern the
+  other repos were fixed to use, per that handoff).
+- **Never log, print, or write the key's bytes anywhere** — not to a commit, not to this
+  or any other markdown file, not to a debug log.
+- Add `.env`, `*.pem`, and any credentials directory to `.gitignore` **before** the first
+  time any credential-adjacent code is written, not after.
+
+---
+
+## 3. What "everything needed to build the rest of the project" means concretely
+
+In rough dependency order — not a mandate, a starting map to brainstorm from:
+
+1. **Confirm the market's real mechanics.** Fetch `KXAPRPOTUS-26AUG28`'s spec from
+   Kalshi's API (or docs) — settlement source, timing, tick size, how "RCP approval
+   rating" is actually computed and by whom. Do not design the signal or the decision
+   logic around an assumption about this.
+2. **Decide language/venv.** This repo is empty — no constraint carried over from the
+   sibling project's Python choice or its locked venv. Pick what's right for this job.
+3. **Wire up the Redis consumer** against `iip:items` (§1.2) — this is the cheapest,
+   most concrete first slice, and it's fully specified above.
+4. **Design and build the keyphrase list + match step.** AI-generated, per the operator's
+   description — likely an offline/periodic step (an LLM proposes/refines phrases) feeding
+   a fast runtime match against title + first paragraph. `Internet_Info_Plug/discovery/propose.py`
+   is a real (if different-purpose) example of using the Anthropic SDK offline to generate
+   candidate lists, worth a skim for the API-call pattern, not the content.
+5. **Build the Haiku synopsis step, the Sonnet verify step, and the Sonnet decision
+   step.** No existing code for any of the three. Needs: prompt design, structured
+   output (a decision needs a machine-parseable direction/size, not prose), and a
+   provenance record of what each model was actually asked and told (see §1.3's
+   provenance point — worth having from day one so a bad trade can be traced to a
+   specific model output rather than "the AI decided").
+6. **Build or reuse a Kalshi execution client** — see §2. Needs real authentication
+   (RSA-PSS request signing), order placement, fill/rejection handling, and position
+   tracking against the account's actual state (not an internal ledger that can drift
+   from reality — reconcile against Kalshi's own position/order endpoints, not just your
+   own database).
+7. **Build risk controls before the first real order, not after:** a hard position/
+   notional cap (redundant, per §1.3's lesson), a kill switch, and a plan for what happens
+   on a partial fill, a rejected order, or the model pipeline throwing partway through.
+   Given the stated goal is fast, automated, real-money trades, an unhandled exception
+   mid-pipeline is a live-money incident, not a test failure.
+8. **Decide whether a dry-run/paper mode is wanted for this project.** Unlike the sibling
+   repo, nothing here defaults to simulation-only — if you want a safe rehearsal mode, it
+   has to be explicitly designed, and (learning from the sibling project's own experience)
+   probably needs to be structurally hard to accidentally leave off, e.g. a required
+   explicit flag to go live rather than a flag to simulate.
+9. **Decide where this runs.** The operator is setting up an Ubuntu box now
+   (`Internet_Info_Plug/deploy/ai1/README.md` documents deploying the *news daemon* to a
+   Tailscale-reachable box called `ai1`, `Ubuntu 24.04.4`, already running as a systemd
+   user service). This new component could run there too, as a second systemd service —
+   the deploy pattern (git bundle transfer, `.venv`, systemd user unit, Tailscale tunnel for
+   any local status endpoint) transfers directly. Confirm with the operator whether this
+   shares that box or gets its own.
+
+---
+
+## 4. Method lessons from the sibling project worth carrying over verbatim
+
+`Internet_Info_Plug`'s `HANDOFF.md` §6 documents a recurring defect class found across
+its own build, expensively, more than once: **a guard that fires correctly and says
+something it never checked** — a true mechanism with a false sentence attached, with no
+test pinning the sentence. Examples there: a health check claiming "producing normally"
+for a source producing nothing; a value silently dropped between producer and consumer
+that every unit test missed because unit tests construct their own arguments instead of
+going through the real call site.
+
+This matters more here, not less, because the failure mode in this project isn't a
+misleading health check — it's a real order placed on bad information, or a real position
+left unmanaged because a wiring bug made a risk check unreachable. Two habits worth
+adopting from day one, stated there as load-bearing:
+
+1. **For every value that travels producer → consumer (a price, a decision, a size),
+   write at least one test that drives the REAL call site** — not the sizing function in
+   isolation, but the full path from "item arrived" to "order request constructed" — so a
+   caller that silently stops passing an argument gets caught.
+2. **Treat "the suite is green" as evidence about the tests, never about the code.**
+   Mutate the code (delete an argument at a call site, not inside a function body) and
+   confirm the relevant test actually goes red before trusting it protects anything.
+
+---
+
+## 5. Current state of the sibling project, so you don't have to re-derive it
+
+Measured 2026-08-24, on `Internet_Info_Plug`'s `main` branch:
+
+- `iip/` (the news daemon) is mature: dedup, silence/gap detection, amendment/retraction
+  handling, rate limiting, 7 configured sources (BLS, Federal Register, State Department,
+  IAEA, Al Jazeera, BBC, Reddit r/geopolitics, plus OFAC via a generic page-watcher
+  adapter). **None of its sources are polling-data or approval-rating specific** — nothing
+  upstream already tracks anything related to `KXAPRPOTUS`.
+- It's actively being deployed to `ai1` (the Ubuntu box the operator is setting up) for a
+  28-day passive baseline-observation run — **not** a trading run. That run existing
+  doesn't block or conflict with this project consuming the same stream.
+- `executor/` (the sibling's own simulation harness) has run one internal end-to-end proof
+  — 81 archived items → 106 stream entries → 45 simulated decisions → 27 simulated fills,
+  zero network, zero credentials — and its own finding was that **latency imposes a real,
+  measurable floor on how much edge is worth having** (a 5-second decision delay already
+  costs 0.16–0.32 points of edge on their model; by 60 seconds most simulated positions
+  no longer clear that floor). Worth treating as a hypothesis to re-test on this market's
+  actual liquidity and spread, not an assumed constant.
+- No AI-driven classification, verification, or decision pipeline exists anywhere on this
+  machine yet, in any repo. The Haiku → Sonnet → Sonnet pipeline described in §0 is a
+  genuinely new build.
+
+---
+
+## 6. Instructions for whoever picks this up
+
+1. Read this whole file before writing code.
+2. Re-verify anything in §5 that a decision depends on — it's a snapshot, not a
+   standing guarantee, and the sibling project's own experience is that a claim about
+   another system, even one made honestly, should be re-measured before being built on.
+3. Brainstorm the open design questions with the operator before locking in an
+   architecture — §3 is a dependency map, not a spec. In particular: the exact decision
+   method (step 4 of §0's pipeline), whether/how to add a dry-run mode, and where this
+   runs are all explicitly open.
+4. Treat §2's credential-hygiene rules as non-negotiable from the first line of code,
+   not something to clean up later — that is exactly how the exposure this machine
+   already has one history of happened.

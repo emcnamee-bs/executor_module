@@ -1,0 +1,15 @@
+# Credential hygiene — see HANDOFF.md §2. Never commit any of these.
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials/
+
+# Common build/venv noise
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
