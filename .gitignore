@@ -5,6 +5,7 @@
 *.key
 secrets/
 credentials/
+.envrc
 
 # Common build/venv noise
 .venv/

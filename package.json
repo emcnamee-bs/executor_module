@@ -6,10 +6,12 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "dev": "tsx src/main.ts",
+    "generate-keyphrases": "tsx src/keyphrases/generate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "redis": "^4.7.0",
     "zod": "^3.23.8"
   },
