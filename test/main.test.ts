@@ -211,4 +211,82 @@ describe('runOnce with keyphrase matching (end-to-end)', () => {
       expect(outcome.raw).not.toContain('\n');
     }
   });
+
+  it('processes a full multi-item batch in one read: matches, replay, amendment, and a truncated oversized parse failure', async () => {
+    const normalMatch = realisticPayload({
+      headline: 'Trump approval rating steady this week',
+    });
+    const replayItem = realisticPayload({
+      headline: 'Local weather stays mild this week',
+      replay: true,
+    });
+    const amendedMatch = realisticPayload({
+      headline: 'Trump approval rating revised upward',
+      event_type: 'item_amended',
+      amends_item_id: randomUUID(),
+      amendment_kind: 'headline_changed',
+    });
+    const noMatch = realisticPayload({
+      headline: 'City council approves new park budget',
+    });
+    const malformedOversizedRaw = '{' + 'x'.repeat(600) + ':not valid';
+
+    await client.xAdd(streamKey, '*', { json: JSON.stringify(normalMatch) });
+    await client.xAdd(streamKey, '*', { json: JSON.stringify(replayItem) });
+    await client.xAdd(streamKey, '*', { json: JSON.stringify(amendedMatch) });
+    await client.xAdd(streamKey, '*', { json: JSON.stringify(noMatch) });
+    await client.xAdd(streamKey, '*', { json: malformedOversizedRaw });
+
+    const seededCount = 5;
+    const outcomes: ItemOutcome[] = [];
+    const controller = new AbortController();
+
+    await runOnce(
+      client,
+      { streamKey, groupName, consumerName: 'consumer-7', blockMs: 500, count: 10 },
+      compilePhrases(['trump approval rating']),
+      (outcome) => {
+        outcomes.push(outcome);
+        if (outcomes.length >= seededCount) controller.abort();
+      },
+      controller.signal
+    );
+
+    expect(outcomes).toHaveLength(seededCount);
+
+    const truncatedMarker = '...(truncated)';
+    const failed = outcomes.filter((o): o is Extract<ItemOutcome, { ok: false }> => !o.ok);
+    expect(failed).toHaveLength(1);
+    expect(failed[0].raw).toContain(truncatedMarker);
+    expect(failed[0].raw.length).toBeLessThanOrEqual(500 + truncatedMarker.length);
+
+    const succeeded = outcomes.filter((o): o is Extract<ItemOutcome, { ok: true }> => o.ok);
+    expect(succeeded).toHaveLength(4);
+
+    const trumpMatches = succeeded.filter((o) => o.item.headline.startsWith('Trump approval rating'));
+    expect(trumpMatches).toHaveLength(2);
+    for (const outcome of trumpMatches) {
+      expect(outcome.matchedPhrases).toEqual(['trump approval rating']);
+    }
+
+    const replayOutcome = succeeded.find((o) => o.item.replay === true);
+    expect(replayOutcome).toBeDefined();
+    if (replayOutcome) {
+      expect(replayOutcome.matchedPhrases).toEqual([]);
+    }
+
+    const amendedOutcome = succeeded.find((o) => o.item.event_type === 'item_amended');
+    expect(amendedOutcome).toBeDefined();
+    if (amendedOutcome) {
+      expect(amendedOutcome.item.amendment_kind).toBe('headline_changed');
+      expect(amendedOutcome.item.amends_item_id).toBeTruthy();
+      expect(amendedOutcome.matchedPhrases).toEqual(['trump approval rating']);
+    }
+
+    const noMatchOutcome = succeeded.find((o) => o.item.headline.startsWith('City council'));
+    expect(noMatchOutcome).toBeDefined();
+    if (noMatchOutcome) {
+      expect(noMatchOutcome.matchedPhrases).toEqual([]);
+    }
+  });
 });
