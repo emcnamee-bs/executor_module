@@ -22,7 +22,7 @@ keyphrase matching, any model call, or any trade logic.
 ## Decisions carried in from brainstorming
 
 - **Language/runtime:** Node.js + TypeScript.
-- **Deployment target:** a new machine, `mini-mac` (`emac@192.168.1.50`).
+- **Deployment target:** a new machine, `mini-mac` (`emac@192.168.1.49`).
   Rather than have `executor_module` reach across the network to
   `Internet_Info_Plug`'s current host (`ai1`), `Internet_Info_Plug` (the
   `iip` daemon) and its Redis instance are being **redeployed onto
