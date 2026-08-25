@@ -38,6 +38,44 @@ describe('compilePhrases + findMatches', () => {
     expect(findMatches('completely unrelated sports news', compiled)).toEqual([]);
   });
 
+  it('matches across a newline where the phrase has a single space', () => {
+    // Upstream item text is NOT whitespace-normalised (Internet_Info_Plug's
+    // normalize.py / feed.py / reddit.py / primary.py), so a real RSS or Reddit
+    // snippet routinely carries a line break exactly where a phrase has a space.
+    const compiled = compilePhrases(['rasmussen poll']);
+    expect(findMatches('A new Rasmussen\npoll released today', compiled)).toEqual([
+      'rasmussen poll',
+    ]);
+  });
+
+  it('matches across irregular multiple spaces between the phrase words', () => {
+    const compiled = compilePhrases(['trump approval rating']);
+    expect(findMatches('Trump  approval rating steady', compiled)).toEqual([
+      'trump approval rating',
+    ]);
+  });
+
+  it('matches across a tab in the target text', () => {
+    const compiled = compilePhrases(['trump approval rating']);
+    expect(findMatches('Trump approval\trating steady', compiled)).toEqual([
+      'trump approval rating',
+    ]);
+  });
+
+  it('matches across a non-breaking space in the target text', () => {
+    const compiled = compilePhrases(['trump approval rating']);
+    expect(findMatches('Trump approval rating steady', compiled)).toEqual([
+      'trump approval rating',
+    ]);
+  });
+
+  it('still respects word boundaries when whitespace between words varies', () => {
+    // The \s+ relaxation must not leak into the boundary check: "bipoll\nrelease"
+    // is still a match inside a longer word and must stay unmatched.
+    const compiled = compilePhrases(['poll release']);
+    expect(findMatches('a bipoll\nrelease-like event', compiled)).toEqual([]);
+  });
+
   it('safely handles phrases containing regex-special characters', () => {
     const compiled = compilePhrases(['q&a session (live)']);
     expect(findMatches('the q&a session (live) starts soon', compiled)).toEqual([
