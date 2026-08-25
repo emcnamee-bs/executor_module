@@ -212,6 +212,50 @@ describe('runOnce with keyphrase matching (end-to-end)', () => {
     }
   });
 
+  it('flattens embedded newlines and tabs in an unparseable payload to spaces', async () => {
+    // A one-line-per-item log is only one line per item if the raw preview is
+    // flattened. Every other payload in this file is newline-free, so without this
+    // test truncateRaw's `.replace(/[\r\n\t]+/g, ' ')` is entirely unpinned.
+    const malformedMultiline = '{not valid json\n"headline":\t"x",\r\n"snippet": "y"';
+
+    await client.xAdd(streamKey, '*', { json: malformedMultiline });
+
+    const outcome = await runOnceForOneEntry(
+      client,
+      streamKey,
+      groupName,
+      'consumer-8',
+      compilePhrases(['trump approval rating'])
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.raw).not.toMatch(/[\r\n\t]/);
+      expect(outcome.raw).toBe('{not valid json "headline": "x", "snippet": "y"');
+      expect(outcome.raw).not.toContain('...(truncated)');
+    }
+  });
+
+  it('passes a short newline-free unparseable payload through unchanged and unmarked', async () => {
+    const malformedShort = '{not valid json';
+
+    await client.xAdd(streamKey, '*', { json: malformedShort });
+
+    const outcome = await runOnceForOneEntry(
+      client,
+      streamKey,
+      groupName,
+      'consumer-9',
+      compilePhrases(['trump approval rating'])
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.raw).toBe(malformedShort);
+      expect(outcome.raw).not.toContain('...(truncated)');
+    }
+  });
+
   it('processes a full multi-item batch in one read: matches, replay, amendment, and a truncated oversized parse failure', async () => {
     const normalMatch = realisticPayload({
       headline: 'Trump approval rating steady this week',
