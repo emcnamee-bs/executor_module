@@ -56,6 +56,16 @@ export async function main(): Promise<void> {
   const keyphrases = loadKeyphrases(DEFAULT_KEYPHRASES_PATH);
   const compiledPhrases = compilePhrases(keyphrases);
 
+  // Startup visibility: without this, an empty list is indistinguishable at runtime
+  // from a healthy pipeline that simply has not seen a newsworthy item yet — the
+  // process logs item summaries forever and never a match, looking fine either way.
+  console.log(`[keyphrases] loaded ${keyphrases.length} phrase(s) from ${DEFAULT_KEYPHRASES_PATH}`);
+  if (keyphrases.length === 0) {
+    console.warn(
+      '[keyphrases] WARNING: 0 keyphrases loaded — keyphrase matching will never fire until data/keyphrases.json has entries'
+    );
+  }
+
   const client = createRedisClient();
   await client.connect();
 
