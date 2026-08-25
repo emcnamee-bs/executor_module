@@ -22,6 +22,37 @@ const KEYPHRASE_JSON_SCHEMA = {
   additionalProperties: false,
 };
 
+/**
+ * Narrows the model's structured output to a genuine `string[]` before anything can
+ * write it to `data/keyphrases.json` — the file the ENTIRE consumer pipeline loads at
+ * startup. `parsed_output` being present is not proof it has the shape we asked for
+ * (it can be `null`, be missing `keyphrases`, or carry non-string elements). Without
+ * this check the generator would happily persist garbage, and the failure would only
+ * surface later, far from its cause, as a `loadKeyphrases()` throw against a
+ * git-tracked file.
+ */
+export function validateKeyphraseOutput(parsedOutput: unknown): string[] {
+  const invalid = (): never => {
+    throw new Error(
+      `Sonnet returned an invalid keyphrase list shape: ${JSON.stringify(parsedOutput)}`
+    );
+  };
+
+  if (parsedOutput === null || typeof parsedOutput !== 'object') {
+    return invalid();
+  }
+
+  const keyphrases = (parsedOutput as { keyphrases?: unknown }).keyphrases;
+  if (!Array.isArray(keyphrases)) {
+    return invalid();
+  }
+  if (!keyphrases.every((entry) => typeof entry === 'string')) {
+    return invalid();
+  }
+
+  return keyphrases as string[];
+}
+
 export async function refineKeyphrases(
   client: Anthropic,
   currentPhrases: string[]
@@ -47,7 +78,34 @@ export async function refineKeyphrases(
     throw new Error('Sonnet did not return parseable structured output for the keyphrase list');
   }
 
-  return (response.parsed_output as any).keyphrases;
+  return validateKeyphraseOutput(response.parsed_output);
+}
+
+/**
+ * The generator's actual control flow, in a testable function rather than only inside
+ * an unexported `main()`: load the current list, refine it, and write the result back
+ * ONLY if refinement succeeded. The write-skipping guarantee ("on any failure, leave
+ * `data/keyphrases.json` untouched") lives here so a test can drive it and assert the
+ * file is byte-identical afterwards — deleting the `catch` or hoisting
+ * `saveKeyphrases` above it must turn a test red, not slip through.
+ *
+ * Deliberately does not call `process.exit` — the CLI entrypoint owns that.
+ */
+export async function runGenerator(
+  client: Anthropic,
+  filePath: string
+): Promise<{ success: boolean; error?: unknown; count?: number }> {
+  const currentPhrases = loadKeyphrases(filePath);
+
+  let refined: string[];
+  try {
+    refined = await refineKeyphrases(client, currentPhrases);
+  } catch (err) {
+    return { success: false, error: err };
+  }
+
+  saveKeyphrases(filePath, refined);
+  return { success: true, count: refined.length };
 }
 
 // Intended schedule (NOT installed by this slice -- see
@@ -57,19 +115,18 @@ export async function refineKeyphrases(
 //   Or an equivalent systemd timer unit calling the same command once a day.
 async function main(): Promise<void> {
   const client = new Anthropic();
-  const currentPhrases = loadKeyphrases(DEFAULT_KEYPHRASES_PATH);
+  const result = await runGenerator(client, DEFAULT_KEYPHRASES_PATH);
 
-  let refined: string[];
-  try {
-    refined = await refineKeyphrases(client, currentPhrases);
-  } catch (err) {
-    console.error('[generate-keyphrases] failed, leaving existing list untouched:', err);
+  if (!result.success) {
+    console.error(
+      '[generate-keyphrases] failed, leaving existing list untouched:',
+      result.error
+    );
     process.exit(1);
     return;
   }
 
-  saveKeyphrases(DEFAULT_KEYPHRASES_PATH, refined);
-  console.log(`[generate-keyphrases] wrote ${refined.length} phrases to ${DEFAULT_KEYPHRASES_PATH}`);
+  console.log(`[generate-keyphrases] wrote ${result.count} phrases to ${DEFAULT_KEYPHRASES_PATH}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
