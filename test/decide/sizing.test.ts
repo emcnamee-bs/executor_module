@@ -418,27 +418,40 @@ describe('evaluateSizing', () => {
   });
 
   it('holds the $10 per-trade cap even when an out-of-range quote poisons the fair-value curve', () => {
-    // Reviewer's reproduction: one band carries an impossible 150c quote (nothing
+    // Reviewer's reproduction: one band carries an impossible 104c quote (nothing
     // upstream bounds Kalshi prices to [0,100]). That band is itself untradeable on
-    // price, but it sits in the shared probability curve, so the *legally priced*
-    // A-good band interpolates a fair value of 150c, a Kelly fraction of 2.0, and
-    // -- before this fix -- traded 40 contracts at 50c for 2000c of notional: a
-    // clean 2x breach of the $10 per-trade cap.
+    // price -- both its yes side (104c) and its no side (100-104 = -4c) fail the
+    // [10,90] price gate -- but it still sits in the shared probability curve. Its
+    // implied probability of 1.04 poisons the interpolation the *legally priced*
+    // P-good band reads, which would (pre-fix) yield a fair value over 100c and a
+    // Kelly fraction over 1.0. This ladder's implied distribution sums to ~1.14,
+    // inside the [0.85,1.15] sanity window, so it reaches the real sizing math
+    // instead of being declined by that check first -- unlike the old version of
+    // this test. See the fix report for mutation evidence that both the
+    // probability clamp and the per-trade ceiling clamp are load-bearing here:
+    // removing them sizes this same ladder to 86 contracts / 1032c, over the cap.
     const poisonedLadder: BandMarket[] = [
-      band({ ticker: 'A-lo', floorStrike: 40.0, capStrike: 40.2, yesAskCents: 20, yesBidCents: 18 }),
-      band({ ticker: 'A-bad', floorStrike: 40.2, capStrike: 40.4, yesAskCents: 150, yesBidCents: 150 }),
+      band({ ticker: 'P-bad', floorStrike: 40.0, capStrike: 40.2, yesAskCents: 104, yesBidCents: 104 }),
       band({
-        ticker: 'A-good',
-        floorStrike: 40.4,
-        capStrike: 40.6,
-        yesAskCents: 50,
-        yesBidCents: 48,
+        ticker: 'P-good',
+        floorStrike: 40.2,
+        capStrike: 40.4,
+        yesAskCents: 12,
+        yesBidCents: 8,
         yesAskSizeContracts: 100000,
       }),
     ];
+    expect(impliedSum(poisonedLadder)).toBeCloseTo(1.14, 10);
     const result = evaluateSizing(
       baseInput({ bands: poisonedLadder, rung: 'confirmed', magnitudePts: 0.2 })
     );
+    expect(result.wouldTrade).toBe(true);
+    expect(result.marketTicker).toBe('P-good');
+    expect(result.side).toBe('yes');
+    expect(result.entryPriceCents).toBe(12);
+    expect(result.edgeCents).toBe(88);
+    expect(result.contracts).toBe(83);
+    expect(result.notionalCents).toBe(996);
     expect(result.notionalCents).toBeLessThanOrEqual(MAX_NOTIONAL_CENTS_PER_TRADE);
   });
 
