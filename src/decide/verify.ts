@@ -15,7 +15,7 @@ const VERIFY_SCHEMA = {
   additionalProperties: false,
 };
 
-function validateVerifyOutput(parsed: unknown): VerifyResult {
+export function validateVerifyOutput(parsed: unknown): VerifyResult {
   if (typeof parsed !== 'object' || parsed === null) {
     throw new Error(`Sonnet returned an invalid verify output shape: ${JSON.stringify(parsed)}`);
   }
@@ -37,7 +37,7 @@ export async function verifySynopsis(
 ): Promise<VerifyResult> {
   const sourceText = [headline, snippet].filter((s): s is string => Boolean(s)).join('\n\n');
 
-  const response = await client.messages.create({
+  const response = await client.messages.parse({
     model: 'claude-sonnet-5',
     max_tokens: 512,
     messages: [
@@ -52,26 +52,12 @@ export async function verifySynopsis(
     // for slice 2). Raw schema sidesteps it entirely.
     output_config: {
       format: { type: 'json_schema', schema: VERIFY_SCHEMA },
-    } as Anthropic.Messages.MessageCreateParams['output_config'],
+    } as any,
   });
 
-  // Extract the JSON from the response content block
-  if (!response.content || response.content.length === 0) {
-    throw new Error('Sonnet returned an empty response');
+  if (!response.parsed_output) {
+    throw new Error('Sonnet did not return parseable structured output for verification');
   }
 
-  const contentBlock = response.content[0];
-  if (contentBlock.type !== 'text') {
-    throw new Error(`Sonnet returned unexpected content type: ${contentBlock.type}`);
-  }
-
-  const jsonText = contentBlock.text;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch (e) {
-    throw new Error(`Failed to parse Sonnet JSON response: ${jsonText}`);
-  }
-
-  return validateVerifyOutput(parsed);
+  return validateVerifyOutput(response.parsed_output);
 }
