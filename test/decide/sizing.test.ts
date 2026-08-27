@@ -627,13 +627,20 @@ describe('evaluateSizing', () => {
     expect(result.reason).not.toMatch(/exceeds usable curve span/);
   });
 
-  it('no longer prices an absurd magnitude identically to a merely-large one (the saturation plateau is gone)', () => {
+  it('no longer prices an absurd out-of-span magnitude identically to a merely-large one', () => {
     // The Critical finding, reproduced. Both of these shifts push the interpolation
     // target past the curve's edge, where `interpolateProbability` flat-holds the
     // endpoint probability -- so before the fix a 2x-span shift and a 1000x-span shift
     // returned IDENTICAL SizingResults: same band, same contracts, same notional, at
     // near-maximum Kelly. A hallucinated magnitude was indistinguishable from a real
     // one. Both must now decline, and each decline must name its own magnitude.
+    //
+    // This closes the bug for magnitudes beyond the curve's span, which is what made
+    // it possible to hallucinate a maximum-conviction trade from any input at all. It
+    // does NOT eliminate flat-holding entirely: a per-band target that lands past the
+    // curve's edge while still within the span guard (in-span magnitude, off-curve
+    // band center) still interpolates to that endpoint's probability -- bounded now by
+    // prices the market actually quoted, not by an unbounded extrapolation.
     const span = curveSpanPts(baseLadder());
     const large = evaluateSizing(baseInput({ magnitudePts: span * 2 }));
     const absurd = evaluateSizing(baseInput({ magnitudePts: span * 1000 }));

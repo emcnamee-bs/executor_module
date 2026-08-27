@@ -241,6 +241,16 @@ describe('ledger', () => {
     expect(() => insert.run()).toThrow(/constraint/i);
   });
 
+  it('rejects a would-trade record with a null eventTicker, which would otherwise bypass the per-event exposure trigger', () => {
+    // SQL three-valued logic: `event_ticker = NEW.event_ticker` is never true when
+    // NEW.event_ticker is NULL, so the enforce_total_exposure trigger's sum matches
+    // nothing and the cap never binds. Found by the final-review re-reviewer:
+    // five such rows inserted $50 of exposure with the cap never firing once.
+    expect(() =>
+      recordDecision(db, tradeRecordOfNotional(500, { eventTicker: null }))
+    ).toThrow(/constraint/i);
+  });
+
   // --- I4: one decision row per item_id ---------------------------------------
 
   it('reports no decision for an item never recorded', () => {

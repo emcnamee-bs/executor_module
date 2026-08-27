@@ -46,7 +46,17 @@ CREATE TABLE IF NOT EXISTS decisions (
   -- report zero exposure for a real $50 position. Deliberately redundant with
   -- recordDecision's construction-time check: this one also holds for a future code
   -- path that prepares its own INSERT.
-  CHECK (would_trade = 0 OR (entry_price_cents IS NOT NULL AND notional_cents = contracts * entry_price_cents))
+  --
+  -- event_ticker IS NOT NULL is required here too: the enforce_total_exposure
+  -- trigger below sums WHERE event_ticker = NEW.event_ticker, and SQL's
+  -- three-valued logic means that comparison is never true when NEW.event_ticker
+  -- is NULL -- a would-trade row with no event_ticker would otherwise sum against
+  -- nothing and bypass the exposure cap entirely, regardless of notional_cents.
+  CHECK (would_trade = 0 OR (
+    entry_price_cents IS NOT NULL
+    AND event_ticker IS NOT NULL
+    AND notional_cents = contracts * entry_price_cents
+  ))
 );
 
 -- Redis delivery is at-least-once, so the same item CAN arrive twice. The pipeline
