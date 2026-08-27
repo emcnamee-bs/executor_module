@@ -1381,7 +1381,16 @@ export async function verifySynopsis(
 ): Promise<VerifyResult> {
   const sourceText = [headline, snippet].filter((s): s is string => Boolean(s)).join('\n\n');
 
-  const response = await client.messages.create({
+  // NOTE: uses client.messages.parse() (not .create()) -- .parse() is what
+  // actually populates response.parsed_output for structured output; a
+  // plain .create() call leaves parsed_output undefined even with
+  // output_config.format set, and the JSON only exists in the raw text
+  // content, requiring manual extraction. Also uses a raw JSON schema, not
+  // the SDK's zodOutputFormat() helper -- slice 2 found zodOutputFormat
+  // incompatible with this project's installed zod version (a real SDK
+  // defect, see docs/superpowers/sdd ledger history for slice 2). Raw
+  // schema sidesteps it entirely.
+  const response = await client.messages.parse({
     model: 'claude-sonnet-5',
     max_tokens: 512,
     messages: [
@@ -1390,10 +1399,6 @@ export async function verifySynopsis(
         content: `Source text:\n${sourceText}\n\nProposed synopsis:\n${synopsis}\n\nDoes this synopsis accurately represent what the source text actually says, without adding claims the source does not make? Answer supported=true only if the synopsis is a faithful, non-exaggerated summary of the source text. Explain your answer briefly in "note".`,
       },
     ],
-    // NOTE: uses a raw JSON schema, not the SDK's zodOutputFormat() helper --
-    // slice 2 found zodOutputFormat incompatible with this project's installed
-    // zod version (a real SDK defect, see docs/superpowers/sdd ledger history
-    // for slice 2). Raw schema sidesteps it entirely.
     output_config: {
       format: { type: 'json_schema', schema: VERIFY_SCHEMA },
     } as Anthropic.Messages.MessageCreateParams['output_config'],
@@ -1549,7 +1554,12 @@ export async function decideTrade(
 ): Promise<DecideResult> {
   const sourceText = [headline, snippet].filter((s): s is string => Boolean(s)).join('\n\n');
 
-  const response = await client.messages.create({
+  // NOTE: uses client.messages.parse() (not .create()) -- .parse() is what
+  // actually populates response.parsed_output for structured output; this
+  // was confirmed the hard way in Task 6, which originally used .create()
+  // per an earlier draft of this plan and found parsed_output stayed
+  // undefined. Use .parse() here from the start.
+  const response = await client.messages.parse({
     model: 'claude-sonnet-5',
     max_tokens: 1024,
     messages: [
