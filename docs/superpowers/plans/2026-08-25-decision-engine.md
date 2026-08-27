@@ -627,16 +627,29 @@ git commit -m "feat: add decision ledger with redundant exposure ceilings"
 - Produces:
   - `export interface SizingInput { bands: BandMarket[]; rung: Rung; direction: 'up' | 'down'; magnitudePts: number; currentTotalExposureCents: number }`
   - `export interface SizingResult { wouldTrade: boolean; marketTicker: string | null; side: 'yes' | 'no' | null; contracts: number; entryPriceCents: number | null; notionalCents: number; edgeCents: number | null; reason: string }`
-  - `export function evaluateSizing(input: SizingInput): SizingResult`
+  - `export interface BandCandidate { ticker: string; side: 'yes' | 'no'; askCents: number; spreadCents: number; depthContracts: number; fairPriceCents: number; edgeCents: number }`
+  - `export interface GateVerdict { ok: boolean; reason: string }`
+  - `export function gateCandidate(candidate: BandCandidate): GateVerdict` — the pure microstructure/edge gate over one already-priced candidate, directly unit-testable at exact boundaries.
+  - `export function buildCandidatesForBand(band: BandMarket, curve: CurvePoint[], widthPts: number, signedMagnitudePts: number): BandCandidate[]` — 0, 1, or 2 candidates (yes/no) for one band; empty when the required raw prices are absent.
+  - `export interface CurvePoint { centerPts: number; probability: number }`
+  - `export function typicalBandWidthPts(bands: BandMarket[]): number`
+  - `export function buildProbabilityCurve(bands: BandMarket[], widthPts: number): CurvePoint[]`
+  - `export function evaluateSizing(input: SizingInput): SizingResult` — the orchestrator, built on the pieces above.
 
-This module is entirely pure — no network, no database. It is the money-math core and gets the most exhaustive test coverage in this plan.
+This module is entirely pure — no network, no database. It is the money-math core. The gate logic and per-band candidate construction are exported specifically so they can be unit-tested at exact boundaries, independent of the multi-band search — a test that only asserts something conditionally (`if (result.wouldTrade) {...}`) proves nothing when the condition is false, so every gate gets a direct, unconditional test here instead.
 
 - [ ] **Step 1: Write failing tests**
 
 ```typescript
 // test/decide/sizing.test.ts
 import { describe, it, expect } from 'vitest';
-import { evaluateSizing, type SizingInput } from '../../src/decide/sizing.js';
+import {
+  evaluateSizing,
+  gateCandidate,
+  buildCandidatesForBand,
+  type SizingInput,
+  type BandCandidate,
+} from '../../src/decide/sizing.js';
 import type { BandMarket } from '../../src/decide/kalshi.js';
 import type { Rung } from '../../src/decide/rung.js';
 
@@ -716,6 +729,110 @@ function baseInput(overrides: Partial<SizingInput> = {}): SizingInput {
   };
 }
 
+describe('gateCandidate', () => {
+  function candidate(overrides: Partial<BandCandidate> = {}): BandCandidate {
+    return {
+      ticker: 'K-TEST',
+      side: 'yes',
+      askCents: 40,
+      spreadCents: 2,
+      depthContracts: 10,
+      fairPriceCents: 45,
+      edgeCents: 5,
+      ...overrides,
+    };
+  }
+
+  it('passes a well-formed candidate', () => {
+    expect(gateCandidate(candidate()).ok).toBe(true);
+  });
+
+  it('rejects a spread over 5 cents', () => {
+    const v = gateCandidate(candidate({ spreadCents: 6 }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/spread/i);
+  });
+
+  it('accepts a spread exactly at the 5 cent boundary', () => {
+    expect(gateCandidate(candidate({ spreadCents: 5 })).ok).toBe(true);
+  });
+
+  it('rejects zero depth', () => {
+    const v = gateCandidate(candidate({ depthContracts: 0 }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/depth/i);
+  });
+
+  it('accepts depth exactly at the minimum of 1 contract', () => {
+    expect(gateCandidate(candidate({ depthContracts: 1 })).ok).toBe(true);
+  });
+
+  it('rejects a price below 10 cents', () => {
+    const v = gateCandidate(candidate({ askCents: 9 }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/range/i);
+  });
+
+  it('accepts a price exactly at the 10 cent floor', () => {
+    expect(gateCandidate(candidate({ askCents: 10 })).ok).toBe(true);
+  });
+
+  it('rejects a price above 90 cents', () => {
+    const v = gateCandidate(candidate({ askCents: 91 }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/range/i);
+  });
+
+  it('accepts a price exactly at the 90 cent ceiling', () => {
+    expect(gateCandidate(candidate({ askCents: 90 })).ok).toBe(true);
+  });
+
+  it('rejects edge below 0.5 cents', () => {
+    const v = gateCandidate(candidate({ edgeCents: 0.2 }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/edge/i);
+  });
+
+  it('accepts edge exactly at the 0.5 cent minimum', () => {
+    expect(gateCandidate(candidate({ edgeCents: 0.5 })).ok).toBe(true);
+  });
+});
+
+describe('buildCandidatesForBand', () => {
+  const flatCurve = [{ centerPts: 40.3, probability: 0.5 }];
+
+  it('produces a yes candidate when both yes ask and bid are present', () => {
+    const b = band({ yesAskCents: 40, yesBidCents: 38 });
+    const candidates = buildCandidatesForBand(b, flatCurve, 0.2, 0);
+    expect(candidates.some((c) => c.side === 'yes')).toBe(true);
+  });
+
+  it('produces a no candidate when both yes ask and bid are present', () => {
+    const b = band({ yesAskCents: 40, yesBidCents: 38 });
+    const candidates = buildCandidatesForBand(b, flatCurve, 0.2, 0);
+    expect(candidates.some((c) => c.side === 'no')).toBe(true);
+  });
+
+  it('produces no candidates when yesAskCents is null (no resting ask)', () => {
+    const b = band({ yesAskCents: null, yesBidCents: 38 });
+    const candidates = buildCandidatesForBand(b, flatCurve, 0.2, 0);
+    expect(candidates).toHaveLength(0);
+  });
+
+  it('produces no candidates when yesBidCents is null (no resting bid)', () => {
+    const b = band({ yesAskCents: 40, yesBidCents: null });
+    const candidates = buildCandidatesForBand(b, flatCurve, 0.2, 0);
+    expect(candidates).toHaveLength(0);
+  });
+
+  it('derives the no-side ask as 100 minus the yes bid', () => {
+    const b = band({ yesAskCents: 40, yesBidCents: 38 });
+    const candidates = buildCandidatesForBand(b, flatCurve, 0.2, 0);
+    const noCandidate = candidates.find((c) => c.side === 'no');
+    expect(noCandidate?.askCents).toBe(62); // 100 - 38
+  });
+});
+
 describe('evaluateSizing', () => {
   it('finds a would-trade band when an upward shift creates edge', () => {
     const result = evaluateSizing(baseInput());
@@ -736,38 +853,6 @@ describe('evaluateSizing', () => {
   it('declines when magnitude_pts is zero (no shift, no edge)', () => {
     const result = evaluateSizing(baseInput({ magnitudePts: 0 }));
     expect(result.wouldTrade).toBe(false);
-  });
-
-  it('declines a band whose spread exceeds 5 cents', () => {
-    const wideSpreadLadder = baseLadder().map((b) =>
-      b.ticker === 'K-40.4' ? { ...b, yesAskCents: 42, yesBidCents: 30 } : b
-    );
-    const result = evaluateSizing(baseInput({ bands: wideSpreadLadder, magnitudePts: 0.05 }));
-    // With every band's edge this small, the only band that might have cleared
-    // now fails the spread gate -- assert it is not the wide-spread band that traded.
-    if (result.wouldTrade) {
-      expect(result.marketTicker).not.toBe('K-40.4');
-    }
-  });
-
-  it('declines a band with zero depth at the entry price', () => {
-    const noDepthLadder = baseLadder().map((b) =>
-      b.ticker === 'K-40.4' ? { ...b, yesAskSizeContracts: 0 } : b
-    );
-    const result = evaluateSizing(baseInput({ bands: noDepthLadder }));
-    if (result.wouldTrade) {
-      expect(result.marketTicker).not.toBe('K-40.4');
-    }
-  });
-
-  it('declines a band with no resting ask on the entry side', () => {
-    const noAskLadder = baseLadder().map((b) =>
-      b.ticker === 'K-40.4' ? { ...b, yesAskCents: null } : b
-    );
-    const result = evaluateSizing(baseInput({ bands: noAskLadder }));
-    if (result.wouldTrade) {
-      expect(result.marketTicker).not.toBe('K-40.4');
-    }
   });
 
   it('declines every band when price is outside the 10-90 cent tradeable range', () => {
@@ -858,7 +943,47 @@ export interface SizingResult {
   reason: string;
 }
 
-function typicalBandWidthPts(bands: BandMarket[]): number {
+export interface BandCandidate {
+  ticker: string;
+  side: 'yes' | 'no';
+  askCents: number;
+  spreadCents: number;
+  depthContracts: number;
+  fairPriceCents: number;
+  edgeCents: number;
+}
+
+export interface GateVerdict {
+  ok: boolean;
+  reason: string;
+}
+
+export interface CurvePoint {
+  centerPts: number;
+  probability: number;
+}
+
+/** Pure microstructure/edge gate over one already-priced candidate. */
+export function gateCandidate(candidate: BandCandidate): GateVerdict {
+  if (candidate.askCents < MIN_PRICE_CENTS || candidate.askCents > MAX_PRICE_CENTS) {
+    return {
+      ok: false,
+      reason: `price ${candidate.askCents}c outside tradeable range [${MIN_PRICE_CENTS},${MAX_PRICE_CENTS}]`,
+    };
+  }
+  if (candidate.spreadCents > MAX_SPREAD_CENTS) {
+    return { ok: false, reason: `spread ${candidate.spreadCents}c exceeds ${MAX_SPREAD_CENTS}c` };
+  }
+  if (candidate.depthContracts < MIN_DEPTH_CONTRACTS) {
+    return { ok: false, reason: `depth ${candidate.depthContracts} below minimum ${MIN_DEPTH_CONTRACTS}` };
+  }
+  if (candidate.edgeCents < MIN_EDGE_CENTS) {
+    return { ok: false, reason: `edge ${candidate.edgeCents.toFixed(2)}c below minimum ${MIN_EDGE_CENTS}c` };
+  }
+  return { ok: true, reason: 'clears all gates' };
+}
+
+export function typicalBandWidthPts(bands: BandMarket[]): number {
   const widths = bands
     .filter((b): b is BandMarket & { floorStrike: number; capStrike: number } =>
       b.floorStrike !== null && b.capStrike !== null
@@ -886,12 +1011,7 @@ function bandYesProbability(band: BandMarket): number | null {
   return (band.yesAskCents + band.yesBidCents) / 200;
 }
 
-interface CurvePoint {
-  centerPts: number;
-  probability: number;
-}
-
-function buildProbabilityCurve(bands: BandMarket[], widthPts: number): CurvePoint[] {
+export function buildProbabilityCurve(bands: BandMarket[], widthPts: number): CurvePoint[] {
   const points: CurvePoint[] = [];
   for (const b of bands) {
     const p = bandYesProbability(b);
@@ -923,17 +1043,7 @@ function kellyFraction(fairPriceCents: number, askCents: number): number {
   return Math.max(0, fraction);
 }
 
-interface BandCandidate {
-  ticker: string;
-  side: 'yes' | 'no';
-  askCents: number;
-  spreadCents: number;
-  depthContracts: number;
-  fairPriceCents: number;
-  edgeCents: number;
-}
-
-function evaluateBand(
+export function buildCandidatesForBand(
   band: BandMarket,
   curve: CurvePoint[],
   widthPts: number,
@@ -1006,17 +1116,22 @@ export function evaluateSizing(input: SizingInput): SizingResult {
   }
 
   let best: BandCandidate | null = null;
+  let lastGateFailureReason: string | null = null;
 
   for (const band of input.bands) {
     if (band.status !== 'active') continue;
-    for (const candidate of evaluateBand(band, curve, widthPts, signedMagnitudePts)) {
-      if (candidate.askCents < MIN_PRICE_CENTS || candidate.askCents > MAX_PRICE_CENTS) continue;
-      if (candidate.spreadCents > MAX_SPREAD_CENTS) continue;
-      if (candidate.depthContracts < MIN_DEPTH_CONTRACTS) continue;
-      if (candidate.edgeCents < MIN_EDGE_CENTS) continue;
+    for (const candidate of buildCandidatesForBand(band, curve, widthPts, signedMagnitudePts)) {
+      const verdict = gateCandidate(candidate);
+      if (!verdict.ok) {
+        lastGateFailureReason = verdict.reason;
+        continue;
+      }
 
       const kelly = kellyFraction(candidate.fairPriceCents, candidate.askCents);
-      if (kelly <= 0) continue;
+      if (kelly <= 0) {
+        lastGateFailureReason = 'zero Kelly fraction';
+        continue;
+      }
 
       if (best === null || candidate.edgeCents > best.edgeCents) {
         best = candidate;
@@ -1025,7 +1140,7 @@ export function evaluateSizing(input: SizingInput): SizingResult {
   }
 
   if (best === null) {
-    return decline('no band cleared the tradeability/edge gates after the fair-value shift');
+    return decline(lastGateFailureReason ?? 'no band cleared the tradeability/edge gates after the fair-value shift');
   }
 
   const kelly = kellyFraction(best.fairPriceCents, best.askCents);
