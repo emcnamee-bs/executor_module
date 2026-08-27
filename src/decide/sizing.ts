@@ -8,7 +8,7 @@ const MIN_DEPTH_CONTRACTS = 1;
 const MIN_PRICE_CENTS = 10;
 const MAX_PRICE_CENTS = 90;
 const MIN_EDGE_CENTS = 0.5;
-const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
+export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
 const MAX_TOTAL_EXPOSURE_CENTS = 4000;
 const DEFAULT_BAND_WIDTH_PTS = 0.2;
 
@@ -81,7 +81,11 @@ export function typicalBandWidthPts(bands: BandMarket[]): number {
   return widths.reduce((a, w) => a + w, 0) / widths.length;
 }
 
-function bandMidpointPts(band: BandMarket, widthPts: number): number {
+/**
+ * null for a malformed band with neither strike set. Failing soft matters: a live
+ * decision loop must lose one unusable band, not the whole cycle to an exception.
+ */
+function bandMidpointPts(band: BandMarket, widthPts: number): number | null {
   if (band.floorStrike !== null && band.capStrike !== null) {
     return (band.floorStrike + band.capStrike) / 2;
   }
@@ -91,7 +95,7 @@ function bandMidpointPts(band: BandMarket, widthPts: number): number {
   if (band.capStrike !== null) {
     return band.capStrike - widthPts / 2;
   }
-  throw new Error(`band ${band.ticker} has neither floorStrike nor capStrike`);
+  return null;
 }
 
 function bandYesProbability(band: BandMarket): number | null {
@@ -104,7 +108,9 @@ export function buildProbabilityCurve(bands: BandMarket[], widthPts: number): Cu
   for (const b of bands) {
     const p = bandYesProbability(b);
     if (p === null) continue;
-    points.push({ centerPts: bandMidpointPts(b, widthPts), probability: p });
+    const centerPts = bandMidpointPts(b, widthPts);
+    if (centerPts === null) continue; // malformed band: no usable center, contributes nothing
+    points.push({ centerPts, probability: p });
   }
   return points.sort((a, b) => a.centerPts - b.centerPts);
 }
@@ -125,7 +131,13 @@ function interpolateProbability(curve: CurvePoint[], targetPts: number): number 
   return 0;
 }
 
-function kellyFraction(fairPriceCents: number, askCents: number): number {
+/** A probability is a probability, whatever the upstream quote claimed. */
+function clampProbability(p: number): number {
+  if (!Number.isFinite(p)) return 0;
+  return Math.min(1, Math.max(0, p));
+}
+
+export function kellyFraction(fairPriceCents: number, askCents: number): number {
   if (!(askCents > 0 && askCents < SETTLEMENT_CENTS)) return 0;
   const fraction = (fairPriceCents - askCents) / (SETTLEMENT_CENTS - askCents);
   return Math.max(0, fraction);
@@ -137,8 +149,14 @@ export function buildCandidatesForBand(
   widthPts: number,
   signedMagnitudePts: number
 ): BandCandidate[] {
-  const targetPts = bandMidpointPts(band, widthPts) - signedMagnitudePts;
-  const fairProbability = interpolateProbability(curve, targetPts);
+  const centerPts = bandMidpointPts(band, widthPts);
+  if (centerPts === null) return [];
+  const targetPts = centerPts - signedMagnitudePts;
+  // Second, independent ceiling: a probability is a probability. An out-of-range
+  // upstream quote (nothing bounds Kalshi prices to [0,100]) can push a curve point
+  // above 1.0, which would otherwise yield a fair value over 100c and a Kelly
+  // fraction over 1.0 -- the exact path that breached the per-trade notional cap.
+  const fairProbability = clampProbability(interpolateProbability(curve, targetPts));
   const fairPriceCents = Math.round(fairProbability * 100);
   const candidates: BandCandidate[] = [];
 
@@ -235,7 +253,14 @@ export function evaluateSizing(input: SizingInput): SizingResult {
   const byCeiling = Math.floor(MAX_NOTIONAL_CENTS_PER_TRADE / best.askCents);
   const byExposureRemaining = Math.floor(remainingExposureCents / best.askCents);
   const byKellyStake = Math.floor(byCeiling * kelly * stake);
-  const contracts = Math.max(0, Math.min(byKellyStake, best.depthContracts, byExposureRemaining));
+  // `byCeiling` is in this min as well as in the multiplication above: scaling by
+  // `kelly * stake` only respects the per-trade cap while that product is <= 1, which
+  // is a property of other code, not of this line. Included here it is an
+  // unconditional hard clamp on the output.
+  const contracts = Math.max(
+    0,
+    Math.min(byKellyStake, byCeiling, best.depthContracts, byExposureRemaining)
+  );
 
   if (contracts <= 0) {
     return decline('sized to zero contracts after Kelly/stake/depth/exposure clamps');

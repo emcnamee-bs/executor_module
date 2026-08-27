@@ -4,6 +4,7 @@ import {
   evaluateSizing,
   gateCandidate,
   buildCandidatesForBand,
+  MAX_NOTIONAL_CENTS_PER_TRADE,
   type SizingInput,
   type BandCandidate,
 } from '../../src/decide/sizing.js';
@@ -226,6 +227,31 @@ describe('evaluateSizing', () => {
       baseInput({ bands: cheapLadder, rung: 'confirmed', magnitudePts: 5 })
     );
     expect(result.notionalCents).toBeLessThanOrEqual(1000);
+  });
+
+  it('holds the $10 per-trade cap even when an out-of-range quote poisons the fair-value curve', () => {
+    // Reviewer's reproduction: one band carries an impossible 150c quote (nothing
+    // upstream bounds Kalshi prices to [0,100]). That band is itself untradeable on
+    // price, but it sits in the shared probability curve, so the *legally priced*
+    // A-good band interpolates a fair value of 150c, a Kelly fraction of 2.0, and
+    // -- before this fix -- traded 40 contracts at 50c for 2000c of notional: a
+    // clean 2x breach of the $10 per-trade cap.
+    const poisonedLadder: BandMarket[] = [
+      band({ ticker: 'A-lo', floorStrike: 40.0, capStrike: 40.2, yesAskCents: 20, yesBidCents: 18 }),
+      band({ ticker: 'A-bad', floorStrike: 40.2, capStrike: 40.4, yesAskCents: 150, yesBidCents: 150 }),
+      band({
+        ticker: 'A-good',
+        floorStrike: 40.4,
+        capStrike: 40.6,
+        yesAskCents: 50,
+        yesBidCents: 48,
+        yesAskSizeContracts: 100000,
+      }),
+    ];
+    const result = evaluateSizing(
+      baseInput({ bands: poisonedLadder, rung: 'confirmed', magnitudePts: 0.2 })
+    );
+    expect(result.notionalCents).toBeLessThanOrEqual(MAX_NOTIONAL_CENTS_PER_TRADE);
   });
 
   it('declines when the trade would push total exposure over the $40 cap', () => {
