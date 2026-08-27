@@ -11,6 +11,14 @@ const MIN_EDGE_CENTS = 0.5;
 export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
 const MAX_TOTAL_EXPOSURE_CENTS = 4000;
 const DEFAULT_BAND_WIDTH_PTS = 0.2;
+/**
+ * Kalshi's own bid-ask spread means the mid-price-implied probabilities across a
+ * ladder never sum to exactly 1.0. Well outside this window, though, the ladder is
+ * not a distribution we can compute an edge against -- every band's edge inherits
+ * the inflation -- so the whole call is declined rather than traded on.
+ */
+const MIN_IMPLIED_SUM = 0.85;
+const MAX_IMPLIED_SUM = 1.15;
 
 export interface SizingInput {
   bands: BandMarket[];
@@ -53,6 +61,15 @@ export interface CurvePoint {
 
 /** Pure microstructure/edge gate over one already-priced candidate. */
 export function gateCandidate(candidate: BandCandidate): GateVerdict {
+  // A crossed book (ask below bid) is not a microstructure state to price around,
+  // it is evidence the quote itself is wrong. Checked before anything else, since
+  // every other number on this candidate comes from the same bad book.
+  if (candidate.spreadCents < 0) {
+    return {
+      ok: false,
+      reason: `crossed/negative spread: ${candidate.spreadCents}c -- bad quote`,
+    };
+  }
   if (candidate.askCents < MIN_PRICE_CENTS || candidate.askCents > MAX_PRICE_CENTS) {
     return {
       ok: false,
@@ -191,6 +208,33 @@ export function buildCandidatesForBand(
   return candidates;
 }
 
+export interface ContractCapInput {
+  askCents: number;
+  kelly: number;
+  stake: number;
+  depthContracts: number;
+  remainingExposureCents: number;
+}
+
+/**
+ * Every size clamp in one place, exported so the per-trade notional cap can be
+ * tested directly against inputs the rest of the module is supposed to make
+ * impossible (a Kelly fraction above 1.0, say). The cap must hold for *any*
+ * `kelly`/`stake` this is handed, not only for the ones currently reachable.
+ */
+export function contractsWithinCaps(input: ContractCapInput): number {
+  if (!(input.askCents > 0)) return 0;
+  const byCeiling = Math.floor(MAX_NOTIONAL_CENTS_PER_TRADE / input.askCents);
+  const byExposureRemaining = Math.floor(input.remainingExposureCents / input.askCents);
+  const byKellyStake = Math.floor(byCeiling * input.kelly * input.stake);
+  if (!Number.isFinite(byKellyStake)) return 0;
+  // `byCeiling` is in this min as well as in the multiplication above: scaling by
+  // `kelly * stake` only respects the per-trade cap while that product is <= 1, which
+  // is a property of other code, not of this line. Included here it is an
+  // unconditional hard clamp on the output.
+  return Math.max(0, Math.min(byKellyStake, byCeiling, input.depthContracts, byExposureRemaining));
+}
+
 export function evaluateSizing(input: SizingInput): SizingResult {
   const decline = (reason: string): SizingResult => ({
     wouldTrade: false,
@@ -214,6 +258,17 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     return decline('no band has a usable two-sided price; cannot build a fair-value curve');
   }
 
+  // Sanity-check the ladder as a distribution before any fair-value/edge/Kelly math:
+  // the curve points are exactly the bands with a real two-sided price and a usable
+  // center, so this sums the same set the interpolation would read.
+  const impliedSum = curve.reduce((total, point) => total + point.probability, 0);
+  if (impliedSum < MIN_IMPLIED_SUM || impliedSum > MAX_IMPLIED_SUM) {
+    return decline(
+      `implied distribution sums to ${impliedSum.toFixed(3)}, outside sane range ` +
+        `[${MIN_IMPLIED_SUM},${MAX_IMPLIED_SUM}] -- declining as unreliable data`
+    );
+  }
+
   const signedMagnitudePts = input.direction === 'up' ? input.magnitudePts : -input.magnitudePts;
 
   const remainingExposureCents = MAX_TOTAL_EXPOSURE_CENTS - input.currentTotalExposureCents;
@@ -226,6 +281,13 @@ export function evaluateSizing(input: SizingInput): SizingResult {
 
   for (const band of input.bands) {
     if (band.status !== 'active') continue;
+    // Unbounded tail bands ('less'/'greater') keep contributing to the curve above --
+    // their price is still real information about where the distribution sits -- but
+    // they are never tradeable candidates. An open-ended tail's probability mass is
+    // not the same quantity as a bounded interior band's, so the synthetic center
+    // `bandMidpointPts` invents for it cannot be compared to interior bands on the
+    // same curve, and any "edge" that comparison produces is a pricing artifact.
+    if (band.strikeType !== 'between') continue;
     for (const candidate of buildCandidatesForBand(band, curve, widthPts, signedMagnitudePts)) {
       const verdict = gateCandidate(candidate);
       if (!verdict.ok) {
@@ -250,17 +312,13 @@ export function evaluateSizing(input: SizingInput): SizingResult {
   }
 
   const kelly = kellyFraction(best.fairPriceCents, best.askCents);
-  const byCeiling = Math.floor(MAX_NOTIONAL_CENTS_PER_TRADE / best.askCents);
-  const byExposureRemaining = Math.floor(remainingExposureCents / best.askCents);
-  const byKellyStake = Math.floor(byCeiling * kelly * stake);
-  // `byCeiling` is in this min as well as in the multiplication above: scaling by
-  // `kelly * stake` only respects the per-trade cap while that product is <= 1, which
-  // is a property of other code, not of this line. Included here it is an
-  // unconditional hard clamp on the output.
-  const contracts = Math.max(
-    0,
-    Math.min(byKellyStake, byCeiling, best.depthContracts, byExposureRemaining)
-  );
+  const contracts = contractsWithinCaps({
+    askCents: best.askCents,
+    kelly,
+    stake,
+    depthContracts: best.depthContracts,
+    remainingExposureCents,
+  });
 
   if (contracts <= 0) {
     return decline('sized to zero contracts after Kelly/stake/depth/exposure clamps');
