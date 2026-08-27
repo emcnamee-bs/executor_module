@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   magnitude_pts REAL,
   contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
   entry_price_cents INTEGER CHECK (entry_price_cents IS NULL OR (entry_price_cents > 0 AND entry_price_cents < 100)),
-  notional_cents INTEGER NOT NULL DEFAULT 0 CHECK (notional_cents >= 0 AND notional_cents <= ${MAX_NOTIONAL_CENTS_PER_TRADE}),
+  notional_cents INTEGER NOT NULL DEFAULT 0 CHECK (notional_cents >= 0 AND (would_trade = 0 OR notional_cents <= ${MAX_NOTIONAL_CENTS_PER_TRADE})),
   edge_cents REAL,
   would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
   reason TEXT NOT NULL,

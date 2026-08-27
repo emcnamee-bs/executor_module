@@ -82,6 +82,10 @@ describe('ledger', () => {
     expect(() => recordDecision(db, skipRecord({ notionalCents: 0 }))).not.toThrow();
   });
 
+  it('exempts a skip decision from the per-trade notional CHECK constraint even when notionalCents is far above the cap', () => {
+    expect(() => recordDecision(db, skipRecord({ notionalCents: 5000 }))).not.toThrow();
+  });
+
   it('reports no open position for a story never recorded', () => {
     expect(hasOpenPosition(db, 'story-unknown', 'KXAPRPOTUS-26AUG28')).toBe(false);
   });
