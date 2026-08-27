@@ -9,6 +9,7 @@ import { openLedger } from './decide/ledger.js';
 import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
 import Anthropic from '@anthropic-ai/sdk';
+import type Database from 'better-sqlite3';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -63,6 +64,38 @@ export async function runOnce(
   }, signal);
 }
 
+export interface OnItemDeps {
+  anthropicClient: Anthropic;
+  db: Database.Database;
+  fetchLadder: typeof fetchActiveLadder;
+}
+
+/**
+ * The real consumer callback, extracted from `main()` so the one seam that matters
+ * -- a matched stream entry actually reaching the decision pipeline and landing in
+ * the ledger -- is testable. While this was defined inline inside `main()`,
+ * deleting the `runDecisionPipeline` call left the whole test suite green.
+ */
+export function makeOnItem(deps: OnItemDeps): OnItem {
+  return async (outcome) => {
+    if (!outcome.ok) {
+      console.error(`[parse-error] entry=${outcome.entry.id} error=${outcome.error} raw=${outcome.raw}`);
+      return;
+    }
+    console.log(formatSummaryLine(outcome.item));
+    if (outcome.matchedPhrases.length === 0) return;
+
+    console.log(
+      `[KEYPHRASE-MATCH] item=${outcome.item.item_id} phrases=${JSON.stringify(outcome.matchedPhrases)} headline=${outcome.item.headline}`
+    );
+    try {
+      await runDecisionPipeline(outcome.item, deps);
+    } catch (err) {
+      console.error(`[decision-pipeline] error processing item=${outcome.item.item_id}:`, err);
+    }
+  };
+}
+
 export async function main(): Promise<void> {
   const keyphrases = loadKeyphrases(DEFAULT_KEYPHRASES_PATH);
   const compiledPhrases = compilePhrases(keyphrases);
@@ -91,31 +124,12 @@ export async function main(): Promise<void> {
     client,
     { streamKey: STREAM_KEY, groupName: GROUP_NAME, consumerName: CONSUMER_NAME },
     compiledPhrases,
-    async (outcome) => {
-      if (!outcome.ok) {
-        console.error(`[parse-error] entry=${outcome.entry.id} error=${outcome.error} raw=${outcome.raw}`);
-        return;
-      }
-      console.log(formatSummaryLine(outcome.item));
-      if (outcome.matchedPhrases.length > 0) {
-        console.log(
-          `[KEYPHRASE-MATCH] item=${outcome.item.item_id} phrases=${JSON.stringify(outcome.matchedPhrases)} headline=${outcome.item.headline}`
-        );
-        try {
-          await runDecisionPipeline(outcome.item, {
-            anthropicClient,
-            db,
-            fetchLadder: fetchActiveLadder,
-          });
-        } catch (err) {
-          console.error(`[decision-pipeline] error processing item=${outcome.item.item_id}:`, err);
-        }
-      }
-    },
+    makeOnItem({ anthropicClient, db, fetchLadder: fetchActiveLadder }),
     controller.signal
   );
 
   await client.quit();
+  db.close();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

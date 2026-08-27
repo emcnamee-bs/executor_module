@@ -16,4 +16,4 @@ node_modules/
 .DS_Store
 
 # Runtime state — generated, not source. See task-3 brief.
-data/decisions.db
+data/decisions.db*

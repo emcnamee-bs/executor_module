@@ -1,8 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import Anthropic from '@anthropic-ai/sdk';
 import { createRedisClient } from '../src/redis/client.js';
-import { runOnce, type ItemOutcome } from '../src/main.js';
+import { runOnce, makeOnItem, type ItemOutcome } from '../src/main.js';
 import { compilePhrases } from '../src/keyphrases/match.js';
+import { openLedger } from '../src/decide/ledger.js';
+import type { ActiveLadder } from '../src/decide/kalshi.js';
+import * as synopsisModule from '../src/decide/synopsis.js';
+import * as verifyModule from '../src/decide/verify.js';
+import * as decideModule from '../src/decide/decide.js';
 import type { RedisClientType } from 'redis';
 
 function realisticPayload(overrides: Record<string, unknown> = {}) {
@@ -35,6 +44,55 @@ function realisticPayload(overrides: Record<string, unknown> = {}) {
     amends_item_id: null,
     amendment_kind: null,
     ...overrides,
+  };
+}
+
+/**
+ * Same fixture as `test/decide/pipeline.test.ts`'s `stubLadder()`: a ladder whose
+ * bands are spaced widely enough that a 0.3pt shift lands inside the fair-value
+ * curve and clears `evaluateSizing`'s gates, so the wiring test below exercises the
+ * real would-trade path rather than an early decline. Duplicated rather than
+ * imported, since importing from another test file would re-run its suite.
+ */
+function stubLadder(): ActiveLadder {
+  return {
+    eventTicker: 'KXAPRPOTUS-26AUG28',
+    strikeDate: '2026-08-28T16:00:00Z',
+    bands: [
+      {
+        ticker: 'KXAPRPOTUS-26AUG28-40.2',
+        floorStrike: 39.8,
+        capStrike: 40.2,
+        strikeType: 'between',
+        status: 'active',
+        yesAskCents: 20,
+        yesBidCents: 18,
+        yesAskSizeContracts: 500,
+        yesBidSizeContracts: 500,
+      },
+      {
+        ticker: 'KXAPRPOTUS-26AUG28-40.6',
+        floorStrike: 40.2,
+        capStrike: 40.6,
+        strikeType: 'between',
+        status: 'active',
+        yesAskCents: 60,
+        yesBidCents: 58,
+        yesAskSizeContracts: 500,
+        yesBidSizeContracts: 500,
+      },
+      {
+        ticker: 'KXAPRPOTUS-26AUG28-41.0',
+        floorStrike: 40.6,
+        capStrike: null,
+        strikeType: 'greater',
+        status: 'active',
+        yesAskCents: 12,
+        yesBidCents: 10,
+        yesAskSizeContracts: 500,
+        yesBidSizeContracts: 500,
+      },
+    ],
   };
 }
 
@@ -357,5 +415,130 @@ describe('runOnce with keyphrase matching (end-to-end)', () => {
     );
 
     expect(order).toEqual(['onItem-start', 'onItem-end']);
+  });
+});
+
+/**
+ * The one test that proves the WIRING, not the pieces. `test/decide/pipeline.test.ts`
+ * calls `runDecisionPipeline` directly and the suite above drives `runOnce` with its
+ * own callback, so before this existed, deleting the `runDecisionPipeline` call from
+ * `main.ts` altogether left the whole suite green.
+ */
+describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledger row)', () => {
+  let client: RedisClientType;
+  let streamKey: string;
+  let groupName: string;
+  let dir: string;
+  let db: ReturnType<typeof openLedger>;
+
+  beforeEach(async () => {
+    client = createRedisClient();
+    await client.connect();
+    streamKey = `test:iip:items:${randomUUID()}`;
+    groupName = `test-execmod-${randomUUID()}`;
+    dir = mkdtempSync(path.join(tmpdir(), 'main-wiring-test-'));
+    db = openLedger(path.join(dir, 'test.db'));
+    delete process.env.EXECUTOR_TRADING_HALTED;
+
+    vi.spyOn(synopsisModule, 'synopsize').mockResolvedValue('The unemployment rate fell to 3.9%.');
+    vi.spyOn(verifyModule, 'verifySynopsis').mockResolvedValue({ supported: true, note: 'faithful' });
+    vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({
+      direction: 'up',
+      magnitudePts: 0.3,
+      shouldTrade: true,
+      reasoning: 'stronger-than-expected jobs data typically lifts approval',
+    });
+    // The real callback logs a summary line and a [KEYPHRASE-MATCH] line per item;
+    // silenced so this test's output stays clean, not to suppress a failure.
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    await client.del(streamKey);
+    await client.quit();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('writes a real would-trade ledger row for a matched entry consumed off the stream', async () => {
+    const payload = realisticPayload({
+      headline: 'Trump approval rating drops after new jobs report',
+      snippet: 'The unemployment rate declined to 3.9% in July.',
+    });
+    await client.xAdd(streamKey, '*', { json: JSON.stringify(payload) });
+
+    const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
+    const onItem = makeOnItem({
+      anthropicClient: new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' }),
+      db,
+      fetchLadder,
+    });
+
+    const controller = new AbortController();
+    await runOnce(
+      client,
+      { streamKey, groupName, consumerName: 'consumer-wiring', blockMs: 500, count: 10 },
+      compilePhrases(['trump approval rating']),
+      async (outcome) => {
+        await onItem(outcome); // the real production callback, unmodified
+        controller.abort(); // test-only: stop the consumer after this one entry
+      },
+      controller.signal
+    );
+
+    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS');
+
+    const rows = db
+      .prepare(
+        `SELECT item_id, would_trade, event_ticker, market_ticker, contracts,
+                entry_price_cents, notional_cents, rung
+         FROM decisions WHERE item_id = ?`
+      )
+      .all(payload.item_id) as Array<{
+      item_id: string;
+      would_trade: number;
+      event_ticker: string | null;
+      market_ticker: string | null;
+      contracts: number;
+      entry_price_cents: number | null;
+      notional_cents: number;
+      rung: string;
+    }>;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].would_trade).toBe(1);
+    expect(rows[0].event_ticker).toBe('KXAPRPOTUS-26AUG28');
+    expect(rows[0].rung).toBe('reported');
+    expect(rows[0].contracts).toBeGreaterThan(0);
+    expect(rows[0].notional_cents).toBe(rows[0].contracts * rows[0].entry_price_cents!);
+    expect(rows[0].notional_cents).toBeLessThanOrEqual(1000);
+  });
+
+  it('does not run the decision pipeline for an entry that matched no keyphrase', async () => {
+    const payload = realisticPayload({ headline: 'Local weather stays mild this week' });
+    await client.xAdd(streamKey, '*', { json: JSON.stringify(payload) });
+
+    const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
+    const onItem = makeOnItem({
+      anthropicClient: new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' }),
+      db,
+      fetchLadder,
+    });
+
+    const controller = new AbortController();
+    await runOnce(
+      client,
+      { streamKey, groupName, consumerName: 'consumer-wiring-nomatch', blockMs: 500, count: 10 },
+      compilePhrases(['trump approval rating']),
+      async (outcome) => {
+        await onItem(outcome);
+        controller.abort();
+      },
+      controller.signal
+    );
+
+    expect(synopsisModule.synopsize).not.toHaveBeenCalled();
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM decisions`).get()).toEqual({ n: 0 });
   });
 });

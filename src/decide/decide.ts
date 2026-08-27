@@ -8,6 +8,28 @@ export interface DecideResult {
   reasoning: string;
 }
 
+/**
+ * Sanity ceiling on `magnitude_pts`, in percentage points of RCP's approval
+ * average. RCP's weekly average moving 10 points off a single news item would be
+ * an extraordinary, essentially unprecedented event -- this is a generous outer
+ * bound on "a real number", not an expected value. It exists because
+ * `magnitude_pts` is the one value that converts a qualitative Sonnet judgment
+ * into a sized bet: unbounded, a hallucinated 1000 sizes exactly like a
+ * plausible 0.5 (the fair-value curve flat-holds past its domain), so a
+ * malformed magnitude is otherwise indistinguishable from a real one at
+ * near-maximum Kelly. `evaluateSizing` carries a second, independent ceiling of
+ * its own (the usable curve span) for whatever number actually arrives.
+ */
+export const MAX_MAGNITUDE_PTS = 10;
+
+// NOTE: `magnitude_pts` deliberately carries NO `minimum`/`maximum`. Anthropic's
+// structured outputs do not support numerical constraints, and this schema is a
+// hand-built object (not a Zod schema the SDK would strip them from), so adding
+// them makes every live decideTrade call fail with
+// `400 ... For 'number' type, properties maximum, minimum are not supported`.
+// Confirmed the hard way against the real API. The bounds are enforced instead by
+// DECIDE_CONTEXT below (what Sonnet is asked for) and validateDecideOutput (what is
+// accepted), with evaluateSizing's curve-span check as the independent third layer.
 const DECIDE_SCHEMA = {
   type: 'object',
   properties: {
@@ -24,7 +46,7 @@ const DECIDE_CONTEXT = `You are assessing a news item for its likely effect on t
 
 Estimate:
 - direction: "up" if this news plausibly pushes approval higher, "down" if lower.
-- magnitude_pts: your best estimate of how many PERCENTAGE POINTS of RCP's approval average this might move, as a NON-NEGATIVE number (direction already carries the sign -- magnitude_pts is always >= 0). Typical single-item moves are small (a fraction of a point to a few points); reserve larger numbers for genuinely major news.
+- magnitude_pts: your best estimate of how many PERCENTAGE POINTS of RCP's approval average this might move, as a NON-NEGATIVE number (direction already carries the sign -- magnitude_pts is always >= 0) and AT MOST ${MAX_MAGNITUDE_PTS}. Typical single-item moves are small (a fraction of a point to a few points); reserve larger numbers for genuinely major news. A value above ${MAX_MAGNITUDE_PTS} is rejected outright rather than treated as a bigger move -- RCP's weekly average has essentially never moved that far off a single news item.
 - should_trade: false if this item is too indirect, too old, too speculative, or otherwise not something you'd act on even if the arithmetic above looked favorable. This is your chance to veto a trade regardless of direction/magnitude.
 - reasoning: a brief explanation of your judgment.
 
@@ -35,8 +57,9 @@ You are told the story's evidentiary rung for context only (rumor/reported/corro
  * reach the sizing/order-execution stages downstream. `parsed_output` being present
  * is not proof it has the shape we asked for -- it can be `null`, missing fields, or
  * carry a negative `magnitude_pts` (direction already carries the sign, so a negative
- * magnitude is a model error, not a valid "large downward move"). Without this check
- * bad output could flow straight into a real order.
+ * magnitude is a model error, not a valid "large downward move") or one above
+ * `MAX_MAGNITUDE_PTS` (not a bigger bet, just a number no real news item produces).
+ * Without this check bad output could flow straight into a real order.
  */
 export function validateDecideOutput(parsed: unknown): DecideResult {
   if (typeof parsed !== 'object' || parsed === null) {
@@ -48,6 +71,11 @@ export function validateDecideOutput(parsed: unknown): DecideResult {
   }
   if (typeof p.magnitude_pts !== 'number' || !Number.isFinite(p.magnitude_pts) || p.magnitude_pts < 0) {
     throw new Error(`Sonnet returned an invalid magnitude_pts: ${JSON.stringify(p.magnitude_pts)}`);
+  }
+  if (p.magnitude_pts > MAX_MAGNITUDE_PTS) {
+    throw new Error(
+      `Sonnet returned an out-of-range magnitude_pts (above the ${MAX_MAGNITUDE_PTS}pt sanity ceiling): ${JSON.stringify(p.magnitude_pts)}`
+    );
   }
   if (typeof p.should_trade !== 'boolean') {
     throw new Error(`Sonnet returned an invalid should_trade: ${JSON.stringify(p.should_trade)}`);

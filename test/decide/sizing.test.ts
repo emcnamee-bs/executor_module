@@ -89,6 +89,13 @@ function impliedSum(bands: BandMarket[]): number {
   return buildProbabilityCurve(bands, widthPts).reduce((total, p) => total + p.probability, 0);
 }
 
+/** The usable curve span (highest center minus lowest) the span guard will see. */
+function curveSpanPts(bands: BandMarket[]): number {
+  const widthPts = typicalBandWidthPts(bands);
+  const curve = buildProbabilityCurve(bands, widthPts);
+  return curve.length > 1 ? curve[curve.length - 1].centerPts - curve[0].centerPts : 0;
+}
+
 function baseInput(overrides: Partial<SizingInput> = {}): SizingInput {
   return {
     bands: baseLadder(),
@@ -379,7 +386,11 @@ describe('evaluateSizing', () => {
       band({ ticker: 'X-lo', floorStrike: 40.2, capStrike: 40.4, yesAskCents: 9, yesBidCents: 7 }),
     ];
     expect(impliedSum(extremeLadder)).toBeCloseTo(1.02, 10);
-    const result = evaluateSizing(baseInput({ bands: extremeLadder }));
+    // magnitudePts 0.1 rather than the baseInput default of 0.3: a two-band ladder's
+    // usable curve span is only 0.2pts, and a 0.3pt shift now declines on the
+    // curve-span guard before any price gate is reached. 0.1 keeps the price gate as
+    // what declines this ladder, which is what the test is about.
+    const result = evaluateSizing(baseInput({ bands: extremeLadder, magnitudePts: 0.1 }));
     expect(result.wouldTrade).toBe(false);
     expect(result.reason).toMatch(/range/i);
   });
@@ -392,12 +403,21 @@ describe('evaluateSizing', () => {
     // binds -- only the per-trade ceiling does.
     //   byCeiling = floor(1000 / 12) = 83   -> 83 * 12 = 996c, just under the cap
     //   84 contracts would be 1008c, over it
+    //
+    // Strikes/magnitude changed by the curve-span fix: a Kelly of exactly 1.0 needs a
+    // fair value of exactly 100c, which is only reachable when the shifted target
+    // lands ON the curve's 1.0-probability endpoint -- i.e. magnitude == curve span
+    // exactly (the largest shift the span guard allows). 1.0pt-wide bands are used so
+    // the centers (40.5, 41.5) and their difference (exactly 1.0) are exactly
+    // representable in IEEE754 and the `magnitude > span` comparison is not decided by
+    // float noise. Previously this fixture shifted 0.5pts across a 0.4pt span and got
+    // its 100c fair value from the saturating extrapolation the fix removes.
     const ceilingLadder: BandMarket[] = [
-      band({ ticker: 'C-anchor', floorStrike: 40.0, capStrike: 40.2, yesAskCents: 100, yesBidCents: 100 }),
+      band({ ticker: 'C-anchor', floorStrike: 40.0, capStrike: 41.0, yesAskCents: 100, yesBidCents: 100 }),
       band({
         ticker: 'C-cheap',
-        floorStrike: 40.4,
-        capStrike: 40.6,
+        floorStrike: 41.0,
+        capStrike: 42.0,
         yesAskCents: 12,
         yesBidCents: 10,
         yesAskSizeContracts: 10000,
@@ -405,7 +425,7 @@ describe('evaluateSizing', () => {
     ];
     expect(impliedSum(ceilingLadder)).toBeCloseTo(1.11, 10);
     const result = evaluateSizing(
-      baseInput({ bands: ceilingLadder, rung: 'confirmed', magnitudePts: 0.5 })
+      baseInput({ bands: ceilingLadder, rung: 'confirmed', magnitudePts: 1.0 })
     );
     expect(result.wouldTrade).toBe(true);
     expect(result.marketTicker).toBe('C-cheap');
@@ -430,12 +450,18 @@ describe('evaluateSizing', () => {
     // this test. See the fix report for mutation evidence that both the
     // probability clamp and the per-trade ceiling clamp are load-bearing here:
     // removing them sizes this same ladder to 86 contracts / 1032c, over the cap.
+    //
+    // Strikes/magnitude widened to 1.0pt bands shifted by exactly 1.0pt for the same
+    // reason as the ceiling test above: the shifted target must land exactly on the
+    // poisoned curve endpoint (magnitude == curve span, the largest the span guard
+    // allows) rather than past it, and 1.0pt-wide bands make both the centers and the
+    // span exactly representable in IEEE754.
     const poisonedLadder: BandMarket[] = [
-      band({ ticker: 'P-bad', floorStrike: 40.0, capStrike: 40.2, yesAskCents: 104, yesBidCents: 104 }),
+      band({ ticker: 'P-bad', floorStrike: 40.0, capStrike: 41.0, yesAskCents: 104, yesBidCents: 104 }),
       band({
         ticker: 'P-good',
-        floorStrike: 40.2,
-        capStrike: 40.4,
+        floorStrike: 41.0,
+        capStrike: 42.0,
         yesAskCents: 12,
         yesBidCents: 8,
         yesAskSizeContracts: 100000,
@@ -443,7 +469,7 @@ describe('evaluateSizing', () => {
     ];
     expect(impliedSum(poisonedLadder)).toBeCloseTo(1.14, 10);
     const result = evaluateSizing(
-      baseInput({ bands: poisonedLadder, rung: 'confirmed', magnitudePts: 0.2 })
+      baseInput({ bands: poisonedLadder, rung: 'confirmed', magnitudePts: 1.0 })
     );
     expect(result.wouldTrade).toBe(true);
     expect(result.marketTicker).toBe('P-good');
@@ -575,6 +601,66 @@ describe('evaluateSizing', () => {
       result = evaluateSizing(baseInput({ bands: onlyMalformed }));
     }).not.toThrow();
     expect(result!.wouldTrade).toBe(false);
+  });
+
+  it('declines a magnitude larger than the usable curve span instead of extrapolating', () => {
+    const span = curveSpanPts(baseLadder());
+    expect(span).toBeCloseTo(0.8, 10);
+    const result = evaluateSizing(baseInput({ magnitudePts: span + 0.01 }));
+    expect(result.wouldTrade).toBe(false);
+    expect(result.reason).toMatch(/exceeds usable curve span/);
+    expect(result.contracts).toBe(0);
+  });
+
+  it('still prices a magnitude comfortably inside the curve span (the span guard is not a blanket decline)', () => {
+    // Same fixture and default 0.3pt shift as the happy path above -- 0.3 is well
+    // inside the 0.8pt span, so the new guard must leave it completely untouched.
+    const result = evaluateSizing(baseInput());
+    expect(result.wouldTrade).toBe(true);
+    expect(result.marketTicker).toBe('K-40.4');
+    expect(result.contracts).toBeGreaterThan(0);
+  });
+
+  it('accepts a magnitude of exactly the curve span (the boundary is inclusive)', () => {
+    const span = curveSpanPts(baseLadder());
+    const result = evaluateSizing(baseInput({ magnitudePts: span }));
+    expect(result.reason).not.toMatch(/exceeds usable curve span/);
+  });
+
+  it('no longer prices an absurd magnitude identically to a merely-large one (the saturation plateau is gone)', () => {
+    // The Critical finding, reproduced. Both of these shifts push the interpolation
+    // target past the curve's edge, where `interpolateProbability` flat-holds the
+    // endpoint probability -- so before the fix a 2x-span shift and a 1000x-span shift
+    // returned IDENTICAL SizingResults: same band, same contracts, same notional, at
+    // near-maximum Kelly. A hallucinated magnitude was indistinguishable from a real
+    // one. Both must now decline, and each decline must name its own magnitude.
+    const span = curveSpanPts(baseLadder());
+    const large = evaluateSizing(baseInput({ magnitudePts: span * 2 }));
+    const absurd = evaluateSizing(baseInput({ magnitudePts: span * 1000 }));
+
+    for (const result of [large, absurd]) {
+      expect(result.wouldTrade).toBe(false);
+      expect(result.marketTicker).toBeNull();
+      expect(result.contracts).toBe(0);
+      expect(result.notionalCents).toBe(0);
+      expect(result.reason).toMatch(/exceeds usable curve span/);
+    }
+    // Not merely both-declined: the two inputs are no longer indistinguishable.
+    expect(large.reason).not.toBe(absurd.reason);
+    expect(large.reason).toContain((span * 2).toFixed(2));
+    expect(absurd.reason).toContain((span * 1000).toFixed(2));
+  });
+
+  it('declines any non-zero magnitude when the curve collapses to a single point (span 0)', () => {
+    // One usable price means no span to interpolate across at all: every shift is a
+    // flat-hold of that one probability, which is exactly what must not be sized off.
+    const singlePoint: BandMarket[] = [
+      band({ ticker: 'S-only', floorStrike: 40.0, capStrike: 40.2, yesAskCents: 91, yesBidCents: 89 }),
+    ];
+    expect(impliedSum(singlePoint)).toBeCloseTo(0.9, 10);
+    const result = evaluateSizing(baseInput({ bands: singlePoint, magnitudePts: 0.1 }));
+    expect(result.wouldTrade).toBe(false);
+    expect(result.reason).toMatch(/exceeds usable curve span/);
   });
 
   it('a downward direction can find edge on the low side of the ladder', () => {

@@ -271,6 +271,24 @@ export function evaluateSizing(input: SizingInput): SizingResult {
 
   const signedMagnitudePts = input.direction === 'up' ? input.magnitudePts : -input.magnitudePts;
 
+  // Second, independent ceiling on the magnitude -- the counterpart to `decide.ts`'s
+  // MAX_MAGNITUDE_PTS. `interpolateProbability` flat-holds the endpoint probability
+  // for any target outside the curve's domain, so once the shift pushes the target
+  // past the curve's edge every larger magnitude prices an IDENTICAL trade: a 0.5pt
+  // shift and a 1000pt shift would size the same bet at the same near-maximum Kelly.
+  // MAX_MAGNITUDE_PTS governs what Sonnet is asked for and what is accepted from it;
+  // this governs what gets sized off whatever number actually arrives, and it is
+  // scoped to THIS ladder rather than to a fixed constant. Runs after the implied-sum
+  // check, since a garbage curve makes the span itself meaningless. `curve` is sorted
+  // ascending by `centerPts` by `buildProbabilityCurve`, so the span is never negative.
+  const curveSpanPts = curve.length > 1 ? curve[curve.length - 1].centerPts - curve[0].centerPts : 0;
+  if (Math.abs(signedMagnitudePts) > curveSpanPts) {
+    return decline(
+      `magnitude shift ${signedMagnitudePts.toFixed(2)}pts exceeds usable curve span ` +
+        `${curveSpanPts.toFixed(2)}pts -- declining rather than sizing off a saturated extrapolation`
+    );
+  }
+
   const remainingExposureCents = MAX_TOTAL_EXPOSURE_CENTS - input.currentTotalExposureCents;
   if (remainingExposureCents <= 0) {
     return decline(`total exposure cap reached (${input.currentTotalExposureCents}c of ${MAX_TOTAL_EXPOSURE_CENTS}c)`);

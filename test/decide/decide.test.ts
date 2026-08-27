@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Anthropic from '@anthropic-ai/sdk';
-import { decideTrade, validateDecideOutput } from '../../src/decide/decide.js';
+import { decideTrade, validateDecideOutput, MAX_MAGNITUDE_PTS } from '../../src/decide/decide.js';
 
 describe('decideTrade (real Sonnet call)', () => {
   it('produces a structured direction/magnitude/should_trade/reasoning judgment', async () => {
@@ -69,6 +69,17 @@ describe('validateDecideOutput', () => {
     });
   });
 
+  it('accepts a magnitude_pts of exactly MAX_MAGNITUDE_PTS', () => {
+    expect(
+      validateDecideOutput({
+        direction: 'up',
+        magnitude_pts: MAX_MAGNITUDE_PTS,
+        should_trade: true,
+        reasoning: 'an extraordinary but not impossible move',
+      }).magnitudePts
+    ).toBe(MAX_MAGNITUDE_PTS);
+  });
+
   it.each([
     ['null parsed_output', null, /invalid decide output shape/],
     ['undefined parsed_output', undefined, /invalid decide output shape/],
@@ -107,6 +118,19 @@ describe('validateDecideOutput', () => {
       'a NaN magnitude_pts',
       { direction: 'up', magnitude_pts: NaN, should_trade: true, reasoning: 'x' },
       /invalid magnitude_pts/,
+    ],
+    [
+      'a magnitude_pts just above the sanity ceiling',
+      { direction: 'up', magnitude_pts: MAX_MAGNITUDE_PTS + 0.01, should_trade: true, reasoning: 'x' },
+      /out-of-range magnitude_pts/,
+    ],
+    [
+      // The hallucinated value the reviewer used: unbounded, this sized an identical
+      // maximum-conviction trade to a plausible 0.5, because the fair-value curve
+      // flat-holds past its domain.
+      'a hallucinated magnitude_pts of 1000',
+      { direction: 'up', magnitude_pts: 1000, should_trade: true, reasoning: 'x' },
+      /out-of-range magnitude_pts/,
     ],
     [
       'a missing should_trade field',

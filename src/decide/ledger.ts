@@ -39,15 +39,31 @@ CREATE TABLE IF NOT EXISTS decisions (
   edge_cents REAL,
   would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
   reason TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  -- The cap layer above is only worth anything if notional_cents is the real
+  -- notional. Nothing else ties it to the position it describes, so a row claiming
+  -- contracts=100 @ 50c with notional_cents=0 would otherwise insert cleanly and
+  -- report zero exposure for a real $50 position. Deliberately redundant with
+  -- recordDecision's construction-time check: this one also holds for a future code
+  -- path that prepares its own INSERT.
+  CHECK (would_trade = 0 OR (entry_price_cents IS NOT NULL AND notional_cents = contracts * entry_price_cents))
 );
 
+-- Redis delivery is at-least-once, so the same item CAN arrive twice. The pipeline
+-- checks hasDecisionForItem() first; this is the backstop that makes a second row
+-- for one item impossible rather than merely unlikely.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_item_id ON decisions(item_id);
+
+-- Scoped to NEW.event_ticker, matching totalExposureCents(): each week's ladder is
+-- its own event, so exposure is per-event rather than an all-time sum that would
+-- silently and permanently exhaust itself after ~20 lifetime trades.
 CREATE TRIGGER IF NOT EXISTS enforce_total_exposure
 BEFORE INSERT ON decisions
 WHEN NEW.would_trade = 1
 BEGIN
   SELECT RAISE(ABORT, 'total exposure cap exceeded')
-  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions WHERE would_trade = 1)
+  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions
+         WHERE would_trade = 1 AND event_ticker = NEW.event_ticker)
         + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
 END;
 `;
@@ -59,7 +75,30 @@ export function openLedger(dbPath: string): Database.Database {
   return db;
 }
 
+/**
+ * Construction-time half of the notional-integrity guarantee (the DB CHECK in
+ * `SCHEMA` is the other half). Caught here, before any I/O, a mismatch is a clear
+ * error naming both numbers rather than an opaque SQLite constraint failure.
+ */
+function assertNotionalIsConsistent(record: DecisionRecord): void {
+  if (!record.wouldTrade) return;
+  if (record.entryPriceCents === null) {
+    throw new Error(
+      `A would-trade decision must carry an entry price, but item ${record.itemId} has entryPriceCents null`
+    );
+  }
+  const expected = record.contracts * record.entryPriceCents;
+  if (record.notionalCents !== expected) {
+    throw new Error(
+      `A would-trade decision's notionalCents must equal contracts x entryPriceCents, but item ` +
+        `${record.itemId} has notionalCents ${record.notionalCents} against ${record.contracts} x ` +
+        `${record.entryPriceCents} = ${expected}`
+    );
+  }
+}
+
 export function recordDecision(db: Database.Database, record: DecisionRecord): void {
+  assertNotionalIsConsistent(record);
   db.prepare(
     `INSERT INTO decisions
       (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
@@ -85,9 +124,29 @@ export function hasOpenPosition(db: Database.Database, storyKey: string, eventTi
   return row !== undefined;
 }
 
-export function totalExposureCents(db: Database.Database): number {
+/**
+ * Whether this item already has ANY decision row. Redis delivery is at-least-once:
+ * a crash or restart mid-item re-delivers the unacked entry, and re-running the
+ * pipeline would spend three model calls again and could write a second
+ * would-trade row that double-counts against the exposure cap.
+ */
+export function hasDecisionForItem(db: Database.Database, itemId: string): boolean {
+  const row = db.prepare(`SELECT 1 FROM decisions WHERE item_id = ? LIMIT 1`).get(itemId);
+  return row !== undefined;
+}
+
+/**
+ * Exposure for ONE event, not all time. Each week's ladder is its own
+ * `event_ticker`, so a resolved week's positions must not keep consuming the cap
+ * of the week that follows it -- an all-time sum with no exit logic silences the
+ * engine permanently after roughly 20 lifetime trades.
+ */
+export function totalExposureCents(db: Database.Database, eventTicker: string): number {
   const row = db
-    .prepare(`SELECT COALESCE(SUM(notional_cents), 0) AS total FROM decisions WHERE would_trade = 1`)
-    .get() as { total: number };
+    .prepare(
+      `SELECT COALESCE(SUM(notional_cents), 0) AS total FROM decisions
+       WHERE would_trade = 1 AND event_ticker = ?`
+    )
+    .get(eventTicker) as { total: number };
   return row.total;
 }
