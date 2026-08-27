@@ -5,10 +5,21 @@ import { parseItemFields, type Item } from './item.js';
 import { formatSummaryLine } from './log.js';
 import { compilePhrases, findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
 import { loadKeyphrases, DEFAULT_KEYPHRASES_PATH } from './keyphrases/list.js';
+import { openLedger } from './decide/ledger.js';
+import { fetchActiveLadder } from './decide/kalshi.js';
+import { runDecisionPipeline } from './decide/pipeline.js';
+import Anthropic from '@anthropic-ai/sdk';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const STREAM_KEY = 'iip:items';
 const GROUP_NAME = 'execmod';
 const CONSUMER_NAME = process.env.EXECMOD_CONSUMER_NAME ?? 'execmod-primary';
+
+const DEFAULT_LEDGER_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../data/decisions.db'
+);
 
 /** How much of an unparseable payload the error line carries before it is cut off. */
 const RAW_PREVIEW_LIMIT = 500;
@@ -29,7 +40,7 @@ export type ItemOutcome =
   | { ok: true; entry: StreamEntry; item: Item; matchedPhrases: string[] }
   | { ok: false; entry: StreamEntry; error: string; raw: string };
 
-export type OnItem = (outcome: ItemOutcome) => void;
+export type OnItem = (outcome: ItemOutcome) => void | Promise<void>;
 
 export async function runOnce(
   client: RedisClientType,
@@ -43,12 +54,12 @@ export async function runOnce(
   await consumer.run(async (entry) => {
     const result = parseItemFields(entry.fields);
     if (!result.ok) {
-      onItem({ ok: false, entry, error: result.error, raw: truncateRaw(result.raw) });
+      await onItem({ ok: false, entry, error: result.error, raw: truncateRaw(result.raw) });
       return;
     }
     const matchableText = getMatchableText(result.item);
     const matchedPhrases = findMatches(matchableText, compiledPhrases);
-    onItem({ ok: true, entry, item: result.item, matchedPhrases });
+    await onItem({ ok: true, entry, item: result.item, matchedPhrases });
   }, signal);
 }
 
@@ -69,6 +80,9 @@ export async function main(): Promise<void> {
   const client = createRedisClient();
   await client.connect();
 
+  const anthropicClient = new Anthropic();
+  const db = openLedger(DEFAULT_LEDGER_PATH);
+
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
@@ -77,7 +91,7 @@ export async function main(): Promise<void> {
     client,
     { streamKey: STREAM_KEY, groupName: GROUP_NAME, consumerName: CONSUMER_NAME },
     compiledPhrases,
-    (outcome) => {
+    async (outcome) => {
       if (!outcome.ok) {
         console.error(`[parse-error] entry=${outcome.entry.id} error=${outcome.error} raw=${outcome.raw}`);
         return;
@@ -87,6 +101,15 @@ export async function main(): Promise<void> {
         console.log(
           `[KEYPHRASE-MATCH] item=${outcome.item.item_id} phrases=${JSON.stringify(outcome.matchedPhrases)} headline=${outcome.item.headline}`
         );
+        try {
+          await runDecisionPipeline(outcome.item, {
+            anthropicClient,
+            db,
+            fetchLadder: fetchActiveLadder,
+          });
+        } catch (err) {
+          console.error(`[decision-pipeline] error processing item=${outcome.item.item_id}:`, err);
+        }
       }
     },
     controller.signal

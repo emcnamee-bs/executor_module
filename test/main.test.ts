@@ -333,4 +333,29 @@ describe('runOnce with keyphrase matching (end-to-end)', () => {
       expect(noMatchOutcome.matchedPhrases).toEqual([]);
     }
   });
+
+  it('awaits an async onItem callback before acking the entry', async () => {
+    await client.xAdd(streamKey, '*', {
+      json: JSON.stringify(realisticPayload({ headline: 'Trump approval rating drops sharply' })),
+    });
+
+    const compiled = compilePhrases(['trump approval rating']);
+    const order: string[] = [];
+    const controller = new AbortController();
+
+    await runOnce(
+      client,
+      { streamKey, groupName, consumerName: 'consumer-async', blockMs: 500, count: 10 },
+      compiled,
+      async (outcome) => {
+        order.push('onItem-start');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        order.push('onItem-end');
+        controller.abort();
+      },
+      controller.signal
+    );
+
+    expect(order).toEqual(['onItem-start', 'onItem-end']);
+  });
 });
