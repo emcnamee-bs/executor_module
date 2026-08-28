@@ -355,12 +355,19 @@ about the code, never about the exchange (§4, lesson 2).
    Kalshi instead returns unrelated orders, it is ignoring the filter; reconciliation
    still only counts an exact `client_order_id` match so it degrades to a broader scan
    rather than a false positive, but you should know that before relying on it.
-3. **Confirm positions read back SIGNED.** In the same smoke output, check that any NO
-   holding shows as a **negative** `position`. All fill detection is a signed position
-   diff (a NO fill moves `position` down); if the live API ever returned an unsigned
-   magnitude instead, every NO fill would be recorded as zero contracts and zero
-   exposure. This is exactly the defect the final whole-branch review caught in code —
-   verify the premise it now rests on.
+3. **Confirm positions read back SIGNED, as `position` (not only `position_fp`).** In the
+   same smoke output, check that any NO holding shows as a **negative** `position`. All
+   fill detection is a signed position diff (a NO fill moves `position` down); if the live
+   API ever returned an unsigned magnitude instead, every NO fill would be recorded as
+   zero contracts and zero exposure. This is exactly the defect the final whole-branch
+   review caught in code — verify the premise it now rests on. Separately: `kalshi-spine`
+   and `Fast99Follower`'s own `normalize.js` both fall back to a fixed-point `position_fp`
+   field when `position` is absent — this branch deliberately does NOT implement that
+   fallback (no confirmed evidence it's what a live response actually sends), and instead
+   throws loudly if a matching position entry's `position` field is missing or
+   non-numeric. Confirm the live response really does carry a numeric `position` field
+   directly; if it doesn't, `positionForTicker` needs the `position_fp` fallback added
+   before this is safe to run unattended.
 4. **Place one real, small, deliberate order on EACH side — one YES and one NO — with
    `KALSHI_DRY_RUN` unset.** Then inspect `data/decisions.db` by hand and confirm:
    - the `orders` row has the right `side`, and `filled_contracts` matches what actually
