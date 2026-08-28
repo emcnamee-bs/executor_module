@@ -150,12 +150,13 @@ export class KalshiClient {
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // Node's fetch has NO default timeout. Without this, a dead socket or stalled
-      // TLS handshake hangs forever -- and throttle() serializes every request onto
-      // one promise chain, so a single hung read (a reconciliation pass, say) also
-      // stalls placeOrder's live trading calls indefinitely, and main.ts's overlap
-      // guard, cleared only in a .finally(), latches on forever with zero log
-      // output. A timeout turns that silent hang into an AbortError rejection,
-      // which every caller here already handles.
+      // TLS handshake hangs forever, and main.ts's overlap guard -- cleared only in
+      // a .finally() -- latches on forever with zero log output (throttle() only
+      // spaces out request START times via a delay it awaits itself; it does not
+      // wait for a prior response, so a hung request does not block later ones on
+      // its own -- the guard-latching risk is the one this timeout closes). A
+      // timeout turns that silent hang into an AbortError rejection, which every
+      // caller here already handles.
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
@@ -235,6 +236,18 @@ export class KalshiClient {
         `(${merged.length} positions read, cursor still set) -- refusing to report a ` +
         `partial positions snapshot as complete`
     );
+  }
+
+  /**
+   * Diagnostic only -- NOT used by getPositions() or any production call site.
+   * getPositions() merges every page and drops `cursor` entirely, so nothing in
+   * the normal read path can show an operator whether the account's real
+   * position count exceeds one page, or what Kalshi actually names its
+   * pagination token. This exists purely so scripts/smoke.ts can display that raw
+   * first page before go-live, since the merged path is unable to.
+   */
+  getPositionsRawPage(): Promise<GetPositionsResponse> {
+    return this.request('GET', `/portfolio/positions?limit=${POSITIONS_PAGE_SIZE}`);
   }
 
   getBalance(): Promise<GetBalanceResponse> {

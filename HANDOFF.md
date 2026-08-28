@@ -383,12 +383,18 @@ about the code, never about the exchange (§4, lesson 2).
      `unfilled` until the next startup reconciliation catches it. Verify before trusting
      it; if it lags, the fix is to move fill determination to a delayed reconcile pass.
 5. **Confirm whether `GET /portfolio/positions` really paginates, and with what default
-   page size.** In the same smoke output, check whether the raw response carries a
-   `cursor` field and how many `market_positions` come back on one page.
-   *Why this is here:* `getPositions()` now follows `cursor` to completion and asks for
+   page size.** `npm run smoke` now logs a raw, single-page, unmerged call
+   (`getPositionsRawPage()`) alongside the normal merged `getPositions()` call
+   specifically so this is checkable — the merged call alone drops `cursor` entirely and
+   can't show it. Check whether that raw response carries a `cursor` field and whether
+   `market_positions` on the merged log line is ever longer than on the raw one.
+   *Why this is here:* `getPositions()` follows `cursor` to completion and asks for
    `limit=1000`, because a ticker that falls off an unfetched page reads back as absent
    — and absent means position 0, which is indistinguishable from "really flat" and
-   fires a spurious permanent market block (or masks a real divergence). But that
+   fires a spurious permanent market block (or masks a real divergence). This also rides
+   on every live positions read, not just reconciliation's — including the pre-order
+   snapshot inside `placeOrder` — so if Kalshi rejects `limit=1000` outright, `npm run
+   smoke` fails loudly rather than this surfacing later as a live order failure. But the
    pagination was built **without live API access**: the `cursor` field name and the
    `limit` parameter are the documented/sibling-repo pattern (`kalshi-spine`'s
    `getTrades`), not something confirmed against this endpoint, exactly as the
