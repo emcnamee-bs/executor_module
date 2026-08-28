@@ -171,4 +171,74 @@ describe('reconcileOpenPositions', () => {
 
     expect(called).toBe(false);
   });
+
+  it('calls getPositions exactly once even with multiple open rows on different tickers', async () => {
+    recordOpenDecision(db, { marketTicker: 'H', side: 'yes', contracts: 10 });
+    recordOpenDecision(db, { marketTicker: 'I', side: 'yes', contracts: 5 });
+    let getPositionsCalls = 0;
+    const client = {
+      getPositions: async () => {
+        getPositionsCalls += 1;
+        return { market_positions: [{ ticker: 'H', position: 10 }, { ticker: 'I', position: 5 }] };
+      },
+    } as unknown as KalshiClient;
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    // With only ONE row per ticker in this test, "once per pass" and "once per row"
+    // would be indistinguishable -- this proves it by using two DIFFERENT tickers,
+    // each contributing one row, so any "once per row" bug (2 rows -> 2 calls) would
+    // be caught here just as surely as a "once per ticker-group" bug would.
+    expect(getPositionsCalls).toBe(1);
+    expect(isMarketBlocked(db, 'H')).toBe(false);
+    expect(isMarketBlocked(db, 'I')).toBe(false);
+  });
+
+  it('sums signed expected contracts across multiple decisions sharing one market_ticker, and does not falsely block when the aggregate matches', async () => {
+    recordOpenDecision(db, { marketTicker: 'J', side: 'yes', contracts: 10 });
+    recordOpenDecision(db, { marketTicker: 'J', side: 'yes', contracts: 8 });
+    // Real position is the correct aggregate (10 + 8 = 18) -- comparing either row
+    // individually against 18 would wrongly diverge; the aggregate must not.
+    const client = mockClient({ J: 18 });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    expect(isMarketBlocked(db, 'J')).toBe(false);
+  });
+
+  it('blocks once, with the correctly summed expected value, when the aggregate for a shared market_ticker genuinely diverges', async () => {
+    recordOpenDecision(db, { marketTicker: 'K', side: 'yes', contracts: 10 });
+    recordOpenDecision(db, { marketTicker: 'K', side: 'yes', contracts: 8 });
+    // Aggregate expected is 18, but real is 12 -- a genuine divergence not
+    // attributable to either row's individual count (10 or 8).
+    const client = mockClient({ K: 12 });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    expect(isMarketBlocked(db, 'K')).toBe(true);
+    const row = db.prepare('SELECT reason, expected_contracts, real_contracts FROM market_blocks WHERE market_ticker = ?').get('K') as {
+      reason: string; expected_contracts: number; real_contracts: number;
+    };
+    expect(row.expected_contracts).toBe(18);
+    expect(row.real_contracts).toBe(12);
+    expect(row.reason).toContain('expected 18');
+  });
+
+  it('marks every decision settled when a market_ticker shared by multiple rows finalizes', async () => {
+    const id1 = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 10 });
+    const id2 = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 8 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ L: { status: 'finalized', result: 'yes' } }),
+    });
+
+    expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+    for (const id of [id1, id2]) {
+      const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as { settled_at: string | null };
+      expect(row.settled_at).not.toBeNull();
+    }
+    expect(isMarketBlocked(db, 'L')).toBe(false);
+  });
 });

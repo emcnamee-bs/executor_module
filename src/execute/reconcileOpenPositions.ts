@@ -3,13 +3,39 @@ import type Database from 'better-sqlite3';
 import type { KalshiClient } from './kalshiClient.js';
 import { positionForTicker } from './kalshiClient.js';
 import { fetchMarketStatus as realFetchMarketStatus } from '../decide/kalshi.js';
-import { findOpenUnsettledDecisions, markDecisionSettled, blockMarket } from '../decide/ledger.js';
+import {
+  findOpenUnsettledDecisions,
+  markDecisionSettled,
+  blockMarket,
+  type OpenUnsettledDecision,
+} from '../decide/ledger.js';
 
 export interface ReconcileOpenPositionsDeps {
   db: Database.Database;
   client: KalshiClient;
   /** Injectable for tests; defaults to the real public market-status check. */
   fetchMarketStatus?: typeof realFetchMarketStatus;
+}
+
+/**
+ * Groups open rows by market_ticker. Nothing upstream dedups decisions by
+ * market_ticker specifically (hasOpenPosition dedups per story_key+event_ticker
+ * only, and story_key is null for most real items; the exposure-cap trigger in
+ * ledger.ts explicitly anticipates multiple would-trade rows per event) -- so two
+ * distinct decisions legitimately sharing one market_ticker is a real, structurally
+ * expected scenario, not a hypothetical edge case.
+ */
+function groupByMarketTicker(rows: OpenUnsettledDecision[]): Map<string, OpenUnsettledDecision[]> {
+  const groups = new Map<string, OpenUnsettledDecision[]>();
+  for (const row of rows) {
+    const existing = groups.get(row.marketTicker);
+    if (existing) {
+      existing.push(row);
+    } else {
+      groups.set(row.marketTicker, [row]);
+    }
+  }
+  return groups;
 }
 
 /**
@@ -24,6 +50,15 @@ export interface ReconcileOpenPositionsDeps {
  * calls, and keeps every row in the same pass compared against the same instant. If
  * that one call fails, the whole pass defers to the next tick rather than writing
  * any partial state -- there is no cost to waiting 10 more minutes.
+ *
+ * Rows are then processed ONE GROUP PER market_ticker, not one row at a time: a
+ * single market_ticker can legitimately have multiple open decision rows against
+ * it (see groupByMarketTicker), and Kalshi's real position for that ticker is one
+ * aggregate number covering all of them together. Comparing each row individually
+ * against that aggregate would misfire a divergence block on every multi-row ticker
+ * even when the combined state is perfectly correct -- exactly the false-positive
+ * that trains a safety mechanism out of usefulness. fetchMarketStatus is likewise
+ * called once per distinct ticker, not once per row.
  */
 export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): Promise<void> {
   const { db, client } = deps;
@@ -40,26 +75,30 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
     return;
   }
 
-  for (const row of openRows) {
+  const groups = groupByMarketTicker(openRows);
+
+  for (const [marketTicker, rows] of groups) {
     try {
-      const marketStatus = await fetchMarketStatus(row.marketTicker);
+      const marketStatus = await fetchMarketStatus(marketTicker);
       if (marketStatus.status === 'finalized') {
-        markDecisionSettled(db, row.id);
+        for (const row of rows) {
+          markDecisionSettled(db, row.id);
+        }
         continue;
       }
 
-      const real = positionForTicker(positionsResp, row.marketTicker);
-      const expected = row.side === 'yes' ? row.contracts : -row.contracts;
+      const real = positionForTicker(positionsResp, marketTicker);
+      const expected = rows.reduce((sum, row) => sum + (row.side === 'yes' ? row.contracts : -row.contracts), 0);
       if (real !== expected) {
         const reason = `reconciliation divergence: expected ${expected}, real ${real}`;
-        blockMarket(db, row.marketTicker, reason, expected, real);
+        blockMarket(db, marketTicker, reason, expected, real);
         console.error(
-          `[RECONCILE-DIVERGENCE] market_ticker=${row.marketTicker} decisionId=${row.id} ${reason}`
+          `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} decisionIds=${rows.map((r) => r.id).join(',')} ${reason}`
         );
       }
     } catch (err) {
       console.error(
-        `[reconcile-open-positions] failed to reconcile decisionId=${row.id} marketTicker=${row.marketTicker}, will retry next pass:`,
+        `[reconcile-open-positions] failed to reconcile marketTicker=${marketTicker} (decisionIds=${rows.map((r) => r.id).join(',')}), will retry next pass:`,
         err
       );
     }
