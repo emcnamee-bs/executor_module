@@ -10,6 +10,7 @@ import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
 import { KalshiClient } from './execute/kalshiClient.js';
 import { reconcilePendingOrders } from './execute/order.js';
+import { reconcileOpenPositions } from './execute/reconcileOpenPositions.js';
 import Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
 import path from 'node:path';
@@ -26,6 +27,9 @@ const DEFAULT_LEDGER_PATH = path.resolve(
 
 /** How much of an unparseable payload the error line carries before it is cut off. */
 const RAW_PREVIEW_LIMIT = 500;
+
+/** How often the periodic account-reconciliation pass runs, in milliseconds. */
+const RECONCILE_OPEN_POSITIONS_INTERVAL_MS = 10 * 60 * 1000;
 
 function mustGetEnv(name: string): string {
   const value = process.env[name];
@@ -134,6 +138,15 @@ export async function main(): Promise<void> {
   await reconcilePendingOrders(db, kalshiClient);
   console.log('[startup] reconciliation complete');
 
+  let reconciliationInProgress = false;
+  const reconciliationTimer = setInterval(() => {
+    if (reconciliationInProgress) return; // a slow pass skips the next tick, never overlaps
+    reconciliationInProgress = true;
+    reconcileOpenPositions({ db, client: kalshiClient })
+      .catch((err) => console.error('[reconcile-open-positions] pass failed:', err))
+      .finally(() => { reconciliationInProgress = false; });
+  }, RECONCILE_OPEN_POSITIONS_INTERVAL_MS);
+
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
@@ -146,6 +159,7 @@ export async function main(): Promise<void> {
     controller.signal
   );
 
+  clearInterval(reconciliationTimer);
   await client.quit();
   db.close();
 }
