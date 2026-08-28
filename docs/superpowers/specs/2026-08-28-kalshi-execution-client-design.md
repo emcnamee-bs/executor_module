@@ -200,7 +200,9 @@ placeOrder(decision, deps):
   1. re-check totalExposureCents(db, eventTicker) + notionalCents <= 4000
      -> breach: resolve decision as declined-at-execution, STOP (no Kalshi call)
   2. build IOC-limit order body at entryPriceCents; client_order_id = hash(item_id)
-  3. KALSHI_DRY_RUN=true -> simulate a fill (filled_contracts = requested), skip to step 5
+  3. KALSHI_DRY_RUN=true -> simulate a fill (filled_contracts = requested,
+     avg_fill_price_cents = entryPriceCents, status='filled'), skip straight to step 6
+     (no real getPositions call -- nothing actually happened to diff)
   4. createOrder(...), retry up to 3x (exp backoff + jitter, honors Retry-After) on
      429/5xx; record order_id/status from the response (confirmed-real fields only)
      -> on final failure or any ambiguous error:
