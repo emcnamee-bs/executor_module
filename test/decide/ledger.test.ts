@@ -18,8 +18,11 @@ import {
   findOpenUnsettledDecisions,
   isMarketBlocked,
   blockMarket,
+  MAX_NOTIONAL_CENTS_PER_TRADE,
+  MAX_TOTAL_EXPOSURE_CENTS,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
+import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 
 const EVENT = 'KXAPRPOTUS-26AUG28';
@@ -558,5 +561,122 @@ describe('ledger', () => {
       expect(row.reason).toBe('second divergence');
       expect(row.cleared_at).toBeNull();
     });
+  });
+});
+
+/**
+ * The `decisions` table exactly as slices 1-4 created it: every column `SCHEMA` in
+ * ledger.ts defines, MINUS `settled_at` (which slice 5 added). This is the real,
+ * pre-existing on-disk shape on any machine that ran this system before slice 5 --
+ * `CREATE TABLE IF NOT EXISTS` does nothing against it, so without a migration the
+ * new column never appears and every reconciliation pass throws forever.
+ */
+const PRE_SLICE_5_DECISIONS_SCHEMA = `
+CREATE TABLE decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  story_key TEXT,
+  event_ticker TEXT,
+  market_ticker TEXT,
+  side TEXT CHECK (side IN ('yes','no') OR side IS NULL),
+  rung TEXT NOT NULL CHECK (rung IN ('rumor','reported','corroborated','confirmed')),
+  direction TEXT CHECK (direction IN ('up','down') OR direction IS NULL),
+  magnitude_pts REAL,
+  contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
+  entry_price_cents INTEGER CHECK (entry_price_cents IS NULL OR (entry_price_cents > 0 AND entry_price_cents < 100)),
+  notional_cents INTEGER NOT NULL DEFAULT 0 CHECK (notional_cents >= 0 AND (would_trade = 0 OR notional_cents <= ${MAX_NOTIONAL_CENTS_PER_TRADE})),
+  edge_cents REAL,
+  would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
+  reason TEXT NOT NULL,
+  order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  CHECK (would_trade = 0 OR (
+    entry_price_cents IS NOT NULL
+    AND event_ticker IS NOT NULL
+    AND notional_cents = contracts * entry_price_cents
+  ))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_item_id ON decisions(item_id);
+CREATE TRIGGER IF NOT EXISTS enforce_total_exposure
+BEFORE INSERT ON decisions
+WHEN NEW.would_trade = 1
+BEGIN
+  SELECT RAISE(ABORT, 'total exposure cap exceeded')
+  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions
+         WHERE would_trade = 1 AND event_ticker = NEW.event_ticker)
+        + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
+END;
+`;
+
+describe('openLedger migration of a pre-slice-5 decisions table', () => {
+  let dir: string;
+  let dbPath: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'ledger-migration-test-'));
+    dbPath = path.join(dir, 'decisions.db');
+    const legacy = new BetterSqlite3(dbPath);
+    legacy.exec(PRE_SLICE_5_DECISIONS_SCHEMA);
+    // A real would-trade position already on disk from before slice 5 -- it must
+    // survive the migration and show up as open-and-unsettled afterward.
+    legacy
+      .prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('legacy-item-1', 'story-legacy', '${EVENT}', 'KXAPRPOTUS-26AUG28-40.6',
+            'yes', 'reported', 'up', 0.3, 7, 12, 84, 3, 1, 'legacy would-trade row', 'resolved')`
+      )
+      .run();
+    legacy.close();
+    db = openLedger(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds the settled_at column to a decisions table that predates it', () => {
+    const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toContain('settled_at');
+  });
+
+  it('leaves a pre-existing would-trade row visible to findOpenUnsettledDecisions instead of throwing "no such column"', () => {
+    // Before the migration existed, this threw `no such column: settled_at` on every
+    // reconciliation pass, forever, while trading continued unguarded.
+    expect(() => findOpenUnsettledDecisions(db)).not.toThrow();
+    const open = findOpenUnsettledDecisions(db);
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({
+      marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+      side: 'yes',
+      contracts: 7,
+    });
+  });
+
+  it('records and settles a NEW would-trade decision through the normal path on a migrated database', () => {
+    const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+    resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+    const open = findOpenUnsettledDecisions(db);
+    expect(open.map((row) => row.id)).toContain(id);
+
+    markDecisionSettled(db, id);
+
+    expect(findOpenUnsettledDecisions(db).map((row) => row.id)).not.toContain(id);
+    const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as {
+      settled_at: string | null;
+    };
+    expect(row.settled_at).not.toBeNull();
+  });
+
+  it('is idempotent: re-opening an already-migrated database does not fail or duplicate the column', () => {
+    db.close();
+    db = openLedger(dbPath);
+    const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+    expect(columns.filter((c) => c.name === 'settled_at')).toHaveLength(1);
   });
 });

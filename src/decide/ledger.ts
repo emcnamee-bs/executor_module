@@ -143,10 +143,34 @@ CREATE TABLE IF NOT EXISTS market_blocks (
 );
 `;
 
+/**
+ * `CREATE TABLE IF NOT EXISTS decisions (...)` is a NO-OP against a `decisions`
+ * table that already exists -- so on any machine carrying a `data/decisions.db`
+ * written by slices 1-4, the `settled_at` column slice 5 added to `SCHEMA` would
+ * silently never be created. The consequence is not a loud failure: `market_blocks`
+ * (a brand-new table) gets created fine, `isMarketBlocked` always answers false, and
+ * `findOpenUnsettledDecisions` throws `no such column: settled_at` on every single
+ * reconciliation pass forever while real trading continues completely unguarded by
+ * this slice's safety mechanism.
+ *
+ * This one column is the ONLY drift slice 5 introduces to a pre-existing table, so
+ * this is deliberately one targeted `ALTER TABLE`, not a general migration
+ * framework. `ADD COLUMN ... TEXT` (nullable, no default) backfills every existing
+ * row as NULL, which is exactly the correct starting state: not yet settled.
+ */
+function migrateDecisionsSettledAt(db: Database.Database): void {
+  const columns = db.prepare(`PRAGMA table_info(decisions)`).all() as Array<{ name: string }>;
+  const hasSettledAt = columns.some((column) => column.name === 'settled_at');
+  if (!hasSettledAt) {
+    db.exec(`ALTER TABLE decisions ADD COLUMN settled_at TEXT`);
+  }
+}
+
 export function openLedger(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
+  migrateDecisionsSettledAt(db);
   return db;
 }
 

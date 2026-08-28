@@ -395,10 +395,14 @@ about the code, never about the exchange (§4, lesson 2).
   exchange error must not become a boot loop. **A row that keeps appearing in those logs
   across restarts needs a human**, because it is being retried identically every time.
 - **The ledger schema changed in this slice** (`orders` gained `side` and
-  `kalshi_order_status`). `openLedger` only runs `CREATE TABLE IF NOT EXISTS`, so it will
-  NOT add columns to a pre-existing `data/decisions.db`. If one exists from before this
-  branch, migrate or recreate it before starting — a missing `side` column will fail at
-  the first order, loudly, which is the correct direction to fail.
+  `kalshi_order_status`). `openLedger` runs `CREATE TABLE IF NOT EXISTS`, which does NOT
+  add columns to a table that already exists in a pre-existing `data/decisions.db`. If
+  one exists from before this branch, migrate or recreate it before starting — a missing
+  `side` column will fail at the first order, loudly, which is the correct direction to
+  fail. The one exception is `decisions.settled_at` (added in slice 5): `openLedger`
+  explicitly ALTERs it in when absent, because that column's absence fails *silently*
+  (reconciliation throws on every pass while trading continues unguarded) rather than
+  loudly. Every other column drift still needs a manual migration.
 
 ---
 
