@@ -528,6 +528,52 @@ describe('ledger', () => {
       const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as { settled_at: string | null };
       expect(row.settled_at).not.toBeNull();
     });
+
+    it('excludes a would-trade row with a NULL side, which would otherwise be summed with the wrong sign', () => {
+      // Nothing enforces non-null side: the schema CHECK and
+      // assertNotionalIsConsistent both cover entry_price_cents/event_ticker/notional
+      // only. Such a row reaching reconciliation would invert the expected signed
+      // count feeding a real-money block decision, so it is filtered out here.
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-side-item', NULL, ?, 'KXAPRPOTUS-26AUG28-40.6', NULL, 'reported',
+            'up', 0.3, 10, 10, 100, 3, 1, 'row with no side', 'resolved')`
+      ).run(EVENT);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+    });
+
+    it('excludes a would-trade row with a NULL market_ticker, which would otherwise group under a null key', () => {
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-ticker-item', NULL, ?, NULL, 'yes', 'reported',
+            'up', 0.3, 10, 10, 100, 3, 1, 'row with no market_ticker', 'resolved')`
+      ).run(EVENT);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+    });
+
+    it('still returns healthy rows alongside a malformed one, rather than failing the whole pass', () => {
+      const goodId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, goodId, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-side-item-2', NULL, ?, 'KXAPRPOTUS-26AUG28-40.6', NULL, 'reported',
+            'up', 0.3, 10, 10, 100, 3, 1, 'row with no side', 'resolved')`
+      ).run(EVENT);
+
+      const open = findOpenUnsettledDecisions(db);
+      expect(open.map((row) => row.id)).toEqual([goodId]);
+    });
   });
 
   describe('market_blocks', () => {

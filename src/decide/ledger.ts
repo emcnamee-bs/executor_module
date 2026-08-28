@@ -353,16 +353,27 @@ export interface OpenUnsettledDecision {
 
 /**
  * Every would-trade position the ledger still believes is open and not yet
- * confirmed finalized by Kalshi -- the working set Task 3's periodic reconciliation
- * pass checks each tick. market_ticker/side are cast non-null: every code path that
- * sets would_trade=true already requires both (the same invariant
- * assertNotionalIsConsistent enforces for entry_price_cents/event_ticker).
+ * confirmed finalized by Kalshi -- the working set the periodic reconciliation pass
+ * checks each tick.
+ *
+ * Rows missing `market_ticker` or `side` are FILTERED OUT here rather than cast
+ * non-null and trusted. Nothing enforces non-nullness on those two columns: the
+ * schema's CHECK covers entry_price_cents/event_ticker/notional only, and
+ * assertNotionalIsConsistent checks the same three -- neither says anything about
+ * these. And the consequences are not cosmetic: a would_trade=1 row with a NULL
+ * `side` would be summed with the WRONG SIGN into a real-money block decision (this
+ * project's worst bug to date was a sign error on Kalshi's signed position), and a
+ * NULL `market_ticker` would group under a null key and fail every pass forever. A
+ * row in either state is a bug worth investigating, but it must not be allowed to
+ * silently invert a safety check in the meantime.
  */
 export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettledDecision[] {
   const rows = db
     .prepare(
       `SELECT id, market_ticker AS marketTicker, side, contracts
-       FROM decisions WHERE would_trade = 1 AND settled_at IS NULL`
+       FROM decisions
+       WHERE would_trade = 1 AND settled_at IS NULL
+         AND market_ticker IS NOT NULL AND side IS NOT NULL`
     )
     .all();
   return rows as OpenUnsettledDecision[];
