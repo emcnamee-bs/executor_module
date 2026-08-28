@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, type PlaceOrderDeps } from '../../src/execute/order.js';
+import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, reconcilePendingOrders, type PlaceOrderDeps } from '../../src/execute/order.js';
 import { KalshiClient, KalshiRequestError } from '../../src/execute/kalshiClient.js';
-import { openLedger, recordPendingDecision, resolveDecision, type DecisionRecord } from '../../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, type DecisionRecord } from '../../src/decide/ledger.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -354,5 +354,81 @@ describe('placeOrder', () => {
       if (originalDryRun === undefined) delete process.env.KALSHI_DRY_RUN;
       else process.env.KALSHI_DRY_RUN = originalDryRun;
     }
+  });
+});
+
+describe('reconcilePendingOrders', () => {
+  let dir: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'reconcile-startup-test-'));
+    db = openLedger(path.join(dir, 'test.db'));
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function pendingSetup(overrides: { requestedContracts?: number; positionBeforeContracts?: number } = {}) {
+    const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+    const orderId = recordPendingOrder(db, {
+      decisionId, clientOrderId: 'cid-startup', marketTicker: 'T',
+      requestedContracts: overrides.requestedContracts ?? 83,
+      positionBeforeContracts: overrides.positionBeforeContracts ?? 0,
+    });
+    return { decisionId, orderId };
+  }
+
+  it('resolves a crash-orphaned pending order that actually filled', async () => {
+    pendingSetup();
+    const client = mockClient({
+      getOrders: async () => ({ orders: [{ client_order_id: 'cid-startup', ticker: 'T' }] }),
+      getPositions: async () => ({ market_positions: [{ ticker: 'T', position: 83 }] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(findPendingOrders(db)).toHaveLength(0);
+    const decisionRow = db.prepare('SELECT would_trade, contracts, order_status FROM decisions').get() as {
+      would_trade: number; contracts: number; order_status: string;
+    };
+    expect(decisionRow.would_trade).toBe(1);
+    expect(decisionRow.contracts).toBe(83);
+    expect(decisionRow.order_status).toBe('resolved');
+  });
+
+  it('resolves a crash-orphaned pending order that never filled', async () => {
+    pendingSetup();
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    const decisionRow = db.prepare('SELECT would_trade, order_status FROM decisions').get() as {
+      would_trade: number; order_status: string;
+    };
+    expect(decisionRow.would_trade).toBe(0);
+    expect(decisionRow.order_status).toBe('resolved');
+  });
+
+  it('uses the STORED positionBeforeContracts from the pending row, not a fresh zero, so a different decision\'s intervening fill on the same ticker cannot corrupt this reconciliation', async () => {
+    pendingSetup({ positionBeforeContracts: 20, requestedContracts: 40 });
+    const client = mockClient({
+      getOrders: async () => ({ orders: [{ client_order_id: 'cid-startup', ticker: 'T' }] }),
+      getPositions: async () => ({ market_positions: [{ ticker: 'T', position: 60 }] }), // 20 (this order's before) + 40 (this order's real fill)
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    const decisionRow = db.prepare('SELECT contracts FROM decisions').get() as { contracts: number };
+    expect(decisionRow.contracts).toBe(40);
+  });
+
+  it('is a no-op when there are no pending orders', async () => {
+    const client = mockClient();
+    await expect(reconcilePendingOrders(db, client)).resolves.toBeUndefined();
   });
 });

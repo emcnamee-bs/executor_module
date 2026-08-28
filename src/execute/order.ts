@@ -2,7 +2,16 @@ import { createHash } from 'node:crypto';
 import type { CreateOrderBody } from './kalshiClient.js';
 import { KalshiClient, KalshiRequestError, positionForTicker } from './kalshiClient.js';
 import type Database from 'better-sqlite3';
-import { totalExposureCents, MAX_TOTAL_EXPOSURE_CENTS, type OrderStatus } from '../decide/ledger.js';
+import {
+  totalExposureCents,
+  MAX_TOTAL_EXPOSURE_CENTS,
+  findPendingOrders,
+  resolveOrder,
+  resolveDecision,
+  type OrderStatus,
+  type DecisionRecord,
+} from '../decide/ledger.js';
+import type { Rung } from '../decide/rung.js';
 
 /** Deterministic, UUID-shaped client_order_id from item_id alone -- never decision content, so a crash-and-redeliver that recomputes a different decision still submits the SAME id, letting Kalshi's own dedup and this project's reconciliation both work correctly. */
 export function deriveClientOrderId(itemId: string): string {
@@ -209,4 +218,81 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
     status: filledContracts === 0 ? 'unfilled' : filledContracts >= input.contracts ? 'filled' : 'partial',
     errorDetail: null,
   };
+}
+
+/**
+ * Raw column shape of a `decisions` row (snake_case, matching SCHEMA in
+ * ledger.ts) as read directly via SQL -- used only inside
+ * `reconcilePendingOrders` to reconstruct a full `DecisionRecord` for
+ * `resolveDecision`. Every field is typed explicitly (never `any`) even
+ * though nothing here re-validates the DB's own CHECK constraints.
+ */
+interface DecisionRow {
+  id: number;
+  item_id: string;
+  story_key: string | null;
+  event_ticker: string | null;
+  market_ticker: string | null;
+  side: 'yes' | 'no' | null;
+  rung: Rung;
+  direction: 'up' | 'down' | null;
+  magnitude_pts: number | null;
+  contracts: number;
+  entry_price_cents: number | null;
+  notional_cents: number;
+  edge_cents: number | null;
+  would_trade: number;
+  reason: string;
+  order_status: 'pending' | 'resolved';
+  created_at: string;
+}
+
+/**
+ * Recovers from a process crash between writing a pending decision/order pair and
+ * getting a real answer from Kalshi. Reuses reconcileOrder -- the same function an
+ * ambiguous mid-request failure uses -- so there is exactly one reconciliation code
+ * path, not two independently-maintained ones.
+ */
+export async function reconcilePendingOrders(db: Database.Database, client: KalshiClient): Promise<void> {
+  for (const pending of findPendingOrders(db)) {
+    const reconciled = await reconcileOrder(
+      client, pending.clientOrderId, pending.marketTicker,
+      pending.positionBeforeContracts, pending.requestedContracts
+    );
+
+    // The decision row's entry_price_cents already holds the originally-sized limit
+    // price (recordPendingDecision stores it as given, unvalidated, since
+    // assertNotionalIsConsistent only checks would-trade rows) -- avg_fill_price_cents
+    // is always this same limit price on any real fill, per this project's "never
+    // filled worse than the limit" rule, matching pipeline.ts's resolution logic.
+    const decisionRow = db.prepare('SELECT * FROM decisions WHERE id = ?').get(pending.decisionId) as DecisionRow;
+    const entryPriceCents = decisionRow.entry_price_cents as number;
+
+    resolveOrder(db, pending.id, {
+      filledContracts: reconciled.filledContracts,
+      avgFillPriceCents: reconciled.filledContracts > 0 ? entryPriceCents : null,
+      status: reconciled.status,
+      kalshiOrderId: null,
+      errorDetail: 'resolved by startup reconciliation after an unresolved pending order',
+    });
+
+    const resolvedRecord: DecisionRecord = {
+      itemId: decisionRow.item_id,
+      storyKey: decisionRow.story_key,
+      eventTicker: decisionRow.event_ticker,
+      marketTicker: pending.marketTicker,
+      side: decisionRow.side,
+      rung: decisionRow.rung,
+      direction: decisionRow.direction,
+      magnitudePts: decisionRow.magnitude_pts,
+      contracts: reconciled.filledContracts,
+      entryPriceCents: reconciled.filledContracts > 0 ? entryPriceCents : null,
+      notionalCents: reconciled.filledContracts > 0 ? reconciled.filledContracts * entryPriceCents : 0,
+      edgeCents: decisionRow.edge_cents,
+      wouldTrade: reconciled.filledContracts > 0,
+      reason: `resolved by startup reconciliation: ${reconciled.status}`,
+      orderStatus: 'resolved',
+    };
+    resolveDecision(db, pending.decisionId, resolvedRecord);
+  }
 }
