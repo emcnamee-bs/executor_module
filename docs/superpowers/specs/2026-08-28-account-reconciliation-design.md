@@ -43,17 +43,35 @@ and deliberately deferred to keep this slice narrowly about reconciliation corre
    require a "starting balance" baseline and fee/settlement modeling this project
    doesn't have anywhere yet — deliberately out of scope.
 4. **Settlement awareness is required for reconciliation to work at all, and it must
-   distinguish `closed` from `settled`.** Kalshi markets have three real states:
+   distinguish `closed` from genuinely finalized.** Kalshi markets have three real
+   states, confirmed live against the actual API during this brainstorm (not assumed):
    `active` (trading) → `closed` (trading stopped, but the position is still real and
-   unpaid) → `settled` (a resolved `result`, the position has actually paid out or
-   expired worthless). Without this distinction, every position would eventually
-   trigger a false-positive divergence the moment its market resolves, since Kalshi's
-   real position naturally goes to zero at settlement while the ledger's row still
-   expects the original count. A sibling project's own incident log documents getting
-   this exact distinction wrong once (treating `closed` as `settled` mismarked every
+   unpaid, `result` empty) → **`finalized`** (a resolved `result` of `"yes"`/`"no"`,
+   the position has actually paid out or expired worthless). Two concrete,
+   non-obvious corrections from live data, both load-bearing for the plan:
+   - The terminal **field value** is literally `status: "finalized"`, not `"settled"`
+     — but the **query-parameter** value to filter a market-list fetch for these is
+     `status=settled` (`status=finalized` is rejected by the API as an invalid
+     filter). The query vocabulary and the field vocabulary are NOT the same string,
+     and code must never assume they are.
+   - A market can apparently remain `status: "closed"` indefinitely without ever
+     finalizing — confirmed on a real market over a year past its strike date, zero
+     open interest, `result: ""` throughout. No special-case handling is needed for
+     this: a rare, stuck `closed`-not-yet-finalized row is simply checked again on the
+     next 10-minute pass, indefinitely, the same as any other still-open row. That's
+     a safe default (a few extra API calls, no risk), not a gap — this
+     slice deliberately does not add a time-based "presume settled" fallback, since
+     doing so would reintroduce exactly the false-positive risk this whole design
+     exists to avoid.
+
+   Without this distinction, every position would eventually trigger a false-positive
+   divergence the moment its market resolves, since Kalshi's real position naturally
+   goes to zero once finalized while the ledger's row still expects the original
+   count. A sibling project's own incident log documents getting this exact
+   distinction wrong once (treating `closed` as terminal mismarked every
    not-yet-resolved position as a loss) — this slice must not repeat it. Only a
-   genuinely `settled` market (a resolved `result`) is exempted from future
-   reconciliation; a `closed`-but-unsettled market is still checked normally.
+   genuinely `finalized` market (a resolved `result`) is exempted from future
+   reconciliation; a `closed`-but-not-yet-finalized market is still checked normally.
 5. **Settlement handling is scoped narrowly: mark it, stop reconciling, nothing more.**
    Once a market is confirmed `settled`, the corresponding `decisions` row gets a new
    `settled_at` timestamp and is excluded from all future reconciliation passes.
@@ -136,7 +154,8 @@ NEW: setInterval(async () => {
 reconcileOpenPositions(db, client):
   for each decisions row WHERE would_trade = 1 AND settled_at IS NULL:
     status = await fetchMarketStatus(row.market_ticker)  -- NEW, src/decide/kalshi.ts
-    if status is genuinely settled (a resolved result, not just "closed"):
+    if status.status === 'finalized' (result is 'yes' or 'no' -- confirmed live field
+       value; NOT the string 'settled', which is only the query-parameter spelling):
       markDecisionSettled(db, row.id)
       continue  -- never checked again
     real = positionForTicker(await client.getPositions(), row.market_ticker)
@@ -187,10 +206,18 @@ isolation:
   this slice's market-level blocking mechanism — the two are independent, redundant
   safety layers at different scopes (whole-system vs. one market).
 
-## Open item to verify during plan-authoring
+## Real API research performed during this brainstorm
 
-The exact real-API response shape for a single market's status/result (`GET
-/markets/{ticker}` or an equivalent filtered list call, returning `status` and, once
-settled, a `result` field) has not yet been confirmed against live Kalshi data the way
-slice 3's ladder-fetch fields were. This needs the same live-verification pass before
-the implementation plan is finalized, not an assumption carried into code.
+`GET /markets/{ticker}` (single-market fetch, no auth) returns the same shape as the
+existing bulk `/markets?event_ticker=...` fetch, including `status` and `result`.
+Confirmed live against three real cases:
+- `KXAPRPOTUS-26AUG28-*` (recently resolved, real open interest, real trades from
+  slice 4's own testing): `status: "finalized"`, `result: "yes"` or `"no"`.
+- `KXAPRPOTUS-25JAN31-40.0` (over a year past its strike date, zero open interest):
+  `status: "closed"`, `result: ""` — never finalized, apparently indefinitely.
+- `GET /markets?series_ticker=KXAPRPOTUS&status=settled` is a valid, working filter
+  (returns real finalized markets); `status=finalized` as a query value is rejected
+  by the API as invalid. The query-parameter vocabulary and the field-value
+  vocabulary are confirmed to differ — `reconcileOpenPositions` reads the market
+  object's own `status` field directly (checking for the literal string
+  `"finalized"`), it does not rely on any list-filtering query parameter.
