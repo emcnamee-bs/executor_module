@@ -5,6 +5,10 @@ import type { Rung } from './rung.js';
 export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
 export const MAX_TOTAL_EXPOSURE_CENTS = 4000;
 
+export type OrderStatus =
+  | 'pending' | 'filled' | 'partial' | 'unfilled'
+  | 'rejected' | 'error' | 'unknown' | 'declined-at-execution';
+
 export interface DecisionRecord {
   itemId: string;
   storyKey: string | null;
@@ -20,6 +24,7 @@ export interface DecisionRecord {
   edgeCents: number | null;
   wouldTrade: boolean;
   reason: string;
+  orderStatus: 'pending' | 'resolved';
 }
 
 const SCHEMA = `
@@ -39,6 +44,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   edge_cents REAL,
   would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
   reason TEXT NOT NULL,
+  order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   -- The cap layer above is only worth anything if notional_cents is the real
   -- notional. Nothing else ties it to the position it describes, so a row claiming
@@ -76,6 +82,25 @@ BEGIN
          WHERE would_trade = 1 AND event_ticker = NEW.event_ticker)
         + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
 END;
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_id INTEGER NOT NULL REFERENCES decisions(id),
+  client_order_id TEXT NOT NULL UNIQUE,
+  kalshi_order_id TEXT,
+  market_ticker TEXT NOT NULL,
+  requested_contracts INTEGER NOT NULL CHECK (requested_contracts > 0),
+  position_before_contracts INTEGER NOT NULL,
+  filled_contracts INTEGER NOT NULL DEFAULT 0 CHECK (filled_contracts >= 0),
+  avg_fill_price_cents INTEGER,
+  status TEXT NOT NULL CHECK (status IN (
+    'pending', 'filled', 'partial', 'unfilled', 'rejected', 'error', 'unknown',
+    'declined-at-execution'
+  )),
+  error_detail TEXT,
+  placed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  resolved_at TEXT
+);
 `;
 
 export function openLedger(dbPath: string): Database.Database {
@@ -113,10 +138,10 @@ export function recordDecision(db: Database.Database, record: DecisionRecord): v
     `INSERT INTO decisions
       (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
        magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
-       would_trade, reason)
+       would_trade, reason, order_status)
      VALUES (@itemId, @storyKey, @eventTicker, @marketTicker, @side, @rung, @direction,
        @magnitudePts, @contracts, @entryPriceCents, @notionalCents, @edgeCents,
-       @wouldTrade, @reason)`
+       @wouldTrade, @reason, @orderStatus)`
   ).run({
     ...record,
     wouldTrade: record.wouldTrade ? 1 : 0,
@@ -159,4 +184,88 @@ export function totalExposureCents(db: Database.Database, eventTicker: string): 
     )
     .get(eventTicker) as { total: number };
   return row.total;
+}
+
+/** Writes a not-yet-executed decision: forced would_trade=0, order_status='pending', regardless of the input record's own wouldTrade -- a pending row is never a confirmed position. Returns the new row's id. */
+export function recordPendingDecision(db: Database.Database, record: DecisionRecord): number {
+  const pendingRecord: DecisionRecord = { ...record, wouldTrade: false, orderStatus: 'pending' };
+  assertNotionalIsConsistent(pendingRecord);
+  const info = db.prepare(
+    `INSERT INTO decisions
+      (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+       magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+       would_trade, reason, order_status)
+     VALUES (@itemId, @storyKey, @eventTicker, @marketTicker, @side, @rung, @direction,
+       @magnitudePts, @contracts, @entryPriceCents, @notionalCents, @edgeCents,
+       @wouldTrade, @reason, @orderStatus)`
+  ).run({ ...pendingRecord, wouldTrade: 0 });
+  return Number(info.lastInsertRowid);
+}
+
+/** Updates a pending decision row in place with the real outcome. */
+export function resolveDecision(db: Database.Database, decisionId: number, record: DecisionRecord): void {
+  assertNotionalIsConsistent(record);
+  db.prepare(
+    `UPDATE decisions SET
+       market_ticker = @marketTicker, side = @side, contracts = @contracts,
+       entry_price_cents = @entryPriceCents, notional_cents = @notionalCents,
+       edge_cents = @edgeCents, would_trade = @wouldTrade, reason = @reason,
+       order_status = @orderStatus
+     WHERE id = @decisionId`
+  ).run({ ...record, wouldTrade: record.wouldTrade ? 1 : 0, decisionId });
+}
+
+export interface PendingOrderInput {
+  decisionId: number;
+  clientOrderId: string;
+  marketTicker: string;
+  requestedContracts: number;
+  positionBeforeContracts: number;
+}
+
+export function recordPendingOrder(db: Database.Database, input: PendingOrderInput): number {
+  const info = db.prepare(
+    `INSERT INTO orders
+      (decision_id, client_order_id, market_ticker, requested_contracts, position_before_contracts, status)
+     VALUES (@decisionId, @clientOrderId, @marketTicker, @requestedContracts, @positionBeforeContracts, 'pending')`
+  ).run(input);
+  return Number(info.lastInsertRowid);
+}
+
+export interface OrderResolution {
+  filledContracts: number;
+  avgFillPriceCents: number | null;
+  status: OrderStatus;
+  kalshiOrderId: string | null;
+  errorDetail: string | null;
+}
+
+export function resolveOrder(db: Database.Database, orderId: number, resolution: OrderResolution): void {
+  db.prepare(
+    `UPDATE orders SET
+       filled_contracts = @filledContracts, avg_fill_price_cents = @avgFillPriceCents,
+       status = @status, kalshi_order_id = @kalshiOrderId, error_detail = @errorDetail,
+       resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+     WHERE id = @orderId`
+  ).run({ ...resolution, orderId });
+}
+
+export interface PendingOrderRow {
+  id: number;
+  decisionId: number;
+  clientOrderId: string;
+  marketTicker: string;
+  requestedContracts: number;
+  positionBeforeContracts: number;
+}
+
+export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, decision_id AS decisionId, client_order_id AS clientOrderId, market_ticker AS marketTicker,
+              requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts
+       FROM orders WHERE status = 'pending'`
+    )
+    .all();
+  return rows as PendingOrderRow[];
 }

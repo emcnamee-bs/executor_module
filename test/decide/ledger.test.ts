@@ -9,6 +9,11 @@ import {
   hasDecisionForItem,
   hasOpenPosition,
   totalExposureCents,
+  recordPendingDecision,
+  resolveDecision,
+  recordPendingOrder,
+  resolveOrder,
+  findPendingOrders,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import type Database from 'better-sqlite3';
@@ -40,6 +45,7 @@ function skipRecord(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     edgeCents: null,
     wouldTrade: false,
     reason: 'rumor rung, stake 0',
+    orderStatus: 'resolved',
     ...overrides,
   };
 }
@@ -60,6 +66,7 @@ function tradeRecord(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     edgeCents: 3,
     wouldTrade: true,
     reason: '10 contracts, 3c edge',
+    orderStatus: 'resolved',
     ...overrides,
   };
 }
@@ -267,5 +274,92 @@ describe('ledger', () => {
   it('makes a second row for the same item_id impossible at the DB layer', () => {
     recordDecision(db, skipRecord({ itemId: 'item-dup' }));
     expect(() => recordDecision(db, skipRecord({ itemId: 'item-dup' }))).toThrow(/UNIQUE/i);
+  });
+
+  // --- pending decision + order flow (slice 4) --------------------------------
+
+  describe('pending decision + order flow (slice 4)', () => {
+    it('recordPendingDecision writes a would_trade=0, order_status=pending row and returns its id', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(decisionId).toBeGreaterThan(0);
+
+      const row = db.prepare('SELECT would_trade, order_status FROM decisions WHERE id = ?').get(decisionId) as {
+        would_trade: number;
+        order_status: string;
+      };
+      // Even though tradeRecord() defaults wouldTrade: true, a pending row is never a
+      // confirmed position yet -- recordPendingDecision forces would_trade to 0
+      // regardless of what the input record says, exactly like a genuine 0-fill outcome.
+      expect(row.would_trade).toBe(0);
+      expect(row.order_status).toBe('pending');
+    });
+
+    it('resolveDecision updates an existing pending row in place to the real outcome', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, decisionId, tradeRecord({ contracts: 3, entryPriceCents: 12, notionalCents: 36, wouldTrade: true, orderStatus: 'resolved' }));
+
+      const row = db.prepare('SELECT would_trade, contracts, notional_cents, order_status FROM decisions WHERE id = ?').get(decisionId) as {
+        would_trade: number;
+        contracts: number;
+        notional_cents: number;
+        order_status: string;
+      };
+      expect(row.would_trade).toBe(1);
+      expect(row.contracts).toBe(3);
+      expect(row.notional_cents).toBe(36);
+      expect(row.order_status).toBe('resolved');
+    });
+
+    it('recordPendingOrder writes a pending orders row referencing its decision, and findPendingOrders finds it', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      const orderId = recordPendingOrder(db, {
+        decisionId,
+        clientOrderId: 'cid-abc',
+        marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        requestedContracts: 83,
+        positionBeforeContracts: 0,
+      });
+      expect(orderId).toBeGreaterThan(0);
+
+      const pending = findPendingOrders(db);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        id: orderId,
+        decisionId,
+        clientOrderId: 'cid-abc',
+        marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        requestedContracts: 83,
+        positionBeforeContracts: 0,
+      });
+    });
+
+    it('resolveOrder updates an existing pending order row in place and it no longer appears in findPendingOrders', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      const orderId = recordPendingOrder(db, {
+        decisionId, clientOrderId: 'cid-def', marketTicker: 'T', requestedContracts: 10, positionBeforeContracts: 0,
+      });
+
+      resolveOrder(db, orderId, {
+        filledContracts: 10, avgFillPriceCents: 12, status: 'filled', kalshiOrderId: 'kalshi-1', errorDetail: null,
+      });
+
+      expect(findPendingOrders(db)).toHaveLength(0);
+      const row = db.prepare('SELECT filled_contracts, avg_fill_price_cents, status, kalshi_order_id, resolved_at FROM orders WHERE id = ?').get(orderId) as {
+        filled_contracts: number; avg_fill_price_cents: number; status: string; kalshi_order_id: string; resolved_at: string | null;
+      };
+      expect(row.filled_contracts).toBe(10);
+      expect(row.avg_fill_price_cents).toBe(12);
+      expect(row.status).toBe('filled');
+      expect(row.kalshi_order_id).toBe('kalshi-1');
+      expect(row.resolved_at).not.toBeNull();
+    });
+
+    it('client_order_id is UNIQUE across orders', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', requestedContracts: 1, positionBeforeContracts: 0 });
+      expect(() =>
+        recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', requestedContracts: 1, positionBeforeContracts: 0 })
+      ).toThrow(/UNIQUE/i);
+    });
   });
 });
