@@ -139,9 +139,12 @@ New/changed files:
 - **`src/execute/kalshiClient.ts`** (new) — signing + HTTP calls. Ported
   from `kalshi-spine`'s `node/kalshiClient.js`: `_sign(timestampMs, method,
   path)` (RSA-PSS/SHA-256, `KALSHI-ACCESS-KEY/TIMESTAMP/SIGNATURE` headers,
-  message = `${timestampMs}${METHOD}${pathname}`), `createOrder`,
-  `cancelOrder` (present for completeness/future use, not called by this
-  slice), `getOrders`, `getFills`, `getBalance`, `getPositions`. Fixed
+  message = `${timestampMs}${METHOD}${pathname}`), `createOrder`, `getOrders`,
+  `getPositions`, `getBalance`. `getFills` and `cancelOrder` are deliberately
+  NOT ported: `getFills` has zero callers now that fill detection is
+  position-diff-based (point 7 below), and `cancelOrder` has zero callers
+  given the entry-only, IOC-only scope (an IOC order never leaves anything
+  to cancel) — both would be unused surface area (YAGNI). Fixed
   request-interval throttle matching `kalshi-spine`. `KALSHI_DRY_RUN`
   env-gated simulated-fill path in `createOrder`.
 - **`src/execute/order.ts`** (new) — order-placement orchestration:
