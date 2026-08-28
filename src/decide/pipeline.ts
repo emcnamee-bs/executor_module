@@ -93,6 +93,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
   // exists, `item_id`'s unique index means a second recordDecision(...) INSERT for
   // this item would itself throw, so that row must be UPDATEd in place instead.
   let pendingDecisionId: number | null = null;
+  let pendingOrderId: number | null = null;
   let pendingRecordForCrash: DecisionRecord | null = null;
 
   // Everything from here on is wrapped: the Redis consumer acks the entry once this
@@ -225,6 +226,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       requestedContracts: sizing.contracts,
       positionBeforeContracts,
     });
+    pendingOrderId = orderId;
 
     const placed = await placeOrder(
       {
@@ -264,14 +266,34 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     if (pendingDecisionId !== null && pendingRecordForCrash !== null) {
       // A pending decision row for this item already exists (recordPendingDecision
       // ran before the exception, e.g. placeOrder threw per its own documented
-      // uncaught-exception case) -- item_id's unique index means a second
-      // recordDecision INSERT here would itself throw, so update that row in place
-      // instead. Its associated `orders` row is deliberately left untouched
-      // ('pending'): the true fill outcome is still unknown, and Task 5's
-      // reconcilePendingOrders is what determines and records it for real at next
-      // boot -- this update only makes the interim state legible, it does not claim
-      // to be the final answer, so order_status stays 'pending' rather than
-      // 'resolved'.
+      // uncaught-exception case). item_id's unique index means a second
+      // recordDecision INSERT here would itself throw, so this path updates that
+      // row in place instead -- but ONLY when the associated `orders` row is STILL
+      // 'pending'. If it has already reached a terminal status, that means
+      // resolveOrder already durably recorded a REAL fill outcome (e.g.
+      // resolveDecision's own UPDATE below is what threw, after placeOrder and
+      // resolveOrder both already succeeded) -- rewriting the decision row to
+      // would_trade=false at that point would silently UNDER-report an actual
+      // fill. That is not the safe direction: totalExposureCents sums would_trade=1
+      // rows, so under-reporting a real fill undercounts real exposure and permits
+      // MORE real risk than intended, not less. Worse, the orders row is no longer
+      // 'pending', so Task 5's reconcilePendingOrders will never revisit it and fix
+      // the mistake later. So: rethrow instead, letting main.ts's own backstop log
+      // it loudly rather than this silently papering over an already-resolved order.
+      const orderRow = pendingOrderId !== null
+        ? (db.prepare('SELECT status FROM orders WHERE id = ?').get(pendingOrderId) as
+            | { status: string }
+            | undefined)
+        : undefined;
+      if (orderRow !== undefined && orderRow.status !== 'pending') {
+        throw err;
+      }
+      // The orders row is still pending (or was never reached at all) -- the true
+      // fill outcome is genuinely unknown, so it is safe to update the decision row
+      // in place. Its order_status stays 'pending' rather than 'resolved': this
+      // update only makes the interim state legible, it does not claim to be the
+      // final answer -- Task 5's reconcilePendingOrders is what determines and
+      // records the real outcome for both rows together at next boot.
       resolveDecision(db, pendingDecisionId, {
         ...pendingRecordForCrash,
         wouldTrade: false,

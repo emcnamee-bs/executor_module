@@ -7,6 +7,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import { runDecisionPipeline } from '../../src/decide/pipeline.js';
 import { openLedger, hasOpenPosition, totalExposureCents } from '../../src/decide/ledger.js';
+import * as ledgerModule from '../../src/decide/ledger.js';
 import { computeRung } from '../../src/decide/rung.js';
 import type { Item } from '../../src/item.js';
 import type { ActiveLadder } from '../../src/decide/kalshi.js';
@@ -404,5 +405,84 @@ describe('runDecisionPipeline', () => {
     const decisionRow = db.prepare('SELECT would_trade, reason FROM decisions').get() as { would_trade: number; reason: string };
     expect(decisionRow.would_trade).toBe(0);
     expect(decisionRow.reason).toMatch(/simulated crash mid-placeOrder/);
+  });
+
+  it('is end-to-end crash-safe: a later reconcilePendingOrders resolves both the decision and order rows together with the real fill', async () => {
+    // This is the actual proof the crash-safety design works, not just that the
+    // pipeline itself doesn't throw: after the SAME crash as the test above, a
+    // startup reconciliation pass (Task 5) must independently determine and record
+    // the real outcome for both rows, from Kalshi's own records.
+    vi.spyOn(orderModule, 'placeOrder').mockImplementation(async () => {
+      throw new Error('simulated crash mid-placeOrder');
+    });
+
+    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    await runDecisionPipeline(baseItem(), deps);
+
+    const pendingOrderRow = db
+      .prepare(
+        `SELECT id, decision_id AS decisionId, client_order_id AS clientOrderId, market_ticker AS marketTicker,
+                requested_contracts AS requestedContracts
+         FROM orders WHERE status = 'pending'`
+      )
+      .get() as { id: number; decisionId: number; clientOrderId: string; marketTicker: string; requestedContracts: number };
+    expect(pendingOrderRow).toBeDefined();
+
+    // A real Kalshi client that reports the order as fully filled, mirroring the
+    // mock pattern test/execute/order.test.ts already uses for reconcilePendingOrders.
+    const reconcileClient = {
+      getOrders: async () => ({
+        orders: [{ client_order_id: pendingOrderRow.clientOrderId, ticker: pendingOrderRow.marketTicker }],
+      }),
+      getPositions: async () => ({
+        market_positions: [{ ticker: pendingOrderRow.marketTicker, position: pendingOrderRow.requestedContracts }],
+      }),
+    } as any;
+
+    await orderModule.reconcilePendingOrders(db, reconcileClient);
+
+    const orderRow = db.prepare('SELECT status, filled_contracts FROM orders WHERE id = ?').get(pendingOrderRow.id) as {
+      status: string;
+      filled_contracts: number;
+    };
+    expect(orderRow.status).toBe('filled');
+    expect(orderRow.filled_contracts).toBe(pendingOrderRow.requestedContracts);
+
+    const decisionRow = db
+      .prepare('SELECT would_trade, contracts, order_status FROM decisions WHERE id = ?')
+      .get(pendingOrderRow.decisionId) as { would_trade: number; contracts: number; order_status: string };
+    expect(decisionRow.would_trade).toBe(1);
+    expect(decisionRow.contracts).toBe(pendingOrderRow.requestedContracts);
+    expect(decisionRow.order_status).toBe('resolved');
+  });
+
+  it('re-throws (does not silently rewrite the decision to would_trade=0) when the orders row already reached a terminal status before the exception', async () => {
+    // Simulates resolveDecision's own success-path UPDATE throwing AFTER placeOrder
+    // and resolveOrder already durably recorded a real fill -- e.g. the order row's
+    // notional now breaches the per-trade CHECK on the resolving UPDATE. Rewriting
+    // would_trade to 0 at that point would under-report an actual fill (undercounting
+    // real exposure, not "failing safe"), and since the orders row is no longer
+    // 'pending', Task 5's reconciliation would never revisit it to fix the mistake.
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'cid-z', kalshiOrderId: 'kalshi-z', filledContracts: 40,
+      avgFillPriceCents: 12, status: 'partial', errorDetail: null,
+    });
+    vi.spyOn(ledgerModule, 'resolveDecision').mockImplementationOnce(() => {
+      throw new Error('simulated post-fill resolveDecision failure');
+    });
+
+    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    await expect(runDecisionPipeline(baseItem(), deps)).rejects.toThrow(
+      /simulated post-fill resolveDecision failure/
+    );
+
+    // The orders row already reflects the REAL fill placeOrder reported -- untouched
+    // by the throw, since resolveOrder ran and succeeded before resolveDecision did.
+    const orderRow = db.prepare('SELECT status, filled_contracts, kalshi_order_id FROM orders').get() as {
+      status: string; filled_contracts: number; kalshi_order_id: string;
+    };
+    expect(orderRow.status).toBe('partial');
+    expect(orderRow.filled_contracts).toBe(40);
+    expect(orderRow.kalshi_order_id).toBe('kalshi-z');
   });
 });

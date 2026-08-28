@@ -310,6 +310,63 @@ describe('ledger', () => {
       expect(row.order_status).toBe('resolved');
     });
 
+    // --- enforce_total_exposure_on_resolve: the UPDATE-path mirror of the cap ---
+
+    it('rejects a resolveDecision that would push total exposure over the $40 cap on the UPDATE path, not just INSERT', () => {
+      // A real trade's only INSERT is recordPendingDecision, which always forces
+      // would_trade=0 -- so the INSERT-side enforce_total_exposure trigger's WHEN
+      // (would_trade = 1) is never true for it. Only resolveDecision's later UPDATE
+      // ever sets would_trade=1, so this is the entire live-trade cap-enforcement
+      // path this project relies on. Fill EVENT to the $40 cap via three already
+      // would_trade=1 rows...
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-p', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-q', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-r', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-s', eventTicker: EVENT }));
+      expect(totalExposureCents(db, EVENT)).toBe(4000);
+
+      // ...then resolve a pending row (currently would_trade=0, contributing nothing)
+      // to a real fill that would push the event over the cap. Without the
+      // UPDATE-path trigger, this UPDATE would silently succeed.
+      const decisionId = recordPendingDecision(
+        db,
+        tradeRecord({ storyKey: 's-over', eventTicker: EVENT, orderStatus: 'pending' })
+      );
+      expect(() =>
+        resolveDecision(
+          db,
+          decisionId,
+          tradeRecordOfNotional(1, { storyKey: 's-over', eventTicker: EVENT, wouldTrade: true, orderStatus: 'resolved' })
+        )
+      ).toThrow(/total exposure cap exceeded/);
+
+      // The rejected UPDATE must not have partially applied -- still would_trade=0.
+      const row = db.prepare('SELECT would_trade FROM decisions WHERE id = ?').get(decisionId) as {
+        would_trade: number;
+      };
+      expect(row.would_trade).toBe(0);
+    });
+
+    it('allows a resolveDecision to would_trade=1 when it does not breach the cap, excluding the row being updated from its own sum', () => {
+      // Three rows at $10 each = $30, leaving exactly $10 of headroom.
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-t', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-u', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-v', eventTicker: EVENT }));
+
+      const decisionId = recordPendingDecision(
+        db,
+        tradeRecord({ storyKey: 's-fits', eventTicker: EVENT, orderStatus: 'pending' })
+      );
+      expect(() =>
+        resolveDecision(
+          db,
+          decisionId,
+          tradeRecordOfNotional(1000, { storyKey: 's-fits', eventTicker: EVENT, wouldTrade: true, orderStatus: 'resolved' })
+        )
+      ).not.toThrow();
+      expect(totalExposureCents(db, EVENT)).toBe(4000);
+    });
+
     it('recordPendingOrder writes a pending orders row referencing its decision, and findPendingOrders finds it', () => {
       const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
       const orderId = recordPendingOrder(db, {

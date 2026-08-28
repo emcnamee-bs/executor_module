@@ -83,6 +83,24 @@ BEGIN
         + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
 END;
 
+-- Mirrors enforce_total_exposure for the UPDATE path. recordPendingDecision always
+-- INSERTs with would_trade forced to 0 (the INSERT trigger's WHEN is therefore
+-- never true for a real trade), and resolveDecision is what later UPDATEs a row to
+-- would_trade=1 with the real fill -- with no trigger here, that path would have no
+-- DB-level exposure cap at all, silently losing one of the two defense-in-depth
+-- layers this project built specifically for this check. The id != NEW.id clause
+-- excludes the row being updated from its own sum: it is the row whose new value is
+-- being checked, not a pre-existing sibling to add on top of.
+CREATE TRIGGER IF NOT EXISTS enforce_total_exposure_on_resolve
+BEFORE UPDATE ON decisions
+WHEN NEW.would_trade = 1
+BEGIN
+  SELECT RAISE(ABORT, 'total exposure cap exceeded')
+  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions
+         WHERE would_trade = 1 AND event_ticker = NEW.event_ticker AND id != NEW.id)
+        + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
+END;
+
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   decision_id INTEGER NOT NULL REFERENCES decisions(id),
