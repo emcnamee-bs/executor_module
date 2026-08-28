@@ -307,6 +307,26 @@ describe('reconcileOpenPositions', () => {
     expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
   });
 
+  it('does not skip a ticker whose "pending" order has been stuck long past the legitimate in-flight window', async () => {
+    const decisionId = recordOpenDecision(db, { marketTicker: 'Q', side: 'yes', contracts: 10 });
+    recordPendingOrder(db, {
+      decisionId, clientOrderId: 'coid-stuck', marketTicker: 'Q', side: 'yes',
+      requestedContracts: 10, positionBeforeContracts: 0,
+    });
+    // Backdate placed_at well past STUCK_ORDER_THRESHOLD_MS (5 minutes) -- simulates an
+    // order left pending across a crash/restart with no next boot yet to resolve it,
+    // rather than one genuinely still in flight.
+    db.prepare("UPDATE orders SET placed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') WHERE client_order_id = 'coid-stuck'").run();
+    const client = mockClient({ Q: 0 }); // a real divergence -- expected 10, real 0
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    // A stuck order must not permanently silence this ticker's safety check --
+    // it is reconciled and blocked like any other diverging ticker, surfacing the
+    // problem to a human instead of hiding it behind a "pending" row forever.
+    expect(isMarketBlocked(db, 'Q')).toBe(true);
+  });
+
   it('marks every decision settled when a market_ticker shared by multiple rows finalizes', async () => {
     const id1 = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 10 });
     const id2 = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 8 });

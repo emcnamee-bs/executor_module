@@ -327,13 +327,15 @@ export interface PendingOrderRow {
   side: 'yes' | 'no';
   requestedContracts: number;
   positionBeforeContracts: number;
+  placedAt: string;
 }
 
 export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
   const rows = db
     .prepare(
       `SELECT id, decision_id AS decisionId, client_order_id AS clientOrderId, market_ticker AS marketTicker,
-              side, requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts
+              side, requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts,
+              placed_at AS placedAt
        FROM orders WHERE status = 'pending'`
     )
     .all();
@@ -368,6 +370,25 @@ export interface OpenUnsettledDecision {
  * silently invert a safety check in the meantime.
  */
 export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettledDecision[] {
+  const excluded = db
+    .prepare(
+      `SELECT id FROM decisions
+       WHERE would_trade = 1 AND settled_at IS NULL
+         AND (market_ticker IS NULL OR side IS NULL)`
+    )
+    .all() as { id: number }[];
+  if (excluded.length > 0) {
+    // Filtering these out is a safety measure, not a fix -- silently dropping them
+    // from the check they're excluded from would trade one loud symptom (a
+    // per-pass reconcile error, or a spurious block) for a quieter one. This is
+    // the investigation trigger the comment above promises.
+    console.warn(
+      `[findOpenUnsettledDecisions] excluding ${excluded.length} would-trade row(s) with a ` +
+        `NULL market_ticker or side from reconciliation (decisionIds=${excluded.map((r) => r.id).join(',')}) -- ` +
+        `this should not happen and needs investigation`
+    );
+  }
+
   const rows = db
     .prepare(
       `SELECT id, market_ticker AS marketTicker, side, contracts

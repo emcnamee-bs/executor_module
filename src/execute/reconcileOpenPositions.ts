@@ -40,9 +40,28 @@ function groupByMarketTicker(rows: OpenUnsettledDecision[]): Map<string, OpenUns
 }
 
 /**
+ * An `orders` row can be left `pending` forever, not just for the seconds a real
+ * placeOrder call takes: pipeline.ts deliberately leaves it pending on any
+ * placeOrder failure, for startup reconciliation to resolve on the NEXT boot only.
+ * If nothing ever restarts, that row -- and the skip below -- never clears. A
+ * ticker stuck skipped forever is worse than the false positive this skip exists
+ * to prevent: it is exactly the market most likely to have genuinely diverged,
+ * left with its safety check silently switched off. Past this bound, an order is
+ * "stuck", not "in flight", and is deliberately let through to the real compare
+ * below -- which either finds it healthy or blocks it, surfacing the problem to a
+ * human instead of hiding it. The bound is generous versus the legitimate case
+ * (max 3 attempts * 10s per-request timeout plus backoff, order.ts's own
+ * constants, comfortably under a minute) without being so tight it fights normal
+ * retries.
+ */
+const STUCK_ORDER_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
  * The market_tickers with an order in flight RIGHT NOW (an `orders` row still
- * `pending`, i.e. placed but not yet resolved). Those tickers are deliberately not
- * reconciled this pass.
+ * `pending`, i.e. placed but not yet resolved, and placed recently enough to still
+ * be a legitimate in-flight attempt rather than a stuck one -- see
+ * STUCK_ORDER_THRESHOLD_MS). Those tickers are deliberately not reconciled this
+ * pass.
  *
  * Why: a decision row sits at would_trade=0 for the entire multi-second duration of
  * placeOrder (createOrder plus any retries), so a fill from an in-flight order can
@@ -51,12 +70,18 @@ function groupByMarketTicker(rows: OpenUnsettledDecision[]): Map<string, OpenUns
  * as diverged and blocks it permanently on a false positive -- the exact
  * fires-correctly-but-checked-nothing failure this project's own law names.
  *
- * Skipping costs nothing: the order resolves one way or the other within seconds,
- * and the ticker is reconciled normally on the next pass. This design's own stated
- * principle is that there is no cost to waiting ten more minutes.
+ * Skipping costs nothing for a genuinely in-flight order: it resolves one way or
+ * the other within seconds, and the ticker is reconciled normally on the next
+ * pass. This design's own stated principle is that there is no cost to waiting ten
+ * more minutes.
  */
 function tickersWithOrdersInFlight(db: Database.Database): Set<string> {
-  return new Set(findPendingOrders(db).map((order) => order.marketTicker));
+  const now = Date.now();
+  return new Set(
+    findPendingOrders(db)
+      .filter((order) => now - Date.parse(order.placedAt) < STUCK_ORDER_THRESHOLD_MS)
+      .map((order) => order.marketTicker)
+  );
 }
 
 /**
