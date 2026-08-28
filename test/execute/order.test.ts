@@ -237,7 +237,7 @@ describe('placeOrder', () => {
       getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position: 83 }] }),
     });
 
-    const result = await placeOrder(baseInput(), { client, db });
+    const result = await placeOrder(baseInput(), { client, db, sleepFn: async () => {} });
     expect(attempts).toBe(3);
     expect(result.status).toBe('filled');
     expect(result.filledContracts).toBe(83);
@@ -251,9 +251,73 @@ describe('placeOrder', () => {
       getPositions: async () => ({ market_positions: [] }),
     });
 
-    const result = await placeOrder(baseInput(), { client, db });
+    const result = await placeOrder(baseInput(), { client, db, sleepFn: async () => {} });
     expect(result.status).toBe('unknown');
     expect(result.filledContracts).toBe(0);
+  });
+
+  it('retries a network-level error with no HTTP status at all (e.g. ECONNRESET), and reconciles on exhaustion', async () => {
+    let attempts = 0;
+    const client = mockClient({
+      createOrder: async () => { attempts += 1; throw new Error('ECONNRESET'); },
+      getOrders: async () => ({ orders: [{ client_order_id: deriveClientOrderId('item-1'), ticker: 'KXAPRPOTUS-26AUG28-40.6' }] }),
+      getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position: 83 }] }),
+    });
+
+    const result = await placeOrder(baseInput(), { client, db, sleepFn: async () => {} });
+    expect(attempts).toBe(3);
+    expect(result.status).toBe('filled');
+    expect(result.filledContracts).toBe(83);
+    expect(result.errorDetail).toMatch(/ECONNRESET/);
+  });
+
+  it('sleeps for exactly the Retry-After duration when Kalshi supplies one, not a backoff-computed value', async () => {
+    const delays: number[] = [];
+    let attempts = 0;
+    const client = mockClient({
+      createOrder: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new KalshiRequestError('rate limited', 429, 1000);
+        return { order: { order_id: 'kalshi-retry-after', status: 'executed' } };
+      },
+      getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position: 83 }] }),
+    });
+
+    const result = await placeOrder(baseInput(), {
+      client, db, sleepFn: async (ms) => { delays.push(ms); },
+    });
+
+    expect(delays).toEqual([1000]);
+    expect(result.status).toBe('filled');
+  });
+
+  it('sleeps a growing exponential-backoff-plus-jitter sequence when no Retry-After header is present', async () => {
+    const delays: number[] = [];
+    let attempts = 0;
+    const baseDelayMs = 500;
+    const client = mockClient({
+      createOrder: async () => {
+        attempts += 1;
+        throw new KalshiRequestError('server error', 500, null);
+      },
+    });
+
+    const result = await placeOrder(baseInput(), {
+      client, db, baseDelayMs, sleepFn: async (ms) => { delays.push(ms); },
+    });
+
+    // 2 sleeps between 3 attempts (none after the last, exhausted attempt).
+    expect(delays).toHaveLength(2);
+    delays.forEach((delay, attempt) => {
+      const floor = baseDelayMs * 2 ** attempt;
+      expect(delay).toBeGreaterThanOrEqual(floor);
+      expect(delay).toBeLessThanOrEqual(floor + baseDelayMs);
+    });
+    // The per-attempt ranges are disjoint (attempt 0 tops out below 1000, attempt
+    // 1 starts at 1000), so this alone proves a real growing backoff schedule is
+    // in force, not a flat or shrinking one.
+    expect(delays[1]).toBeGreaterThan(delays[0]);
+    expect(result.status).toBe('unknown'); // getOrders/getPositions default to empty in mockClient()
   });
 
   it('does not retry a definite 4xx rejection (not 429), and records it as rejected without reconciling', async () => {

@@ -102,6 +102,18 @@ export interface PlaceOrderDeps {
   baseDelayMs?: number;
 }
 
+/**
+ * NOTE for callers (Task 6's pipeline integration): `placeOrder` can still throw
+ * rather than resolve to a `PlaceOrderResult` -- specifically if the "after"
+ * `getPositions` call (on a definite createOrder success) or either call inside
+ * `reconcileOrder` (on exhausted retries) itself fails. This is left uncaught
+ * deliberately: the caller's `orders` row was already written as 'pending' by
+ * `recordPendingOrder` before `placeOrder` was ever invoked, so a thrown error
+ * here leaves that row untouched rather than resolving it to a guessed status --
+ * `reconcilePendingOrders` (Task 5) will pick it up later. The caller MUST wrap
+ * its `placeOrder` call in its own try/catch and leave the pending row in place
+ * on that path; it must not assume `placeOrder` always resolves cleanly.
+ */
 export interface PlaceOrderResult {
   clientOrderId: string;
   kalshiOrderId: string | null;
@@ -118,15 +130,23 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
   const baseDelayMs = deps.baseDelayMs ?? 500;
   const clientOrderId = deriveClientOrderId(input.itemId);
 
+  // notionalCents is DERIVED here, never trusted verbatim from the input -- a
+  // guard that checks the caller's own claimed notional rather than the real
+  // contracts x entryPriceCents would let a caller-side bug (e.g. notionalCents:
+  // 0 alongside real contracts/entryPriceCents) sail straight past the exposure
+  // cap and place a real order. Matches the same invariant the ledger's own
+  // schema enforces (notional_cents = contracts * entry_price_cents).
+  const notionalCents = input.contracts * input.entryPriceCents;
+
   // Third, independent exposure-cap layer -- redundant with evaluateSizing's own
   // check moments earlier, matching this project's established defense-in-depth
   // pattern (sizing.ts's contractsWithinCaps + the ledger's DB-level CHECK/trigger).
   const currentExposure = totalExposureCents(db, input.eventTicker);
-  if (currentExposure + input.notionalCents > MAX_TOTAL_EXPOSURE_CENTS) {
+  if (currentExposure + notionalCents > MAX_TOTAL_EXPOSURE_CENTS) {
     return {
       clientOrderId, kalshiOrderId: null, filledContracts: 0, avgFillPriceCents: null,
       status: 'declined-at-execution',
-      errorDetail: `exposure cap would be breached: ${currentExposure}c + ${input.notionalCents}c > ${MAX_TOTAL_EXPOSURE_CENTS}c`,
+      errorDetail: `exposure cap would be breached: ${currentExposure}c + ${notionalCents}c > ${MAX_TOTAL_EXPOSURE_CENTS}c`,
     };
   }
 
