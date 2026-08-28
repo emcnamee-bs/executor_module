@@ -155,4 +155,27 @@ describe('positionForTicker', () => {
     const resp = { market_positions: [{ ticker: 'A', position: 5 }] };
     expect(positionForTicker(resp, 'ZZZ')).toBe(0);
   });
+
+  it('preserves the SIGN of a NO holding rather than reporting its magnitude', () => {
+    // Kalshi's `position` is signed: negative = a NO holding (confirmed against
+    // kalshi-spine's and Fast99Follower's identical normalize.js). Fill detection
+    // depends entirely on that sign surviving this function.
+    const resp = { market_positions: [{ ticker: 'A', position: -93 }] };
+    expect(positionForTicker(resp, 'A')).toBe(-93);
+  });
+
+  // --- I6: a malformed entry is not a zero position ----------------------------
+
+  it('throws rather than fabricating a 0 when a MATCHING entry has a non-numeric position', () => {
+    // Distinct from "no entry for this ticker", which legitimately means zero. A
+    // fabricated zero here feeds straight into fill detection and the exposure
+    // ledger -- exactly the "says something it never checked" failure mode.
+    const resp = { market_positions: [{ ticker: 'A', position: NaN }] };
+    expect(() => positionForTicker(resp, 'A')).toThrow(/non-numeric position for A/);
+  });
+
+  it('throws when a matching entry\'s position is missing entirely from the response shape', () => {
+    const resp = { market_positions: [{ ticker: 'A' } as unknown as { ticker: string; position: number }] };
+    expect(() => positionForTicker(resp, 'A')).toThrow(/non-numeric position for A/);
+  });
 });

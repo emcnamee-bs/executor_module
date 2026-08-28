@@ -373,6 +373,7 @@ describe('ledger', () => {
         decisionId,
         clientOrderId: 'cid-abc',
         marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        side: 'yes',
         requestedContracts: 83,
         positionBeforeContracts: 0,
       });
@@ -385,37 +386,91 @@ describe('ledger', () => {
         decisionId,
         clientOrderId: 'cid-abc',
         marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        side: 'yes',
         requestedContracts: 83,
         positionBeforeContracts: 0,
       });
     });
 
+    // --- C1: the orders row must carry the side, for both legs -----------------
+
+    it.each(['yes', 'no'] as const)(
+      'round-trips side=%s through recordPendingOrder -> findPendingOrders, so crash recovery can interpret a SIGNED position diff',
+      (side) => {
+        // Without this column, reconcilePendingOrders has no way to tell a NO fill
+        // (which moves Kalshi's signed `position` DOWN) from no fill at all.
+        const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending', side }));
+        recordPendingOrder(db, {
+          decisionId, clientOrderId: `cid-${side}`, marketTicker: 'T', side,
+          requestedContracts: 5, positionBeforeContracts: side === 'no' ? -10 : 10,
+        });
+
+        const pending = findPendingOrders(db);
+        expect(pending).toHaveLength(1);
+        expect(pending[0].side).toBe(side);
+        expect(pending[0].positionBeforeContracts).toBe(side === 'no' ? -10 : 10);
+      }
+    );
+
+    it('rejects an orders row with a side outside yes/no at the DB layer', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO orders (decision_id, client_order_id, market_ticker, side,
+                                 requested_contracts, position_before_contracts, status)
+             VALUES (?, 'cid-bad-side', 'T', 'maybe', 1, 0, 'pending')`
+          )
+          .run(decisionId)
+      ).toThrow(/constraint/i);
+    });
+
     it('resolveOrder updates an existing pending order row in place and it no longer appears in findPendingOrders', () => {
       const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
       const orderId = recordPendingOrder(db, {
-        decisionId, clientOrderId: 'cid-def', marketTicker: 'T', requestedContracts: 10, positionBeforeContracts: 0,
+        decisionId, clientOrderId: 'cid-def', marketTicker: 'T', side: 'yes', requestedContracts: 10, positionBeforeContracts: 0,
       });
 
       resolveOrder(db, orderId, {
-        filledContracts: 10, avgFillPriceCents: 12, status: 'filled', kalshiOrderId: 'kalshi-1', errorDetail: null,
+        filledContracts: 10, avgFillPriceCents: 12, status: 'filled', kalshiOrderId: 'kalshi-1',
+        kalshiOrderStatus: 'executed', errorDetail: null,
       });
 
       expect(findPendingOrders(db)).toHaveLength(0);
-      const row = db.prepare('SELECT filled_contracts, avg_fill_price_cents, status, kalshi_order_id, resolved_at FROM orders WHERE id = ?').get(orderId) as {
-        filled_contracts: number; avg_fill_price_cents: number; status: string; kalshi_order_id: string; resolved_at: string | null;
+      const row = db.prepare('SELECT filled_contracts, avg_fill_price_cents, status, kalshi_order_id, kalshi_order_status, resolved_at FROM orders WHERE id = ?').get(orderId) as {
+        filled_contracts: number; avg_fill_price_cents: number; status: string; kalshi_order_id: string; kalshi_order_status: string | null; resolved_at: string | null;
       };
       expect(row.filled_contracts).toBe(10);
       expect(row.avg_fill_price_cents).toBe(12);
       expect(row.status).toBe('filled');
       expect(row.kalshi_order_id).toBe('kalshi-1');
+      // I3: Kalshi's own status word for the order is persisted as an audit trail.
+      expect(row.kalshi_order_status).toBe('executed');
       expect(row.resolved_at).not.toBeNull();
+    });
+
+    it('persists kalshi_order_status as NULL on a path where no createOrder response was received', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      const orderId = recordPendingOrder(db, {
+        decisionId, clientOrderId: 'cid-ambiguous', marketTicker: 'T', side: 'no', requestedContracts: 10, positionBeforeContracts: 0,
+      });
+
+      resolveOrder(db, orderId, {
+        filledContracts: 0, avgFillPriceCents: null, status: 'unknown', kalshiOrderId: null,
+        kalshiOrderStatus: null, errorDetail: 'ECONNRESET',
+      });
+
+      const row = db.prepare('SELECT kalshi_order_status FROM orders WHERE id = ?').get(orderId) as {
+        kalshi_order_status: string | null;
+      };
+      expect(row.kalshi_order_status).toBeNull();
     });
 
     it('client_order_id is UNIQUE across orders', () => {
       const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
-      recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', requestedContracts: 1, positionBeforeContracts: 0 });
+      recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', side: 'yes', requestedContracts: 1, positionBeforeContracts: 0 });
       expect(() =>
-        recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', requestedContracts: 1, positionBeforeContracts: 0 })
+        recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', side: 'yes', requestedContracts: 1, positionBeforeContracts: 0 })
       ).toThrow(/UNIQUE/i);
     });
 

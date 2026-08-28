@@ -111,6 +111,25 @@ function stubKalshiClient(position = 0) {
   return { getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position }] }) } as any;
 }
 
+/**
+ * A client that walks a scripted sequence of position reads, for the tests that
+ * exercise the REAL placeOrder end to end: the pipeline takes the "before"
+ * snapshot itself, then placeOrder takes the "after" one.
+ */
+function sequencedKalshiClient(positions: number[], createOrderStatus = 'executed') {
+  let call = 0;
+  return {
+    getPositions: async () => {
+      const position = positions[Math.min(call++, positions.length - 1)];
+      return { market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position }] };
+    },
+    getOrders: async () => ({ orders: [] }),
+    createOrder: async (body: { client_order_id: string }) => ({
+      order: { order_id: `kalshi-for-${body.client_order_id}`, status: createOrderStatus },
+    }),
+  } as any;
+}
+
 interface DecisionRow {
   item_id: string;
   rung: string;
@@ -159,9 +178,11 @@ describe('runDecisionPipeline', () => {
     vi.spyOn(orderModule, 'placeOrder').mockImplementation(async (input) => ({
       clientOrderId: 'default-mock-client-order-id',
       kalshiOrderId: 'default-mock-kalshi-order-id',
+      kalshiOrderStatus: 'executed',
       filledContracts: input.contracts,
       avgFillPriceCents: input.entryPriceCents,
       status: 'filled',
+      dryRun: false,
       errorDetail: null,
     }));
   });
@@ -350,8 +371,9 @@ describe('runDecisionPipeline', () => {
 
   it('places a real order for a would-trade decision and resolves both the decision and order rows with the ACTUAL fill, not the sized amount', async () => {
     vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
-      clientOrderId: 'cid-x', kalshiOrderId: 'kalshi-x', filledContracts: 40, // a partial fill: sizing wanted more
-      avgFillPriceCents: 12, status: 'partial', errorDetail: null,
+      clientOrderId: 'cid-x', kalshiOrderId: 'kalshi-x', kalshiOrderStatus: 'executed',
+      filledContracts: 40, // a partial fill: sizing wanted more
+      avgFillPriceCents: 12, status: 'partial', dryRun: false, errorDetail: null,
     });
 
     const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
@@ -377,7 +399,8 @@ describe('runDecisionPipeline', () => {
 
   it('records would_trade=0 when placeOrder reports a zero fill, even though evaluateSizing decided to trade', async () => {
     vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
-      clientOrderId: 'cid-y', kalshiOrderId: null, filledContracts: 0, avgFillPriceCents: null, status: 'unfilled', errorDetail: null,
+      clientOrderId: 'cid-y', kalshiOrderId: null, kalshiOrderStatus: null, filledContracts: 0,
+      avgFillPriceCents: null, status: 'unfilled', dryRun: false, errorDetail: null,
     });
 
     const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
@@ -422,20 +445,26 @@ describe('runDecisionPipeline', () => {
     const pendingOrderRow = db
       .prepare(
         `SELECT id, decision_id AS decisionId, client_order_id AS clientOrderId, market_ticker AS marketTicker,
-                requested_contracts AS requestedContracts
+                side, requested_contracts AS requestedContracts
          FROM orders WHERE status = 'pending'`
       )
-      .get() as { id: number; decisionId: number; clientOrderId: string; marketTicker: string; requestedContracts: number };
+      .get() as { id: number; decisionId: number; clientOrderId: string; marketTicker: string; side: 'yes' | 'no'; requestedContracts: number };
     expect(pendingOrderRow).toBeDefined();
+    // This fixture sizes to the NO leg, so the "fully filled" position below has to
+    // be NEGATIVE: Kalshi's `position` is signed, and a NO fill moves it DOWN. A
+    // positive reading here would (correctly, post-C1) mean no NO fill happened.
+    expect(pendingOrderRow.side).toBe('no');
 
     // A real Kalshi client that reports the order as fully filled, mirroring the
     // mock pattern test/execute/order.test.ts already uses for reconcilePendingOrders.
+    const filledPosition =
+      pendingOrderRow.side === 'no' ? -pendingOrderRow.requestedContracts : pendingOrderRow.requestedContracts;
     const reconcileClient = {
       getOrders: async () => ({
         orders: [{ client_order_id: pendingOrderRow.clientOrderId, ticker: pendingOrderRow.marketTicker }],
       }),
       getPositions: async () => ({
-        market_positions: [{ ticker: pendingOrderRow.marketTicker, position: pendingOrderRow.requestedContracts }],
+        market_positions: [{ ticker: pendingOrderRow.marketTicker, position: filledPosition }],
       }),
     } as any;
 
@@ -456,33 +485,147 @@ describe('runDecisionPipeline', () => {
     expect(decisionRow.order_status).toBe('resolved');
   });
 
-  it('re-throws (does not silently rewrite the decision to would_trade=0) when the orders row already reached a terminal status before the exception', async () => {
-    // Simulates resolveDecision's own success-path UPDATE throwing AFTER placeOrder
-    // and resolveOrder already durably recorded a real fill -- e.g. the order row's
-    // notional now breaches the per-trade CHECK on the resolving UPDATE. Rewriting
-    // would_trade to 0 at that point would under-report an actual fill (undercounting
-    // real exposure, not "failing safe"), and since the orders row is no longer
-    // 'pending', Task 5's reconciliation would never revisit it to fix the mistake.
+  // --- C2: the two resolve writes are one atomic unit --------------------------
+
+  it('rolls the orders row back with the decision row when the resolveDecision half fails, leaving BOTH recoverable', async () => {
+    // Simulates resolveDecision's own success-path UPDATE throwing after placeOrder
+    // reported a real fill. Before this fix the two writes were separate, so
+    // resolveOrder's terminal status committed on its own -- and findPendingOrders
+    // scans ONLY status='pending', so that row became invisible to startup recovery
+    // forever, leaving a real filled position permanently reported as would_trade=0
+    // / zero exposure. Wrapped in one transaction, the orders row rolls back with
+    // it and stays 'pending', which is exactly what makes recovery possible.
     vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
-      clientOrderId: 'cid-z', kalshiOrderId: 'kalshi-z', filledContracts: 40,
-      avgFillPriceCents: 12, status: 'partial', errorDetail: null,
+      clientOrderId: 'cid-z', kalshiOrderId: 'kalshi-z', kalshiOrderStatus: 'executed',
+      filledContracts: 2, avgFillPriceCents: 42, status: 'filled', dryRun: false, errorDetail: null,
     });
     vi.spyOn(ledgerModule, 'resolveDecision').mockImplementationOnce(() => {
       throw new Error('simulated post-fill resolveDecision failure');
     });
 
     const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
-    await expect(runDecisionPipeline(baseItem(), deps)).rejects.toThrow(
-      /simulated post-fill resolveDecision failure/
+    await runDecisionPipeline(baseItem(), deps);
+
+    // NOT left half-applied: the orders row shows its pre-transaction state.
+    const orderRow = db.prepare('SELECT id, status, filled_contracts, kalshi_order_id, resolved_at FROM orders').get() as {
+      id: number; status: string; filled_contracts: number; kalshi_order_id: string | null; resolved_at: string | null;
+    };
+    expect(orderRow.status).toBe('pending');
+    expect(orderRow.filled_contracts).toBe(0);
+    expect(orderRow.kalshi_order_id).toBeNull();
+    expect(orderRow.resolved_at).toBeNull();
+
+    // ...and the decision row is still pending too, marked with what went wrong.
+    const decisionRow = db.prepare('SELECT would_trade, order_status, reason FROM decisions').get() as {
+      would_trade: number; order_status: string; reason: string;
+    };
+    expect(decisionRow.would_trade).toBe(0);
+    expect(decisionRow.order_status).toBe('pending');
+    expect(decisionRow.reason).toMatch(/simulated post-fill resolveDecision failure/);
+
+    // The point of rolling back rather than half-applying: startup recovery can
+    // still see this order and record the REAL fill from Kalshi's own records.
+    await orderModule.reconcilePendingOrders(
+      db,
+      {
+        getOrders: async () => ({ orders: [{ client_order_id: 'cid-z', ticker: 'KXAPRPOTUS-26AUG28-40.6' }] }),
+        // A NO fill: the signed position moved DOWN by the 2 contracts sized.
+        getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position: -2 }] }),
+      } as any
     );
 
-    // The orders row already reflects the REAL fill placeOrder reported -- untouched
-    // by the throw, since resolveOrder ran and succeeded before resolveDecision did.
+    const recoveredOrder = db.prepare('SELECT status, filled_contracts FROM orders WHERE id = ?').get(orderRow.id) as {
+      status: string; filled_contracts: number;
+    };
+    expect(recoveredOrder.status).toBe('filled');
+    expect(recoveredOrder.filled_contracts).toBe(2);
+    const recoveredDecision = db.prepare('SELECT would_trade, contracts, notional_cents, order_status FROM decisions').get() as {
+      would_trade: number; contracts: number; notional_cents: number; order_status: string;
+    };
+    expect(recoveredDecision.would_trade).toBe(1);
+    expect(recoveredDecision.contracts).toBe(2);
+    expect(recoveredDecision.notional_cents).toBe(84); // 2 x 42c
+    expect(recoveredDecision.order_status).toBe('resolved');
+  });
+
+  // --- C1: the whole NO-side path, end to end through the REAL placeOrder -------
+
+  it('drives a real NO-side trade end to end -- sizing -> recordPendingOrder(side) -> placeOrder -> resolved rows -- against a SIGNED position that moved DOWN', async () => {
+    // This fixture's ladder sizes to the NO leg (evaluateSizing picks whichever
+    // side has the better edge), so this is the ordinary case, not an exotic one.
+    // placeOrder is deliberately NOT mocked here: this drives the real call site,
+    // which is the only way a caller that stops passing `side` gets caught. Before
+    // C1's fix the "after" read of -2 diffed as max(0, -2 - 0) = 0, and this real
+    // 2-contract position was recorded as unfilled / zero exposure.
+    vi.mocked(orderModule.placeOrder).mockRestore();
+    const recordPendingOrderSpy = vi.spyOn(ledgerModule, 'recordPendingOrder');
+
+    const kalshiClient = sequencedKalshiClient([0, -2]);
+    await runDecisionPipeline(baseItem(), {
+      anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient,
+    });
+
+    // The side actually reached the orders row -- the root cause of C1 was that it
+    // had nowhere to be stored at all.
+    expect(recordPendingOrderSpy).toHaveBeenCalledTimes(1);
+    expect(recordPendingOrderSpy.mock.calls[0][1]).toMatchObject({ side: 'no', positionBeforeContracts: 0 });
+
+    const orderRow = db.prepare('SELECT side, status, filled_contracts, kalshi_order_status FROM orders').get() as {
+      side: string; status: string; filled_contracts: number; kalshi_order_status: string | null;
+    };
+    expect(orderRow.side).toBe('no');
+    expect(orderRow.status).toBe('filled');
+    expect(orderRow.filled_contracts).toBe(2);
+    // I3: Kalshi's own status word persisted from the createOrder response.
+    expect(orderRow.kalshi_order_status).toBe('executed');
+
+    const decisionRow = db.prepare('SELECT side, would_trade, contracts, entry_price_cents, notional_cents, order_status FROM decisions').get() as {
+      side: string; would_trade: number; contracts: number; entry_price_cents: number; notional_cents: number; order_status: string;
+    };
+    expect(decisionRow.side).toBe('no');
+    expect(decisionRow.would_trade).toBe(1);
+    expect(decisionRow.contracts).toBe(2);
+    expect(decisionRow.entry_price_cents).toBe(42);
+    expect(decisionRow.notional_cents).toBe(84);
+    expect(decisionRow.order_status).toBe('resolved');
+    expect(totalExposureCents(db, EVENT)).toBe(84);
+  });
+
+  // --- I5: a DRY_RUN must never write a real position into the ledger ----------
+
+  it('records a KALSHI_DRY_RUN simulated fill as would_trade=0, consuming no exposure and creating no open position', async () => {
+    // The documented workflow is "dry run first, then go live", so this is the very
+    // first intended use of the switch. Recording the simulated fill as a real
+    // would_trade row leaves phantom positions consuming the real $40 cap and makes
+    // hasOpenPosition true for stories that never traded.
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'cid-dry', kalshiOrderId: 'DRYRUN-cid-dry', kalshiOrderStatus: null,
+      filledContracts: 2, avgFillPriceCents: 42, status: 'filled', dryRun: true, errorDetail: null,
+    });
+
+    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    await runDecisionPipeline(baseItem(), deps);
+
+    const decisionRow = db.prepare('SELECT would_trade, contracts, entry_price_cents, notional_cents, order_status, reason FROM decisions').get() as {
+      would_trade: number; contracts: number; entry_price_cents: number | null; notional_cents: number; order_status: string; reason: string;
+    };
+    expect(decisionRow.would_trade).toBe(0);
+    expect(decisionRow.contracts).toBe(0);
+    expect(decisionRow.entry_price_cents).toBeNull();
+    expect(decisionRow.notional_cents).toBe(0);
+    expect(decisionRow.order_status).toBe('resolved');
+    expect(decisionRow.reason).toMatch(/\[DRY_RUN simulated\] would have filled 2\/2 contracts at 42c/);
+
+    // The two queries every cap/dedup decision actually reads are untouched by it.
+    expect(totalExposureCents(db, EVENT)).toBe(0);
+    expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(false);
+
+    // The orders row still records the simulation for audit, unmistakably marked.
     const orderRow = db.prepare('SELECT status, filled_contracts, kalshi_order_id FROM orders').get() as {
       status: string; filled_contracts: number; kalshi_order_id: string;
     };
-    expect(orderRow.status).toBe('partial');
-    expect(orderRow.filled_contracts).toBe(40);
-    expect(orderRow.kalshi_order_id).toBe('kalshi-z');
+    expect(orderRow.status).toBe('filled');
+    expect(orderRow.filled_contracts).toBe(2);
+    expect(orderRow.kalshi_order_id).toMatch(/^DRYRUN-/);
   });
 });

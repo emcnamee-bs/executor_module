@@ -467,9 +467,11 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
     vi.spyOn(orderModule, 'placeOrder').mockImplementation(async (input) => ({
       clientOrderId: 'default-mock-client-order-id',
       kalshiOrderId: 'default-mock-kalshi-order-id',
+      kalshiOrderStatus: 'executed',
       filledContracts: input.contracts,
       avgFillPriceCents: input.entryPriceCents,
       status: 'filled',
+      dryRun: false,
       errorDetail: null,
     }));
     // The real callback logs a summary line and a [KEYPHRASE-MATCH] line per item;
@@ -582,7 +584,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       side: 'yes', rung: 'reported', direction: 'up', magnitudePts: 0.3, contracts: 5,
       entryPriceCents: 12, notionalCents: 60, edgeCents: 3, wouldTrade: true, reason: 'pre-crash', orderStatus: 'pending',
     });
-    recordPendingOrder(db, { decisionId, clientOrderId: 'orphan-cid', marketTicker: 'T', requestedContracts: 5, positionBeforeContracts: 0 });
+    recordPendingOrder(db, { decisionId, clientOrderId: 'orphan-cid', marketTicker: 'T', side: 'yes', requestedContracts: 5, positionBeforeContracts: 0 });
 
     const kalshiClient = {
       getOrders: async () => ({ orders: [{ client_order_id: 'orphan-cid', ticker: 'T' }] }),

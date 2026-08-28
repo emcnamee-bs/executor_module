@@ -223,6 +223,10 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       decisionId,
       clientOrderId,
       marketTicker: sizing.marketTicker!,
+      // Stored durably because Kalshi's `position` is SIGNED: crash recovery has
+      // only this row to interpret a position diff against, and reading a NO fill
+      // as a YES-shaped diff records a real position as zero contracts.
+      side: sizing.side!,
       requestedContracts: sizing.contracts,
       positionBeforeContracts,
     });
@@ -242,25 +246,44 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       { client: kalshiClient, db }
     );
 
-    resolveOrder(db, orderId, {
-      filledContracts: placed.filledContracts,
-      avgFillPriceCents: placed.avgFillPriceCents,
-      status: placed.status,
-      kalshiOrderId: placed.kalshiOrderId,
-      errorDetail: placed.errorDetail,
-    });
+    // A DRY_RUN's "fill" is simulated locally and is NOT a real position. The
+    // `orders` row still records the simulation (already unmistakably marked by the
+    // DRYRUN- prefix on kalshi_order_id) for audit, but the `decisions` row -- the
+    // one every exposure-cap and dedup query actually reads -- must record it as a
+    // skip. Otherwise the documented "dry run first, then go live" workflow leaves
+    // phantom positions consuming the real $40 cap and makes hasOpenPosition true
+    // for stories that never traded.
+    const isRealFill = !placed.dryRun && placed.filledContracts > 0;
+    const actualNotionalCents = isRealFill ? placed.filledContracts * (placed.avgFillPriceCents ?? 0) : 0;
+    const resolvedReason = placed.dryRun
+      ? `[DRY_RUN simulated] would have filled ${placed.filledContracts}/${sizing.contracts} contracts ` +
+        `at ${placed.avgFillPriceCents}c -- not a real position`
+      : (placed.errorDetail ?? `order ${placed.status}: ${placed.filledContracts}/${sizing.contracts} contracts filled`);
 
-    const actualNotionalCents =
-      placed.filledContracts > 0 ? placed.filledContracts * (placed.avgFillPriceCents ?? 0) : 0;
-    resolveDecision(db, decisionId, {
-      ...pendingRecord,
-      contracts: placed.filledContracts,
-      entryPriceCents: placed.filledContracts > 0 ? placed.avgFillPriceCents : null,
-      notionalCents: actualNotionalCents,
-      wouldTrade: placed.filledContracts > 0,
-      reason: placed.errorDetail ?? `order ${placed.status}: ${placed.filledContracts}/${sizing.contracts} contracts filled`,
-      orderStatus: 'resolved',
-    });
+    // ONE transaction: resolveOrder alone committing a terminal status while
+    // resolveDecision fails (or the process dies in the gap) makes the order
+    // invisible to reconcilePendingOrders -- which scans only status='pending' --
+    // leaving a real filled position permanently reported as zero exposure.
+    // Rolled back together, both rows stay pending and startup recovery fixes them.
+    db.transaction(() => {
+      resolveOrder(db, orderId, {
+        filledContracts: placed.filledContracts,
+        avgFillPriceCents: placed.avgFillPriceCents,
+        status: placed.status,
+        kalshiOrderId: placed.kalshiOrderId,
+        kalshiOrderStatus: placed.kalshiOrderStatus,
+        errorDetail: placed.errorDetail,
+      });
+      resolveDecision(db, decisionId, {
+        ...pendingRecord,
+        contracts: isRealFill ? placed.filledContracts : 0,
+        entryPriceCents: isRealFill ? placed.avgFillPriceCents : null,
+        notionalCents: actualNotionalCents,
+        wouldTrade: isRealFill,
+        reason: resolvedReason,
+        orderStatus: 'resolved',
+      });
+    })();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (pendingDecisionId !== null && pendingRecordForCrash !== null) {
@@ -280,6 +303,12 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       // 'pending', so Task 5's reconcilePendingOrders will never revisit it and fix
       // the mistake later. So: rethrow instead, letting main.ts's own backstop log
       // it loudly rather than this silently papering over an already-resolved order.
+      //
+      // The transactional resolve above now makes this state unreachable via the
+      // success path (a failing resolveDecision rolls resolveOrder back with it, so
+      // the orders row is still 'pending' here and recovery CAN fix it later). This
+      // guard stays as the invariant check for any other path that could leave a
+      // terminal orders row behind an unresolved decision row.
       const orderRow = pendingOrderId !== null
         ? (db.prepare('SELECT status FROM orders WHERE id = ?').get(pendingOrderId) as
             | { status: string }

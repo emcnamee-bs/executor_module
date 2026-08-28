@@ -178,6 +178,28 @@ export class KalshiClient {
   }
 }
 
+/**
+ * Kalshi's `position` is SIGNED: positive = a YES holding, negative = a NO holding
+ * (confirmed against kalshi-spine's and Fast99Follower's identical
+ * `normalize.js`: `count = Math.abs(pos); side = pos > 0 ? 'yes' : 'no'`). The sign
+ * is preserved here verbatim -- `signedFillDelta` in order.ts is the single place
+ * that convention is interpreted.
+ *
+ * No entry for the ticker legitimately means zero (this codebase's established
+ * "absence means zero" convention, matching src/decide/kalshi.ts's 0.0000-price
+ * handling). But an entry that EXISTS with a non-numeric `position` is a malformed
+ * response, not a zero position: fabricating a zero there would feed straight into
+ * fill detection and the exposure ledger. Fail loudly instead. No fallback field
+ * (e.g. `position_fp`) is guessed at -- this codebase deliberately does not build on
+ * unverified field names.
+ */
 export function positionForTicker(resp: GetPositionsResponse, ticker: string): number {
-  return resp.market_positions.find((p) => p.ticker === ticker)?.position ?? 0;
+  const entry = resp.market_positions.find((p) => p.ticker === ticker);
+  if (entry === undefined) return 0;
+  if (!Number.isFinite(entry.position)) {
+    throw new Error(
+      `Kalshi returned a non-numeric position for ${ticker}: ${JSON.stringify(entry)}`
+    );
+  }
+  return entry.position;
 }

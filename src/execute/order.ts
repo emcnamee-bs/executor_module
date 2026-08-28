@@ -52,16 +52,38 @@ export interface ReconcileResult {
 }
 
 /**
+ * A YES fill increases Kalshi's `position`; a NO fill DECREASES it (`position` is
+ * signed: positive = a YES holding, negative = a NO holding -- confirmed against
+ * both real production clients this code was ported from, kalshi-spine's and
+ * Fast99Follower's identical `normalize.js`: `count = Math.abs(pos);
+ * side = pos > 0 ? 'yes' : 'no'`). This is the ONE place that sign convention is
+ * applied -- everywhere else in this codebase works in a side-agnostic contract
+ * count. Reading a NO fill with a YES-shaped `after - before` diff yields a
+ * negative number that clamps to 0, silently recording a real, fully-executed
+ * position as zero contracts / zero exposure.
+ *
+ * Also clamped ABOVE by requestedContracts by both callers: an IOC order can never
+ * fill more than it asked for, so a larger diff means the account's position moved
+ * for some unrelated reason between the two snapshots, and attributing that move to
+ * this order would over-state its notional.
+ */
+export function signedFillDelta(side: 'yes' | 'no', before: number, after: number): number {
+  const delta = side === 'yes' ? after - before : before - after;
+  return Math.max(0, delta);
+}
+
+/**
  * Ground truth for an ambiguous or crash-orphaned order attempt. Never guesses:
  * getOrders confirms whether Kalshi has any record of the client_order_id at all;
- * the position diff against the STORED positionBeforeContracts (never re-derived)
- * is the authoritative fill count regardless of what an ambiguous HTTP response did
- * or didn't say.
+ * the SIGNED position diff against the STORED positionBeforeContracts (never
+ * re-derived) is the authoritative fill count regardless of what an ambiguous HTTP
+ * response did or didn't say.
  */
 export async function reconcileOrder(
   client: KalshiClient,
   clientOrderId: string,
   marketTicker: string,
+  side: 'yes' | 'no',
   positionBeforeContracts: number,
   requestedContracts: number
 ): Promise<ReconcileResult> {
@@ -70,7 +92,10 @@ export async function reconcileOrder(
 
   const positionsResp = await client.getPositions();
   const positionNow = positionForTicker(positionsResp, marketTicker);
-  const filledContracts = Math.max(0, positionNow - positionBeforeContracts);
+  const filledContracts = Math.min(
+    signedFillDelta(side, positionBeforeContracts, positionNow),
+    requestedContracts
+  );
 
   if (filledContracts === 0) {
     return { filledContracts: 0, status: found ? 'unfilled' : 'unknown' };
@@ -126,9 +151,24 @@ export interface PlaceOrderDeps {
 export interface PlaceOrderResult {
   clientOrderId: string;
   kalshiOrderId: string | null;
+  /**
+   * Kalshi's own status word off the createOrder response (`order.status`), kept
+   * purely as an audit trail so there is persisted evidence of what the exchange
+   * itself said. Never used to compute filledContracts. Null wherever no real
+   * response was received: ambiguous failure, rejection, and DRY_RUN (whose
+   * "response" is synthesised locally, not received from Kalshi).
+   */
+  kalshiOrderStatus: string | null;
   filledContracts: number;
   avgFillPriceCents: number | null;
   status: OrderStatus;
+  /**
+   * True ONLY on the KALSHI_DRY_RUN simulated-fill path. Callers MUST NOT record a
+   * would_trade=1 decision row for a dry run: the simulated fill is not a real
+   * position, and a phantom row in the production ledger consumes the real exposure
+   * cap and makes hasOpenPosition true for a story that never traded.
+   */
+  dryRun: boolean;
   errorDetail: string | null;
 }
 
@@ -153,8 +193,8 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
   const currentExposure = totalExposureCents(db, input.eventTicker);
   if (currentExposure + notionalCents > MAX_TOTAL_EXPOSURE_CENTS) {
     return {
-      clientOrderId, kalshiOrderId: null, filledContracts: 0, avgFillPriceCents: null,
-      status: 'declined-at-execution',
+      clientOrderId, kalshiOrderId: null, kalshiOrderStatus: null, filledContracts: 0,
+      avgFillPriceCents: null, status: 'declined-at-execution', dryRun: false,
       errorDetail: `exposure cap would be breached: ${currentExposure}c + ${notionalCents}c > ${MAX_TOTAL_EXPOSURE_CENTS}c`,
     };
   }
@@ -165,19 +205,24 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
   });
 
   if (process.env.KALSHI_DRY_RUN === 'true') {
+    // The simulated fill below is deliberately flagged `dryRun: true`: the caller
+    // must record it as a SKIP in the decisions table, never as a real position.
     const resp = await client.createOrder(body);
     return {
-      clientOrderId, kalshiOrderId: resp.order.order_id, filledContracts: input.contracts,
-      avgFillPriceCents: input.entryPriceCents, status: 'filled', errorDetail: null,
+      clientOrderId, kalshiOrderId: resp.order.order_id, kalshiOrderStatus: null,
+      filledContracts: input.contracts, avgFillPriceCents: input.entryPriceCents,
+      status: 'filled', dryRun: true, errorDetail: null,
     };
   }
 
   let lastError: unknown = null;
   let kalshiOrderId: string | null = null;
+  let kalshiOrderStatus: string | null = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const resp = await client.createOrder(body);
       kalshiOrderId = resp.order.order_id;
+      kalshiOrderStatus = resp.order.status;
       break;
     } catch (err) {
       lastError = err;
@@ -185,8 +230,8 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
         // A definite synchronous rejection (e.g. 400 insufficient balance) -- Kalshi
         // gave a clear answer, no ambiguity, nothing to reconcile or retry.
         return {
-          clientOrderId, kalshiOrderId: null, filledContracts: 0, avgFillPriceCents: null,
-          status: 'rejected', errorDetail: err.message,
+          clientOrderId, kalshiOrderId: null, kalshiOrderStatus: null, filledContracts: 0,
+          avgFillPriceCents: null, status: 'rejected', dryRun: false, errorDetail: err.message,
         };
       }
       const isLastAttempt = attempt === maxAttempts - 1;
@@ -201,22 +246,29 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
     // never guess; determine the real outcome from Kalshi's own records.
     const message = lastError instanceof Error ? lastError.message : String(lastError);
     const reconciled = await reconcileOrder(
-      client, clientOrderId, input.marketTicker, input.positionBeforeContracts, input.contracts
+      client, clientOrderId, input.marketTicker, input.side, input.positionBeforeContracts, input.contracts
     );
     return {
-      clientOrderId, kalshiOrderId: null, filledContracts: reconciled.filledContracts,
+      clientOrderId, kalshiOrderId: null, kalshiOrderStatus: null,
+      filledContracts: reconciled.filledContracts,
       avgFillPriceCents: reconciled.filledContracts > 0 ? input.entryPriceCents : null,
-      status: reconciled.status, errorDetail: message,
+      status: reconciled.status, dryRun: false, errorDetail: message,
     };
   }
 
   const positionAfter = positionForTicker(await client.getPositions(), input.marketTicker);
-  const filledContracts = Math.max(0, positionAfter - input.positionBeforeContracts);
+  // SIGNED delta (a NO fill moves `position` down), clamped above by the requested
+  // count -- an IOC order can never fill more than it asked for, so anything larger
+  // is an unrelated position move that must not be attributed to this order.
+  const filledContracts = Math.min(
+    signedFillDelta(input.side, input.positionBeforeContracts, positionAfter),
+    input.contracts
+  );
   return {
-    clientOrderId, kalshiOrderId, filledContracts,
+    clientOrderId, kalshiOrderId, kalshiOrderStatus, filledContracts,
     avgFillPriceCents: filledContracts > 0 ? input.entryPriceCents : null,
     status: filledContracts === 0 ? 'unfilled' : filledContracts >= input.contracts ? 'filled' : 'partial',
-    errorDetail: null,
+    dryRun: false, errorDetail: null,
   };
 }
 
@@ -248,51 +300,196 @@ interface DecisionRow {
 }
 
 /**
+ * Rebuilds a full `DecisionRecord` from a stored `decisions` row plus a determined
+ * fill outcome. Shared by `reconcilePendingOrders` and the orphaned-decision sweep
+ * so there is exactly one definition of "what a resolved decision row looks like",
+ * not two that can drift apart. A fill with no known price is treated as no
+ * position at all rather than a would-trade row with a null entry price -- the
+ * ledger's own notional-consistency invariant would (correctly) reject that.
+ */
+function resolvedDecisionRecord(
+  row: DecisionRow,
+  marketTicker: string | null,
+  filledContracts: number,
+  fillPriceCents: number | null,
+  reason: string
+): DecisionRecord {
+  const filled = filledContracts > 0 && fillPriceCents !== null;
+  return {
+    itemId: row.item_id,
+    storyKey: row.story_key,
+    eventTicker: row.event_ticker,
+    marketTicker,
+    side: row.side,
+    rung: row.rung,
+    direction: row.direction,
+    magnitudePts: row.magnitude_pts,
+    contracts: filled ? filledContracts : 0,
+    entryPriceCents: filled ? fillPriceCents : null,
+    notionalCents: filled ? filledContracts * fillPriceCents! : 0,
+    edgeCents: row.edge_cents,
+    wouldTrade: filled,
+    reason,
+    orderStatus: 'resolved',
+  };
+}
+
+function decisionRowById(db: Database.Database, decisionId: number): DecisionRow {
+  return db.prepare('SELECT * FROM decisions WHERE id = ?').get(decisionId) as DecisionRow;
+}
+
+/**
  * Recovers from a process crash between writing a pending decision/order pair and
  * getting a real answer from Kalshi. Reuses reconcileOrder -- the same function an
  * ambiguous mid-request failure uses -- so there is exactly one reconciliation code
  * path, not two independently-maintained ones.
+ *
+ * Every iteration is independently fault-isolated. Without that, ONE transient
+ * Kalshi error (a single 500, a socket reset) on ANY pending row kills the whole
+ * process before the Redis consumer ever starts -- and if the failure is
+ * deterministic (an expired API key, say), the identical retry on every restart is
+ * a permanent boot loop. A row that fails here stays 'pending' and is retried on
+ * the next start, which is exactly what this function is for.
+ *
+ * The two resolve writes per row are wrapped in ONE transaction: `findPendingOrders`
+ * scans only `orders.status = 'pending'`, so an `orders` row committed to a terminal
+ * status while its `decisions` row is still pending would be invisible to this
+ * recovery forever -- a real filled position permanently reported as zero exposure.
  */
 export async function reconcilePendingOrders(db: Database.Database, client: KalshiClient): Promise<void> {
   for (const pending of findPendingOrders(db)) {
-    const reconciled = await reconcileOrder(
-      client, pending.clientOrderId, pending.marketTicker,
-      pending.positionBeforeContracts, pending.requestedContracts
-    );
+    try {
+      const reconciled = await reconcileOrder(
+        client, pending.clientOrderId, pending.marketTicker, pending.side,
+        pending.positionBeforeContracts, pending.requestedContracts
+      );
 
-    // The decision row's entry_price_cents already holds the originally-sized limit
-    // price (recordPendingDecision stores it as given, unvalidated, since
-    // assertNotionalIsConsistent only checks would-trade rows) -- avg_fill_price_cents
-    // is always this same limit price on any real fill, per this project's "never
-    // filled worse than the limit" rule, matching pipeline.ts's resolution logic.
-    const decisionRow = db.prepare('SELECT * FROM decisions WHERE id = ?').get(pending.decisionId) as DecisionRow;
-    const entryPriceCents = decisionRow.entry_price_cents as number;
+      // The decision row's entry_price_cents already holds the originally-sized limit
+      // price (recordPendingDecision stores it as given, unvalidated, since
+      // assertNotionalIsConsistent only checks would-trade rows) -- avg_fill_price_cents
+      // is always this same limit price on any real fill, per this project's "never
+      // filled worse than the limit" rule, matching pipeline.ts's resolution logic.
+      const decisionRow = decisionRowById(db, pending.decisionId);
+      const entryPriceCents = decisionRow.entry_price_cents;
 
-    resolveOrder(db, pending.id, {
-      filledContracts: reconciled.filledContracts,
-      avgFillPriceCents: reconciled.filledContracts > 0 ? entryPriceCents : null,
-      status: reconciled.status,
-      kalshiOrderId: null,
-      errorDetail: 'resolved by startup reconciliation after an unresolved pending order',
-    });
+      db.transaction(() => {
+        resolveOrder(db, pending.id, {
+          filledContracts: reconciled.filledContracts,
+          avgFillPriceCents: reconciled.filledContracts > 0 ? entryPriceCents : null,
+          status: reconciled.status,
+          kalshiOrderId: null,
+          kalshiOrderStatus: null,
+          errorDetail: 'resolved by startup reconciliation after an unresolved pending order',
+        });
+        resolveDecision(
+          db,
+          pending.decisionId,
+          resolvedDecisionRecord(
+            decisionRow,
+            pending.marketTicker,
+            reconciled.filledContracts,
+            entryPriceCents,
+            `resolved by startup reconciliation: ${reconciled.status}`
+          )
+        );
+      })();
+    } catch (err) {
+      console.error(
+        `[startup-reconcile] failed to reconcile order clientOrderId=${pending.clientOrderId} ` +
+          `decisionId=${pending.decisionId}; leaving it pending for the next startup pass:`,
+        err
+      );
+    }
+  }
 
-    const resolvedRecord: DecisionRecord = {
-      itemId: decisionRow.item_id,
-      storyKey: decisionRow.story_key,
-      eventTicker: decisionRow.event_ticker,
-      marketTicker: pending.marketTicker,
-      side: decisionRow.side,
-      rung: decisionRow.rung,
-      direction: decisionRow.direction,
-      magnitudePts: decisionRow.magnitude_pts,
-      contracts: reconciled.filledContracts,
-      entryPriceCents: reconciled.filledContracts > 0 ? entryPriceCents : null,
-      notionalCents: reconciled.filledContracts > 0 ? reconciled.filledContracts * entryPriceCents : 0,
-      edgeCents: decisionRow.edge_cents,
-      wouldTrade: reconciled.filledContracts > 0,
-      reason: `resolved by startup reconciliation: ${reconciled.status}`,
-      orderStatus: 'resolved',
-    };
-    resolveDecision(db, pending.decisionId, resolvedRecord);
+  // Guarded for the same reason each row above is: nothing in startup recovery is
+  // allowed to be the reason the process never reaches the Redis consumer.
+  try {
+    reconcileOrphanedPendingDecisions(db);
+  } catch (err) {
+    console.error('[startup-reconcile] orphaned-pending-decision sweep failed:', err);
+  }
+}
+
+interface OrphanedDecisionRow {
+  decisionId: number;
+  orderId: number | null;
+  orderStatus: OrderStatus | null;
+  orderMarketTicker: string | null;
+  orderFilledContracts: number | null;
+  orderAvgFillPriceCents: number | null;
+}
+
+/**
+ * The `decisions`-row side of the same recovery `reconcilePendingOrders` performs
+ * from the `orders`-row side. Two shapes of orphan exist, and neither is reachable
+ * from a `status = 'pending'` scan of `orders`:
+ *
+ *  (a) A decision stuck at `order_status: 'pending'` with NO `orders` row at all --
+ *      e.g. `getPositions` or `recordPendingOrder` itself threw before any order row
+ *      was created. Nothing was ever submitted, so it resolves to would_trade=0.
+ *  (b) A decision stuck at `order_status: 'pending'` whose `orders` row already
+ *      reached a terminal status. The transactional resolve above makes this
+ *      structurally unreachable for any NEW row, but rows written before that fix --
+ *      or by any future path that skips the transactional helper -- can still be in
+ *      this state, and it is the exact shape that reports a REAL filled position as
+ *      zero exposure. It resolves from the orders row's own recorded fill.
+ *
+ * Runs from `reconcilePendingOrders` so main.ts's single startup call covers both.
+ * Purely DB-local: no Kalshi call, so it needs no client and cannot fail on network.
+ */
+export function reconcileOrphanedPendingDecisions(db: Database.Database): void {
+  const orphans = db
+    .prepare(
+      `SELECT d.id AS decisionId, o.id AS orderId, o.status AS orderStatus,
+              o.market_ticker AS orderMarketTicker, o.filled_contracts AS orderFilledContracts,
+              o.avg_fill_price_cents AS orderAvgFillPriceCents
+       FROM decisions d
+       LEFT JOIN orders o ON o.decision_id = d.id
+       WHERE d.order_status = 'pending'
+         AND (o.id IS NULL OR o.status != 'pending')`
+    )
+    .all() as OrphanedDecisionRow[];
+
+  for (const orphan of orphans) {
+    try {
+      const decisionRow = decisionRowById(db, orphan.decisionId);
+      if (orphan.orderId === null) {
+        // Case (a): no order was ever submitted for this decision.
+        resolveDecision(
+          db,
+          orphan.decisionId,
+          resolvedDecisionRecord(
+            decisionRow,
+            decisionRow.market_ticker,
+            0,
+            null,
+            `order never submitted: ${decisionRow.reason}`
+          )
+        );
+        continue;
+      }
+      // Case (b): the orders row already holds the real, terminal outcome -- use it
+      // verbatim rather than re-deriving anything.
+      const filledContracts = orphan.orderFilledContracts ?? 0;
+      const fillPriceCents = orphan.orderAvgFillPriceCents ?? decisionRow.entry_price_cents;
+      resolveDecision(
+        db,
+        orphan.decisionId,
+        resolvedDecisionRecord(
+          decisionRow,
+          orphan.orderMarketTicker ?? decisionRow.market_ticker,
+          filledContracts,
+          fillPriceCents,
+          `resolved from an already-terminal order row (${orphan.orderStatus}): ` +
+            `${filledContracts} contracts filled`
+        )
+      );
+    } catch (err) {
+      console.error(
+        `[startup-reconcile] failed to resolve orphaned pending decision decisionId=${orphan.decisionId}:`,
+        err
+      );
+    }
   }
 }

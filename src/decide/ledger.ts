@@ -107,6 +107,12 @@ CREATE TABLE IF NOT EXISTS orders (
   client_order_id TEXT NOT NULL UNIQUE,
   kalshi_order_id TEXT,
   market_ticker TEXT NOT NULL,
+  -- Which leg was bought. Required (never nullable) because reconcilePendingOrders
+  -- has ONLY this row to work from at crash recovery, and Kalshi's position field
+  -- is signed: without knowing the side, a position diff cannot be interpreted at
+  -- all -- a real NO fill moves the position DOWN, and reading that as an unsigned
+  -- YES-shaped diff silently records a real position as zero contracts.
+  side TEXT NOT NULL CHECK (side IN ('yes','no')),
   requested_contracts INTEGER NOT NULL CHECK (requested_contracts > 0),
   position_before_contracts INTEGER NOT NULL,
   filled_contracts INTEGER NOT NULL DEFAULT 0 CHECK (filled_contracts >= 0),
@@ -115,6 +121,12 @@ CREATE TABLE IF NOT EXISTS orders (
     'pending', 'filled', 'partial', 'unfilled', 'rejected', 'error', 'unknown',
     'declined-at-execution'
   )),
+  -- Kalshi's OWN word for the order, straight off the createOrder response, kept
+  -- purely as an audit trail: fill counts are always derived from a position diff,
+  -- never from this. Without it there is no persisted evidence of what the exchange
+  -- itself said if the position-diff math is ever wrong again. NULL on every path
+  -- where no real response was received (ambiguous failure, rejection, dry run).
+  kalshi_order_status TEXT,
   error_detail TEXT,
   placed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   resolved_at TEXT
@@ -237,6 +249,8 @@ export interface PendingOrderInput {
   decisionId: number;
   clientOrderId: string;
   marketTicker: string;
+  /** Required: crash recovery has only this row to interpret a SIGNED position diff against. */
+  side: 'yes' | 'no';
   requestedContracts: number;
   positionBeforeContracts: number;
 }
@@ -244,8 +258,8 @@ export interface PendingOrderInput {
 export function recordPendingOrder(db: Database.Database, input: PendingOrderInput): number {
   const info = db.prepare(
     `INSERT INTO orders
-      (decision_id, client_order_id, market_ticker, requested_contracts, position_before_contracts, status)
-     VALUES (@decisionId, @clientOrderId, @marketTicker, @requestedContracts, @positionBeforeContracts, 'pending')`
+      (decision_id, client_order_id, market_ticker, side, requested_contracts, position_before_contracts, status)
+     VALUES (@decisionId, @clientOrderId, @marketTicker, @side, @requestedContracts, @positionBeforeContracts, 'pending')`
   ).run(input);
   return Number(info.lastInsertRowid);
 }
@@ -255,6 +269,8 @@ export interface OrderResolution {
   avgFillPriceCents: number | null;
   status: OrderStatus;
   kalshiOrderId: string | null;
+  /** Kalshi's own status word off the createOrder response; null when none was received. Audit trail only. */
+  kalshiOrderStatus: string | null;
   errorDetail: string | null;
 }
 
@@ -262,7 +278,8 @@ export function resolveOrder(db: Database.Database, orderId: number, resolution:
   db.prepare(
     `UPDATE orders SET
        filled_contracts = @filledContracts, avg_fill_price_cents = @avgFillPriceCents,
-       status = @status, kalshi_order_id = @kalshiOrderId, error_detail = @errorDetail,
+       status = @status, kalshi_order_id = @kalshiOrderId,
+       kalshi_order_status = @kalshiOrderStatus, error_detail = @errorDetail,
        resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
      WHERE id = @orderId`
   ).run({ ...resolution, orderId });
@@ -273,6 +290,7 @@ export interface PendingOrderRow {
   decisionId: number;
   clientOrderId: string;
   marketTicker: string;
+  side: 'yes' | 'no';
   requestedContracts: number;
   positionBeforeContracts: number;
 }
@@ -281,7 +299,7 @@ export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
   const rows = db
     .prepare(
       `SELECT id, decision_id AS decisionId, client_order_id AS clientOrderId, market_ticker AS marketTicker,
-              requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts
+              side, requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts
        FROM orders WHERE status = 'pending'`
     )
     .all();
