@@ -98,9 +98,21 @@ were surveyed for a reusable, already-signed Kalshi client:
    are the two fields real code actually confirms), used only for the audit
    trail, never for computing `filled_contracts`.
 8. **Ambiguous HTTP failures (timeout, connection reset, 5xx after retries)
-   are never guessed at.** `getOrders({client_order_id})` (confirmed-real
-   fields: `orders[].client_order_id`, `.ticker`) checks whether Kalshi has
-   any record of the attempt at all; the position diff from point 7 (taken
+   are never guessed at.** `getOrders({client_order_id})` checks whether
+   Kalshi has any record of the attempt at all.
+   **Correction (final whole-branch review):** the RESPONSE fields read off
+   that call (`orders[].client_order_id`, `.ticker`) ARE confirmed against
+   real production code in `Fast99Follower`/`kalshi-spine`. The
+   `client_order_id` QUERY PARAMETER is **not** — neither sibling repo ever
+   calls `getOrders` with that filter (only `{ status: 'resting' }`), so
+   `GET /portfolio/orders?client_order_id=…` is an assumption about Kalshi's
+   API surface, not a verified fact. It must be checked against the live API
+   (see `scripts/smoke.ts` and the pre-go-live runbook in `HANDOFF.md`)
+   before `KALSHI_DRY_RUN` is ever unset. Fail-closed behaviour limits the
+   blast radius if the filter is silently ignored: an unfiltered response
+   still gets scanned for the exact `client_order_id`, so a wrong-shaped
+   query degrades to "no record found", never to a false positive.
+   The position diff from point 7 (taken
    before the attempt, and re-queried now) is the authoritative source for
    how many contracts actually moved, regardless of what the ambiguous HTTP
    response did or didn't say. Fail closed: if `getOrders` finds no record

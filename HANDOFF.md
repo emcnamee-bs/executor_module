@@ -302,6 +302,99 @@ Measured 2026-08-24, on `Internet_Info_Plug`'s `main` branch:
 
 ---
 
+## 5a. Operator runbook: going live with real money
+
+**Added 2026-08-28, with the Kalshi execution client (slice 4).** From the moment
+`KALSHI_DRY_RUN` is unset, this process places real orders with real money. Everything
+below is a pre-go-live gate, not a suggestion. Each checklist item exists because it
+**cannot be verified by an automated test** — every one of them needs live credentials
+and the real exchange, which the test suite deliberately never has.
+
+### 5a.1 Environment variables
+
+| Variable | Required? | What it does |
+|---|---|---|
+| `KALSHI_API_KEY_ID` | **Yes** | Kalshi API key id, used as the `KALSHI-ACCESS-KEY` header. `main()` fails loudly at startup naming it if absent. Never hardcoded, never defaulted (§2). |
+| `KALSHI_PRIVATE_KEY_PATH` | **Yes** | Path to the RSA private key PEM used for RSA-PSS request signing (canonically `~/.kalshi-spine/kalshi_key.pem`, mode 600). The file itself is never committed, logged, or printed. |
+| `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. |
+| `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
+| `ANTHROPIC_API_KEY` | **Yes** | The Haiku synopsis / Sonnet verify / Sonnet decide calls. |
+
+**What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
+issues an HTTP request at all — it returns a synthetic `DRYRUN-<client_order_id>` order
+locally. `placeOrder` then returns a *simulated* full fill flagged `dryRun: true`, and
+the pipeline records that simulation in the `decisions` table as a **skip**
+(`would_trade = 0`, contracts 0, notional 0, with a `[DRY_RUN simulated] …` reason). This
+matters: `decisions` is the table every exposure-cap and dedup query reads, so a dry run
+consumes none of the real $40 per-event cap and creates no phantom open position. The
+`orders` row still records the simulation for audit, unmistakably marked by the
+`DRYRUN-` prefix on `kalshi_order_id`.
+
+Note that `KALSHI_DRY_RUN` gates only the **order** path. The read-only Kalshi calls
+(`getPositions`, `getOrders`, `getBalance`, the ladder fetch) and all three model calls
+are made for real in dry-run mode, which is the point: it is a rehearsal of the whole
+pipeline, not an offline simulation.
+
+### 5a.2 Pre-go-live checklist
+
+Do these in order. Do not skip one because the suite is green — the suite proves things
+about the code, never about the exchange (§4, lesson 2).
+
+1. **Run `npm run smoke` first.** Read-only: `getBalance`, `getPositions`, and the
+   `getOrders` probe below. Nothing is ordered. This is the only end-to-end check that
+   the API key id, the PEM on disk, and the RSA-PSS signing all actually work together
+   against the live API — a signing bug is otherwise indistinguishable from a
+   credentials bug at 3am, and neither is reachable from a test that injects its own
+   `fetch`.
+2. **Confirm the `client_order_id` query filter really works.** `scripts/smoke.ts` calls
+   `getOrders({ client_order_id: <a made-up uuid> })` and prints the raw response.
+   *Why this is here:* the response FIELDS this branch reads
+   (`orders[].client_order_id`, `.ticker`) are confirmed from real production code in
+   `Fast99Follower`/`kalshi-spine`, but the **query parameter is not** — neither sibling
+   repo has ever called `getOrders` with that filter. Expect an empty `orders` list. If
+   Kalshi instead returns unrelated orders, it is ignoring the filter; reconciliation
+   still only counts an exact `client_order_id` match so it degrades to a broader scan
+   rather than a false positive, but you should know that before relying on it.
+3. **Confirm positions read back SIGNED.** In the same smoke output, check that any NO
+   holding shows as a **negative** `position`. All fill detection is a signed position
+   diff (a NO fill moves `position` down); if the live API ever returned an unsigned
+   magnitude instead, every NO fill would be recorded as zero contracts and zero
+   exposure. This is exactly the defect the final whole-branch review caught in code —
+   verify the premise it now rests on.
+4. **Place one real, small, deliberate order on EACH side — one YES and one NO — with
+   `KALSHI_DRY_RUN` unset.** Then inspect `data/decisions.db` by hand and confirm:
+   - the `orders` row has the right `side`, and `filled_contracts` matches what actually
+     executed — **especially for the NO order**, which is the case mocked tests can only
+     ever prove against a mock;
+   - the `decisions` row shows `would_trade = 1` with `notional_cents = contracts ×
+     entry_price_cents` for a real fill;
+   - the `getPositions` read taken immediately after placement already reflected the
+     fill. **`placeOrder` assumes Kalshi's portfolio-positions endpoint is
+     read-your-writes consistent with order execution on that timescale, and nothing
+     establishes that.** (`Fast99Follower`, this design's precedent, reads positions on a
+     *later* reconcile pass, not inline.) If the position read lags, a real fill lands as
+     `unfilled` until the next startup reconciliation catches it. Verify before trusting
+     it; if it lags, the fix is to move fill determination to a delayed reconcile pass.
+5. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
+   and restart before the first live item arrives, not after.
+
+### 5a.3 Operational notes
+
+- **Startup reconciliation runs before the Redis consumer starts.**
+  `reconcilePendingOrders(db, kalshiClient)` resolves any order left `pending` by a crash,
+  determining the real outcome from Kalshi's own records, and then sweeps `decisions` rows
+  stuck at `order_status = 'pending'` that no `orders`-row scan could reach. Per-row
+  failures are logged (`[startup-reconcile] …`) and skipped, never fatal — one transient
+  exchange error must not become a boot loop. **A row that keeps appearing in those logs
+  across restarts needs a human**, because it is being retried identically every time.
+- **The ledger schema changed in this slice** (`orders` gained `side` and
+  `kalshi_order_status`). `openLedger` only runs `CREATE TABLE IF NOT EXISTS`, so it will
+  NOT add columns to a pre-existing `data/decisions.db`. If one exists from before this
+  branch, migrate or recreate it before starting — a missing `side` column will fail at
+  the first order, loudly, which is the correct direction to fail.
+
+---
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.
