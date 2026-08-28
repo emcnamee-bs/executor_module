@@ -382,7 +382,22 @@ about the code, never about the exchange (§4, lesson 2).
      *later* reconcile pass, not inline.) If the position read lags, a real fill lands as
      `unfilled` until the next startup reconciliation catches it. Verify before trusting
      it; if it lags, the fix is to move fill determination to a delayed reconcile pass.
-5. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
+5. **Confirm whether `GET /portfolio/positions` really paginates, and with what default
+   page size.** In the same smoke output, check whether the raw response carries a
+   `cursor` field and how many `market_positions` come back on one page.
+   *Why this is here:* `getPositions()` now follows `cursor` to completion and asks for
+   `limit=1000`, because a ticker that falls off an unfetched page reads back as absent
+   — and absent means position 0, which is indistinguishable from "really flat" and
+   fires a spurious permanent market block (or masks a real divergence). But that
+   pagination was built **without live API access**: the `cursor` field name and the
+   `limit` parameter are the documented/sibling-repo pattern (`kalshi-spine`'s
+   `getTrades`), not something confirmed against this endpoint, exactly as the
+   `finalized`/`settled` vocabulary was confirmed live before slice 5 relied on it. If
+   the real response names its paging token something else, the loop silently reads only
+   the first page again — verify before relying on it. Note also that the client now
+   throws rather than returning a truncated list if the cursor never terminates after 50
+   pages.
+6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
    and restart before the first live item arrives, not after.
 
 ### 5a.3 Operational notes

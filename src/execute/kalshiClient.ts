@@ -6,6 +6,12 @@ const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 /** Ceiling on any single Kalshi HTTP request. See the signal in `request()`. */
 const REQUEST_TIMEOUT_MS = 10_000;
 
+/** Page size asked for on each positions fetch, so the common case is one page. */
+const POSITIONS_PAGE_SIZE = 1000;
+
+/** Safety bound on cursor-following, against a malformed or non-advancing cursor. */
+const MAX_POSITION_PAGES = 50;
+
 export interface KalshiClientConfig {
   apiKeyId: string;
   privateKeyPath: string;
@@ -47,6 +53,12 @@ export interface MarketPosition {
 
 export interface GetPositionsResponse {
   market_positions: MarketPosition[];
+  /**
+   * Kalshi's paging token: present while more pages remain, absent/empty on the
+   * last one. `getPositions()` follows it internally and never returns it, so a
+   * caller always sees one complete list.
+   */
+  cursor?: string;
 }
 
 export interface GetBalanceResponse {
@@ -180,8 +192,49 @@ export class KalshiClient {
     return this.request('GET', `/portfolio/orders${qs}`);
   }
 
-  getPositions(): Promise<GetPositionsResponse> {
-    return this.request('GET', '/portfolio/positions');
+  /**
+   * EVERY page of the account's positions, merged into one list.
+   *
+   * A single unfiltered `GET /portfolio/positions` returns whatever fits on one
+   * page. If the account's position history is large enough for the exchange to
+   * paginate, a ticker being reconciled can fall off that page and read back as
+   * absent -- and `positionForTicker` reports absent as 0, which is
+   * indistinguishable from "really flat". On a weekly-resolving series the history
+   * only grows, so that risk grows with runtime: misreading a real open position as
+   * 0 fires a spurious permanent market block, and the reverse case masks a real
+   * divergence.
+   *
+   * Follows `cursor` to completion, mirroring `kalshi-spine`'s `getTrades`. Capped
+   * at MAX_POSITION_PAGES against a malformed or non-advancing cursor; hitting that
+   * cap THROWS rather than returning a truncated list, because a partial snapshot
+   * silently presented as complete is the exact failure this method exists to
+   * prevent (the same reason positionForTicker refuses to fabricate a zero below).
+   *
+   * Still one logical call per reconciliation pass from the caller's point of view
+   * -- this makes that one call complete, it does not change how often callers make
+   * it.
+   */
+  async getPositions(): Promise<GetPositionsResponse> {
+    const merged: MarketPosition[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < MAX_POSITION_PAGES; page++) {
+      // Built by hand, matching getOrders just above: request() takes no query
+      // object today and this is not enough cases to warrant adding one.
+      const qs =
+        `?limit=${POSITIONS_PAGE_SIZE}` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+      const resp = await this.request<GetPositionsResponse>('GET', `/portfolio/positions${qs}`);
+      if (Array.isArray(resp.market_positions)) merged.push(...resp.market_positions);
+      cursor = resp.cursor ? resp.cursor : undefined;
+      if (!cursor) return { market_positions: merged };
+    }
+
+    throw new Error(
+      `Kalshi positions pagination did not terminate after ${MAX_POSITION_PAGES} pages ` +
+        `(${merged.length} positions read, cursor still set) -- refusing to report a ` +
+        `partial positions snapshot as complete`
+    );
   }
 
   getBalance(): Promise<GetBalanceResponse> {

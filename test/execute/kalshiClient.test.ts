@@ -179,3 +179,94 @@ describe('positionForTicker', () => {
     expect(() => positionForTicker(resp, 'A')).toThrow(/non-numeric position for A/);
   });
 });
+
+describe('KalshiClient getPositions pagination', () => {
+  let dir: string;
+  let keyPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'kalshi-positions-test-'));
+    keyPath = path.join(dir, 'kalshi_key.pem');
+    writeFileSync(keyPath, generateTestKeyPair().privateKeyPem);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function clientWithPages(pages: Array<Record<string, unknown>>): {
+    client: KalshiClient;
+    urls: string[];
+  } {
+    const urls: string[] = [];
+    // A high rate limit only so the multi-page tests do not spend the default
+    // throttle's 200ms per request; it has no bearing on what is being tested.
+    const client = new KalshiClient({ apiKeyId: 'k', privateKeyPath: keyPath, requestsPerSecond: 1000 });
+    // @ts-expect-error -- test-only fetch injection
+    client._fetchFn = async (url: string) => {
+      urls.push(url);
+      const page = pages[Math.min(urls.length - 1, pages.length - 1)];
+      return new Response(JSON.stringify(page), { status: 200 });
+    };
+    return { client, urls };
+  }
+
+  it('follows the cursor and returns every page merged into one market_positions array', async () => {
+    // The bug this closes: with only the first page fetched, a ticker on page two
+    // reads back as absent -- and absent means 0, which is indistinguishable from
+    // "really flat" and blocks a healthy market on a spurious divergence.
+    const { client, urls } = clientWithPages([
+      { market_positions: [{ ticker: 'A', position: 10 }, { ticker: 'B', position: -5 }], cursor: 'CURSOR-2' },
+      { market_positions: [{ ticker: 'C', position: 7 }] },
+    ]);
+
+    const resp = await client.getPositions();
+
+    expect(resp.market_positions).toEqual([
+      { ticker: 'A', position: 10 },
+      { ticker: 'B', position: -5 },
+      { ticker: 'C', position: 7 },
+    ]);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain('limit=1000');
+    expect(urls[0]).not.toContain('cursor=');
+    expect(urls[1]).toContain('cursor=CURSOR-2');
+    // Callers see one clean list, never a paging token they might act on.
+    expect(resp.cursor).toBeUndefined();
+  });
+
+  it('stops after one request when the first page carries no cursor', async () => {
+    const { client, urls } = clientWithPages([
+      { market_positions: [{ ticker: 'A', position: 10 }] },
+    ]);
+
+    const resp = await client.getPositions();
+
+    expect(urls).toHaveLength(1);
+    expect(resp.market_positions).toHaveLength(1);
+  });
+
+  it('preserves the SIGN of a NO holding that arrives on a later page', async () => {
+    // Kalshi's position is signed; merging must not touch it.
+    const { client } = clientWithPages([
+      { market_positions: [{ ticker: 'A', position: 10 }], cursor: 'C2' },
+      { market_positions: [{ ticker: 'NO-SIDE', position: -40 }] },
+    ]);
+
+    const resp = await client.getPositions();
+
+    expect(positionForTicker(resp, 'NO-SIDE')).toBe(-40);
+  });
+
+  it('throws instead of returning a truncated list when the cursor never terminates', async () => {
+    // A malformed or non-advancing cursor must not silently yield a partial
+    // snapshot presented as complete -- that is the very failure this pagination
+    // exists to prevent.
+    const { client, urls } = clientWithPages([
+      { market_positions: [{ ticker: 'A', position: 1 }], cursor: 'FOREVER' },
+    ]);
+
+    await expect(client.getPositions()).rejects.toThrow(/did not terminate after 50 pages/);
+    expect(urls).toHaveLength(50);
+  });
+});
