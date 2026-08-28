@@ -67,7 +67,6 @@ describe('reconcileOpenPositions', () => {
   it('marks a genuinely finalized market settled, and does not check its position at all', async () => {
     const id = recordOpenDecision(db);
     let getPositionsCalls = 0;
-    const client = mockClient({});
     const realClient = { getPositions: async () => { getPositionsCalls += 1; return { market_positions: [] }; } } as unknown as KalshiClient;
 
     await reconcileOpenPositions({
@@ -205,6 +204,21 @@ describe('reconcileOpenPositions', () => {
     await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
 
     expect(isMarketBlocked(db, 'J')).toBe(false);
+  });
+
+  it('nets yes and no rows on ONE market_ticker into a single signed expected count, and does not block when it matches', async () => {
+    // The one case that pins signed arithmetic and per-ticker aggregation at the
+    // same time: 10 YES + 8 YES - 5 NO = 13. Any unsigned sum (23), any
+    // per-row comparison, or any sign inversion on the NO leg blocks a market that
+    // is in perfect agreement with the exchange.
+    recordOpenDecision(db, { marketTicker: 'Q', side: 'yes', contracts: 10 });
+    recordOpenDecision(db, { marketTicker: 'Q', side: 'yes', contracts: 8 });
+    recordOpenDecision(db, { marketTicker: 'Q', side: 'no', contracts: 5 });
+    const client = mockClient({ Q: 13 });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    expect(isMarketBlocked(db, 'Q')).toBe(false);
   });
 
   it('blocks once, with the correctly summed expected value, when the aggregate for a shared market_ticker genuinely diverges', async () => {
