@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
   reason TEXT NOT NULL,
   order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
+  settled_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   -- The cap layer above is only worth anything if notional_cents is the real
   -- notional. Nothing else ties it to the position it describes, so a row claiming
@@ -130,6 +131,15 @@ CREATE TABLE IF NOT EXISTS orders (
   error_detail TEXT,
   placed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   resolved_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS market_blocks (
+  market_ticker TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  expected_contracts INTEGER NOT NULL,
+  real_contracts INTEGER NOT NULL,
+  blocked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  cleared_at TEXT
 );
 `;
 
@@ -304,4 +314,62 @@ export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
     )
     .all();
   return rows as PendingOrderRow[];
+}
+
+export function markDecisionSettled(db: Database.Database, decisionId: number): void {
+  db.prepare(`UPDATE decisions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(decisionId);
+}
+
+export interface OpenUnsettledDecision {
+  id: number;
+  marketTicker: string;
+  side: 'yes' | 'no';
+  contracts: number;
+}
+
+/**
+ * Every would-trade position the ledger still believes is open and not yet
+ * confirmed finalized by Kalshi -- the working set Task 3's periodic reconciliation
+ * pass checks each tick. market_ticker/side are cast non-null: every code path that
+ * sets would_trade=true already requires both (the same invariant
+ * assertNotionalIsConsistent enforces for entry_price_cents/event_ticker).
+ */
+export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettledDecision[] {
+  const rows = db
+    .prepare(
+      `SELECT id, market_ticker AS marketTicker, side, contracts
+       FROM decisions WHERE would_trade = 1 AND settled_at IS NULL`
+    )
+    .all();
+  return rows as OpenUnsettledDecision[];
+}
+
+export function isMarketBlocked(db: Database.Database, marketTicker: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 FROM market_blocks WHERE market_ticker = ? AND cleared_at IS NULL`)
+    .get(marketTicker);
+  return row !== undefined;
+}
+
+/**
+ * Blocks a market_ticker from further NEW order placement (checked by placeOrder).
+ * An UPSERT: blocking an already-active block updates its reason/counts; blocking a
+ * PREVIOUSLY-CLEARED ticker reactivates it (cleared_at reset to NULL) rather than
+ * silently no-op-ing -- a market can legitimately diverge again after a human clears
+ * an earlier block.
+ */
+export function blockMarket(
+  db: Database.Database,
+  marketTicker: string,
+  reason: string,
+  expectedContracts: number,
+  realContracts: number
+): void {
+  db.prepare(
+    `INSERT INTO market_blocks (market_ticker, reason, expected_contracts, real_contracts)
+     VALUES (@marketTicker, @reason, @expectedContracts, @realContracts)
+     ON CONFLICT(market_ticker) DO UPDATE SET
+       reason = @reason, expected_contracts = @expectedContracts, real_contracts = @realContracts,
+       blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), cleared_at = NULL`
+  ).run({ marketTicker, reason, expectedContracts, realContracts });
 }

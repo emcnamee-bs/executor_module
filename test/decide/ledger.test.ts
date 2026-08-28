@@ -14,6 +14,10 @@ import {
   recordPendingOrder,
   resolveOrder,
   findPendingOrders,
+  markDecisionSettled,
+  findOpenUnsettledDecisions,
+  isMarketBlocked,
+  blockMarket,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import type Database from 'better-sqlite3';
@@ -488,6 +492,71 @@ describe('ledger', () => {
       expect(() =>
         resolveDecision(db, decisionId, tradeRecord({ contracts: 10, entryPriceCents: null, notionalCents: 0, wouldTrade: true, orderStatus: 'resolved' }))
       ).toThrow(/must carry an entry price/);
+    });
+  });
+
+  describe('settlement tracking', () => {
+    it('findOpenUnsettledDecisions returns only would_trade=1 rows with settled_at still null', () => {
+      const openId = (() => {
+        const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+        resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+        return id;
+      })();
+      recordDecision(db, skipRecord()); // a skip -- would_trade=0, must not appear
+
+      const open = findOpenUnsettledDecisions(db);
+      expect(open).toHaveLength(1);
+      expect(open[0]).toMatchObject({
+        id: openId,
+        marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        side: 'yes',
+        contracts: 10,
+      });
+    });
+
+    it('markDecisionSettled removes a row from findOpenUnsettledDecisions afterward', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
+
+      markDecisionSettled(db, id);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+      const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as { settled_at: string | null };
+      expect(row.settled_at).not.toBeNull();
+    });
+  });
+
+  describe('market_blocks', () => {
+    it('isMarketBlocked is false for a market never blocked', () => {
+      expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(false);
+    });
+
+    it('blockMarket makes isMarketBlocked true, recording the reason and counts', () => {
+      blockMarket(db, 'KXAPRPOTUS-26AUG28-40.6', 'reconciliation divergence: expected 10, real 0', 10, 0);
+
+      expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(true);
+      const row = db.prepare('SELECT reason, expected_contracts, real_contracts, cleared_at FROM market_blocks WHERE market_ticker = ?')
+        .get('KXAPRPOTUS-26AUG28-40.6') as { reason: string; expected_contracts: number; real_contracts: number; cleared_at: string | null };
+      expect(row.reason).toMatch(/expected 10, real 0/);
+      expect(row.expected_contracts).toBe(10);
+      expect(row.real_contracts).toBe(0);
+      expect(row.cleared_at).toBeNull();
+    });
+
+    it('a cleared block reports isMarketBlocked as false, but blocking the same ticker again reactivates it', () => {
+      blockMarket(db, 'T', 'first divergence', 5, 0);
+      db.prepare(`UPDATE market_blocks SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE market_ticker = 'T'`).run();
+      expect(isMarketBlocked(db, 'T')).toBe(false);
+
+      blockMarket(db, 'T', 'second divergence', 8, 2);
+
+      expect(isMarketBlocked(db, 'T')).toBe(true);
+      const row = db.prepare('SELECT reason, cleared_at FROM market_blocks WHERE market_ticker = ?').get('T') as {
+        reason: string; cleared_at: string | null;
+      };
+      expect(row.reason).toBe('second divergence');
+      expect(row.cleared_at).toBeNull();
     });
   });
 });
