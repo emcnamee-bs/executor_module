@@ -21,6 +21,11 @@ export interface ActiveLadder {
   bands: BandMarket[];
 }
 
+export interface MarketStatus {
+  status: string;
+  result: string;
+}
+
 interface KalshiEvent {
   event_ticker: string;
   strike_date: string;
@@ -44,6 +49,13 @@ interface KalshiMarket {
 
 interface KalshiMarketsResponse {
   markets: KalshiMarket[];
+}
+
+interface KalshiSingleMarketResponse {
+  market: {
+    status: string;
+    result: string;
+  };
 }
 
 /** Kalshi reports "no resting order" as an exact 0.0000, not a missing field. */
@@ -91,4 +103,14 @@ export async function fetchActiveLadder(seriesTicker: string): Promise<ActiveLad
   }));
 
   return { eventTicker: active.event_ticker, strikeDate: active.strike_date, bands };
+}
+
+export async function fetchMarketStatus(ticker: string): Promise<MarketStatus> {
+  const url = `${KALSHI_API_BASE}/markets/${encodeURIComponent(ticker)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Kalshi market status fetch failed for ${ticker}: ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as KalshiSingleMarketResponse;
+  return { status: body.market.status, result: body.market.result };
 }

@@ -1,6 +1,6 @@
 // test/decide/kalshi.test.ts
 import { describe, it, expect } from 'vitest';
-import { fetchActiveLadder } from '../../src/decide/kalshi.js';
+import { fetchActiveLadder, fetchMarketStatus } from '../../src/decide/kalshi.js';
 
 describe('fetchActiveLadder (real Kalshi API)', () => {
   it('returns the currently active KXAPRPOTUS weekly event with a full band ladder', async () => {
@@ -43,5 +43,28 @@ describe('fetchActiveLadder (real Kalshi API)', () => {
   it('returns null for a series with no open event', async () => {
     const ladder = await fetchActiveLadder('KXNONEXISTENTSERIESXYZ');
     expect(ladder).toBeNull();
+  }, 15000);
+});
+
+describe('fetchMarketStatus (real Kalshi API)', () => {
+  it('returns "finalized" with a yes/no result for a market that has actually resolved', async () => {
+    // KXAPRPOTUS-26AUG28-39.8 finalized with result "yes" -- a real, confirmed
+    // historical market from this project's own live API research. If Kalshi ever
+    // purges old market data such that this ticker 404s, replace it with any current
+    // event's finalized band (query
+    // `/markets?series_ticker=KXAPRPOTUS&status=settled` for a fresh one).
+    const status = await fetchMarketStatus('KXAPRPOTUS-26AUG28-39.8');
+    expect(status.status).toBe('finalized');
+    expect(['yes', 'no']).toContain(status.result);
+  }, 15000);
+
+  it('returns "closed" with an empty result for a market that closed but never finalized', async () => {
+    // A real market over a year past its strike date with zero open interest --
+    // confirmed live to still be stuck at status "closed", result "". Proves this
+    // function reads the raw field verbatim rather than assuming "closed" implies
+    // resolved.
+    const status = await fetchMarketStatus('KXAPRPOTUS-25JAN31-40.0');
+    expect(status.status).toBe('closed');
+    expect(status.result).toBe('');
   }, 15000);
 });
