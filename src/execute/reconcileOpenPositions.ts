@@ -145,7 +145,7 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
       continue;
     }
     try {
-      const marketStatus = await fetchMarketStatus(marketTicker);
+      const marketStatus = await fetchMarketStatus(marketTicker, db);
       if (marketStatus.status === 'finalized') {
         // One transaction per ticker group: a crash midway through must not leave
         // some of this ticker's rows settled and the rest not, which would make the

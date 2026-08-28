@@ -6,7 +6,7 @@ import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import { runDecisionPipeline } from '../../src/decide/pipeline.js';
-import { openLedger, hasOpenPosition, totalExposureCents } from '../../src/decide/ledger.js';
+import { openLedger, hasOpenPosition, totalExposureCents, tripBreaker } from '../../src/decide/ledger.js';
 import * as ledgerModule from '../../src/decide/ledger.js';
 import { computeRung } from '../../src/decide/rung.js';
 import type { Item } from '../../src/item.js';
@@ -213,6 +213,20 @@ describe('runDecisionPipeline', () => {
     });
     expect(expectedRung).toBe('reported');
     expect(onlyRowFor(db, item.item_id).rung).toBe(expectedRung);
+  });
+
+  it('records a skip with a "circuit breaker tripped" reason when a breaker is tripped, distinct from the manual kill switch, and makes no model calls', async () => {
+    tripBreaker(db, 'failed-orders', 'test trip');
+    const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
+    const item = baseItem();
+
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+
+    expect(synopsisModule.synopsize).not.toHaveBeenCalled();
+    expect(fetchLadder).not.toHaveBeenCalled();
+    const row = onlyRowFor(db, item.item_id);
+    expect(row.reason).toBe('circuit breaker tripped');
+    expect(row.would_trade).toBe(0);
   });
 
   it('records a skip when verify reports unsupported, before decide/sizing, carrying the real rung', async () => {
