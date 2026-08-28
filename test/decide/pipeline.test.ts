@@ -13,6 +13,7 @@ import type { ActiveLadder } from '../../src/decide/kalshi.js';
 import * as synopsisModule from '../../src/decide/synopsis.js';
 import * as verifyModule from '../../src/decide/verify.js';
 import * as decideModule from '../../src/decide/decide.js';
+import * as orderModule from '../../src/execute/order.js';
 
 function baseItem(overrides: Partial<Item> = {}): Item {
   return {
@@ -102,6 +103,13 @@ function stubLadder(): ActiveLadder {
 
 const EVENT = 'KXAPRPOTUS-26AUG28';
 
+// The pipeline reads a position snapshot directly (via kalshiClient.getPositions())
+// before placeOrder is ever called -- every test needs that stubbed, independent of
+// whatever placeOrder itself is mocked to return.
+function stubKalshiClient(position = 0) {
+  return { getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position }] }) } as any;
+}
+
 interface DecisionRow {
   item_id: string;
   rung: string;
@@ -142,6 +150,19 @@ describe('runDecisionPipeline', () => {
       shouldTrade: true,
       reasoning: 'stronger-than-expected jobs data typically lifts approval',
     });
+    // Default: a clean full fill at the sized price/contracts, mirroring whatever
+    // evaluateSizing actually decided -- pre-Task-6 tests that only care about the
+    // would-trade path succeeding (not about execution specifics) rely on this and
+    // never need to know about placeOrder at all. Tests that DO care about specific
+    // fill outcomes (Task 6's own tests) override this per-case with vi.spyOn.
+    vi.spyOn(orderModule, 'placeOrder').mockImplementation(async (input) => ({
+      clientOrderId: 'default-mock-client-order-id',
+      kalshiOrderId: 'default-mock-kalshi-order-id',
+      filledContracts: input.contracts,
+      avgFillPriceCents: input.entryPriceCents,
+      status: 'filled',
+      errorDetail: null,
+    }));
   });
 
   afterEach(() => {
@@ -156,7 +177,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
@@ -177,7 +198,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(decideModule.decideTrade).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
@@ -192,7 +213,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem({ trust_tier: 3, story_key: null });
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
     expect(verifyModule.verifySynopsis).not.toHaveBeenCalled();
@@ -204,11 +225,11 @@ describe('runDecisionPipeline', () => {
   it('skips a story that already has an open position for the active event, without calling Sonnet decide', async () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     // First run: real would-trade path.
-    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
 
     vi.mocked(decideModule.decideTrade).mockClear();
-    await runDecisionPipeline(baseItem({ item_id: 'item-2' }), { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(baseItem({ item_id: 'item-2' }), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(decideModule.decideTrade).not.toHaveBeenCalled();
   });
 
@@ -221,7 +242,7 @@ describe('runDecisionPipeline', () => {
     });
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
 
-    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(false);
   });
@@ -229,7 +250,7 @@ describe('runDecisionPipeline', () => {
   it('records a would-trade decision and increases total exposure when everything clears', async () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
 
-    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
     expect(totalExposureCents(db, EVENT)).toBeGreaterThan(0);
@@ -240,7 +261,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(null);
 
     await expect(
-      runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder })
+      runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(false);
   });
@@ -255,7 +276,7 @@ describe('runDecisionPipeline', () => {
     const item = baseItem();
 
     await expect(
-      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder })
+      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
 
     const row = onlyRowFor(db, item.item_id);
@@ -276,7 +297,7 @@ describe('runDecisionPipeline', () => {
     const item = baseItem();
 
     await expect(
-      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder })
+      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
 
     const row = onlyRowFor(db, item.item_id);
@@ -289,7 +310,7 @@ describe('runDecisionPipeline', () => {
     const item = baseItem();
 
     await expect(
-      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder })
+      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
     expect(onlyRowFor(db, item.item_id).reason).toContain('a bare string rejection');
   });
@@ -300,12 +321,12 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(onlyRowFor(db, item.item_id).would_trade).toBe(1);
 
     vi.mocked(synopsisModule.synopsize).mockClear();
     // Exactly what Redis does after a crash before the ACK: the same entry again.
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     // Still exactly one row -- not double-counted against the exposure cap...
     expect(rowsFor(db, item.item_id)).toHaveLength(1);
@@ -318,9 +339,70 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(null);
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(rowsFor(db, item.item_id)).toHaveLength(1);
+  });
+
+  // --- Task 6: order placement wired into the would-trade path -----------------
+
+  it('places a real order for a would-trade decision and resolves both the decision and order rows with the ACTUAL fill, not the sized amount', async () => {
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'cid-x', kalshiOrderId: 'kalshi-x', filledContracts: 40, // a partial fill: sizing wanted more
+      avgFillPriceCents: 12, status: 'partial', errorDetail: null,
+    });
+
+    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    await runDecisionPipeline(baseItem(), deps);
+
+    const decisionRow = db.prepare('SELECT would_trade, contracts, entry_price_cents, notional_cents, order_status FROM decisions').get() as {
+      would_trade: number; contracts: number; entry_price_cents: number; notional_cents: number; order_status: string;
+    };
+    // The row reflects the ACTUAL fill (40), not whatever evaluateSizing originally sized.
+    expect(decisionRow.would_trade).toBe(1);
+    expect(decisionRow.contracts).toBe(40);
+    expect(decisionRow.entry_price_cents).toBe(12);
+    expect(decisionRow.notional_cents).toBe(480);
+    expect(decisionRow.order_status).toBe('resolved');
+
+    const orderRow = db.prepare('SELECT status, filled_contracts, kalshi_order_id FROM orders').get() as {
+      status: string; filled_contracts: number; kalshi_order_id: string;
+    };
+    expect(orderRow.status).toBe('partial');
+    expect(orderRow.filled_contracts).toBe(40);
+    expect(orderRow.kalshi_order_id).toBe('kalshi-x');
+  });
+
+  it('records would_trade=0 when placeOrder reports a zero fill, even though evaluateSizing decided to trade', async () => {
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'cid-y', kalshiOrderId: null, filledContracts: 0, avgFillPriceCents: null, status: 'unfilled', errorDetail: null,
+    });
+
+    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    await runDecisionPipeline(baseItem(), deps);
+
+    const decisionRow = db.prepare('SELECT would_trade, contracts FROM decisions').get() as { would_trade: number; contracts: number };
+    expect(decisionRow.would_trade).toBe(0);
+    expect(decisionRow.contracts).toBe(0);
+  });
+
+  it('is crash-safe: a pending decision + order row is written and durably captures position_before_contracts BEFORE placeOrder is ever called', async () => {
+    let placeOrderCallCount = 0;
+    vi.spyOn(orderModule, 'placeOrder').mockImplementation(async () => {
+      placeOrderCallCount += 1;
+      // Simulate the pending rows already existing at the moment placeOrder is invoked.
+      const pending = db.prepare('SELECT * FROM orders WHERE status = ?').all('pending');
+      expect(pending).toHaveLength(1);
+      throw new Error('simulated crash mid-placeOrder');
+    });
+
+    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    await runDecisionPipeline(baseItem(), deps); // the pipeline's own try/catch (I3) turns this into a durable skip row
+
+    expect(placeOrderCallCount).toBe(1);
+    const decisionRow = db.prepare('SELECT would_trade, reason FROM decisions').get() as { would_trade: number; reason: string };
+    expect(decisionRow.would_trade).toBe(0);
+    expect(decisionRow.reason).toMatch(/simulated crash mid-placeOrder/);
   });
 });
