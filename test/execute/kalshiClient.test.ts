@@ -330,4 +330,38 @@ describe('KalshiClient error logging', () => {
       new Response('down', { status: 500, statusText: 'Internal Server Error' });
     await expect(client.getBalance()).rejects.toThrow(/500/);
   });
+
+  it('logs a kalshi_errors row when _fetchFn throws (network error path) and rethrows the original error', async () => {
+    const client = new KalshiClient(
+      { apiKeyId: 'k', privateKeyPath: keyPath },
+      { db }
+    );
+    const networkError = new Error('ECONNREFUSED: connection refused');
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () => {
+      throw networkError;
+    };
+
+    await expect(client.getBalance()).rejects.toThrow('ECONNREFUSED: connection refused');
+
+    const row = db.prepare('SELECT call_site, error_message FROM kalshi_errors').get() as
+      { call_site: string; error_message: string };
+    expect(row.call_site).toBe('/portfolio/balance');
+    expect(row.error_message).toBe('ECONNREFUSED: connection refused');
+  });
+
+  it('strips query string from call_site when logging errors on endpoints with query parameters', async () => {
+    const client = new KalshiClient(
+      { apiKeyId: 'k', privateKeyPath: keyPath },
+      { db }
+    );
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () =>
+      new Response('not found', { status: 500, statusText: 'Internal Server Error' });
+
+    await expect(client.getOrders({ client_order_id: 'test-order-123' })).rejects.toThrow(/500/);
+
+    const row = db.prepare('SELECT call_site, error_message FROM kalshi_errors').get() as
+      { call_site: string; error_message: string };
+    expect(row.call_site).toBe('/portfolio/orders');
+    expect(row.error_message).toMatch(/500/);
+  });
 });
