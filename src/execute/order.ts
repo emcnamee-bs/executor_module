@@ -418,6 +418,7 @@ interface OrphanedDecisionRow {
   orderMarketTicker: string | null;
   orderFilledContracts: number | null;
   orderAvgFillPriceCents: number | null;
+  orderKalshiOrderId: string | null;
 }
 
 /**
@@ -443,7 +444,7 @@ export function reconcileOrphanedPendingDecisions(db: Database.Database): void {
     .prepare(
       `SELECT d.id AS decisionId, o.id AS orderId, o.status AS orderStatus,
               o.market_ticker AS orderMarketTicker, o.filled_contracts AS orderFilledContracts,
-              o.avg_fill_price_cents AS orderAvgFillPriceCents
+              o.avg_fill_price_cents AS orderAvgFillPriceCents, o.kalshi_order_id AS orderKalshiOrderId
        FROM decisions d
        LEFT JOIN orders o ON o.decision_id = d.id
        WHERE d.order_status = 'pending'
@@ -465,6 +466,27 @@ export function reconcileOrphanedPendingDecisions(db: Database.Database): void {
             0,
             null,
             `order never submitted: ${decisionRow.reason}`
+          )
+        );
+        continue;
+      }
+      // A DRY_RUN order's `orders` row is a SIMULATED terminal outcome (placeOrder's
+      // dry-run branch writes a real-looking `status`/`filled_contracts` for audit,
+      // marked only by the `DRYRUN-` kalshi_order_id prefix) -- it must never be
+      // resolved as a real fill here, or this sweep would resurrect exactly the
+      // phantom exposure I5's fix exists to prevent, just from legacy/orphaned data
+      // instead of the live path. Route it through the same never-submitted shape
+      // as case (a): no real order exists to report a fill from.
+      if (orphan.orderKalshiOrderId?.startsWith('DRYRUN-')) {
+        resolveDecision(
+          db,
+          orphan.decisionId,
+          resolvedDecisionRecord(
+            decisionRow,
+            decisionRow.market_ticker,
+            0,
+            null,
+            `order was a DRY_RUN simulation, not a real position: ${decisionRow.reason}`
           )
         );
         continue;

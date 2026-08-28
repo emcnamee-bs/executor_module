@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, reconcilePendingOrders, reconcileOrphanedPendingDecisions, signedFillDelta } from '../../src/execute/order.js';
 import { KalshiClient, KalshiRequestError } from '../../src/execute/kalshiClient.js';
-import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, type DecisionRecord } from '../../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, type DecisionRecord } from '../../src/decide/ledger.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -791,6 +791,36 @@ describe('reconcileOrphanedPendingDecisions', () => {
     expect(row.notional_cents).toBe(480);
     expect(row.order_status).toBe('resolved');
     expect(row.reason).toMatch(/already-terminal order row \(filled\)/);
+  });
+
+  it('never resurrects a DRY_RUN simulation as a real position, even when its orders row is orphaned pending', async () => {
+    // placeOrder's DRY_RUN branch writes a real-looking terminal orders row for
+    // audit (status='filled', a real filled_contracts count) marked only by the
+    // DRYRUN- kalshi_order_id prefix. Without this guard, case (b) above would
+    // treat that simulated row as a genuine fill and resolve the decision to
+    // would_trade=1 -- exactly the phantom exposure I5's fix exists to prevent,
+    // just reached via orphaned/legacy data instead of the live path.
+    const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending', reason: '2 contracts, 29c edge' }));
+    const orderId = recordPendingOrder(db, {
+      decisionId, clientOrderId: 'cid-dryrun-orphan', marketTicker: 'KXAPRPOTUS-26AUG28-40.6', side: 'no',
+      requestedContracts: 2, positionBeforeContracts: 0,
+    });
+    resolveOrder(db, orderId, {
+      filledContracts: 2, avgFillPriceCents: 42, status: 'filled',
+      kalshiOrderId: 'DRYRUN-cid-dryrun-orphan', kalshiOrderStatus: null, errorDetail: null,
+    });
+
+    reconcileOrphanedPendingDecisions(db);
+
+    const row = db.prepare('SELECT would_trade, contracts, notional_cents, order_status, reason FROM decisions WHERE id = ?').get(decisionId) as {
+      would_trade: number; contracts: number; notional_cents: number; order_status: string; reason: string;
+    };
+    expect(row.would_trade).toBe(0);
+    expect(row.contracts).toBe(0);
+    expect(row.notional_cents).toBe(0);
+    expect(row.order_status).toBe('resolved');
+    expect(row.reason).toMatch(/DRY_RUN simulation/);
+    expect(totalExposureCents(db, 'KXAPRPOTUS-26AUG28')).toBe(0);
   });
 
   it('leaves a decision whose orders row is still genuinely pending alone -- that is reconcilePendingOrders\' job, not this sweep\'s', async () => {
