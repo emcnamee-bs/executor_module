@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "generate-keyphrases": "tsx src/keyphrases/generate.ts",
+    "smoke": "tsx scripts/smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
