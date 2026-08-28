@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
-import { reconcileOpenPositions } from '../../src/execute/reconcileOpenPositions.js';
+import { reconcileOpenPositions, startReconciliationTimer } from '../../src/execute/reconcileOpenPositions.js';
 import {
   openLedger, recordPendingDecision, resolveDecision, isMarketBlocked, findOpenUnsettledDecisions,
   recordPendingOrder, resolveOrder,
@@ -309,5 +309,122 @@ describe('reconcileOpenPositions', () => {
       expect(row.settled_at).not.toBeNull();
     }
     expect(isMarketBlocked(db, 'L')).toBe(false);
+  });
+});
+
+describe('startReconciliationTimer', () => {
+  const INTERVAL_MS = 10 * 60 * 1000;
+  let dir: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dir = mkdtempSync(path.join(tmpdir(), 'reconcile-timer-test-'));
+    db = openLedger(path.join(dir, 'test.db'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A client whose getPositions hangs until the test releases it -- the seam that
+   * makes "a pass slower than the interval" reproducible without any real waiting.
+   * getPositions is called once per pass, so its call count IS the pass count.
+   */
+  function controllableClient(): {
+    client: KalshiClient;
+    calls: () => number;
+    releasePending: () => void;
+  } {
+    let calls = 0;
+    let release: (() => void) | null = null;
+    const client = {
+      getPositions: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { market_positions: [{ ticker: 'T1', position: 10 }] };
+      },
+    } as unknown as KalshiClient;
+    return {
+      client,
+      calls: () => calls,
+      releasePending: () => { release?.(); release = null; },
+    };
+  }
+
+  it('skips (never queues) a tick that fires while the previous pass is still running, resumes after it finishes, and stops on stop()', async () => {
+    recordOpenDecision(db, { marketTicker: 'T1', side: 'yes', contracts: 10 });
+    const { client, calls, releasePending } = controllableClient();
+
+    const handle = startReconciliationTimer(
+      { db, client, fetchMarketStatus: mockFetchMarketStatus({}) },
+      INTERVAL_MS
+    );
+
+    // First tick: one pass starts and hangs inside getPositions.
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(calls()).toBe(1);
+
+    // Two more full intervals pass while that first pass is still in flight. If the
+    // guard queued instead of skipping, these would run (now or on release).
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS * 2);
+    expect(calls()).toBe(1);
+
+    // The slow pass completes. Nothing was queued behind it...
+    releasePending();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls()).toBe(1);
+
+    // ...but the NEXT tick runs normally, so the guard released rather than latched.
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(calls()).toBe(2);
+    releasePending();
+    await vi.advanceTimersByTimeAsync(0);
+
+    handle.stop();
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS * 3);
+    expect(calls()).toBe(2);
+  });
+
+  it('keeps ticking after a pass rejects, rather than latching the guard forever', async () => {
+    // The guard is cleared in a .finally(); a pass that throws must not wedge it.
+    recordOpenDecision(db, { marketTicker: 'T2', side: 'yes', contracts: 10 });
+    let calls = 0;
+    const client = {
+      getPositions: async () => {
+        calls += 1;
+        throw new Error('Kalshi 500');
+      },
+    } as unknown as KalshiClient;
+
+    const handle = startReconciliationTimer(
+      { db, client, fetchMarketStatus: mockFetchMarketStatus({}) },
+      INTERVAL_MS
+    );
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(calls).toBe(2);
+
+    handle.stop();
+  });
+
+  it('does not run a pass before the first interval elapses', async () => {
+    recordOpenDecision(db, { marketTicker: 'T3', side: 'yes', contracts: 10 });
+    const { client, calls } = controllableClient();
+
+    const handle = startReconciliationTimer(
+      { db, client, fetchMarketStatus: mockFetchMarketStatus({}) },
+      INTERVAL_MS
+    );
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS - 1);
+    expect(calls()).toBe(0);
+
+    handle.stop();
   });
 });

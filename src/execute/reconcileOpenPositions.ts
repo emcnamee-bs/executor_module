@@ -151,3 +151,33 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
     }
   }
 }
+
+export interface ReconciliationTimerHandle {
+  stop(): void;
+}
+
+/**
+ * The periodic reconciliation timer and its overlap guard, extracted out of
+ * main.ts so both are actually testable: while this lived inline in main(),
+ * deleting the entire setInterval block left the whole suite green, and nothing
+ * anywhere proved the guard SKIPS a tick rather than queueing it.
+ *
+ * The guard is deliberately skip-not-queue: a pass slower than the interval must
+ * never stack up concurrent passes, each comparing the same rows against a
+ * different positions snapshot. A skipped tick costs nothing -- the next one runs
+ * the same work ten minutes later.
+ */
+export function startReconciliationTimer(
+  deps: ReconcileOpenPositionsDeps,
+  intervalMs: number
+): ReconciliationTimerHandle {
+  let inProgress = false;
+  const timer = setInterval(() => {
+    if (inProgress) return; // a slow pass skips the next tick, never overlaps
+    inProgress = true;
+    reconcileOpenPositions(deps)
+      .catch((err) => console.error('[reconcile-open-positions] pass failed:', err))
+      .finally(() => { inProgress = false; });
+  }, intervalMs);
+  return { stop: () => clearInterval(timer) };
+}
