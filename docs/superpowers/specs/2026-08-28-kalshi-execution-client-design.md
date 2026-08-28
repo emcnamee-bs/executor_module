@@ -77,35 +77,60 @@ were surveyed for a reusable, already-signed Kalshi client:
    fact that the engine *decided* to trade is still fully auditable via the
    decision's own `direction`/`magnitudePts`/`reasoning` fields plus the
    `orders` row's `requested_contracts`.
-7. **Ambiguous HTTP failures (timeout, connection reset, 5xx after retries)
-   are never guessed at.** A deterministic `client_order_id` (hash of
-   `item_id` alone) lets the client query `getOrders`/`getFills` for ground
-   truth before recording anything. Fail closed: if genuinely not found,
-   record `status: 'unknown'`, contracts 0, notional 0 — never assume a fill
-   that can't be confirmed.
-8. **Bounded retry: 3 attempts, exponential backoff + jitter, honors
+7. **Fill amount is determined by a position diff, not by parsing a
+   fill-count field off the order response.** Research into how the *actual
+   production* code in `Fast99Follower`/`kalshi-spine` handles this found
+   that `getFills` is defined but never called anywhere, and no field like
+   `remaining_count`/`taker_fill_count` on an order or fill object has ever
+   been observed or even mocked in any of the sibling repos — building
+   parsing logic around any of those field names would be exactly the kind
+   of unverified assumption this project's non-negotiables warn against.
+   Fast99Follower's own design instead re-derives real position size from
+   `GET /portfolio/positions` on its next reconcile pass, calling this "a
+   real-cash backstop [that] can never drift unsafely." This slice adopts
+   the same proven approach directly: call `getPositions(marketTicker)`
+   once immediately before `createOrder` and once immediately after;
+   `filled_contracts` is the delta. `avg_fill_price_cents` is recorded as
+   the limit price (`entryPriceCents`) — safe because an IOC *limit* order
+   can never fill worse than its limit, so this is always a conservative
+   (never-understating) notional estimate. `order_id`/`status` off the
+   create-order response ARE read directly (`order.order_id`, `order.status`
+   are the two fields real code actually confirms), used only for the audit
+   trail, never for computing `filled_contracts`.
+8. **Ambiguous HTTP failures (timeout, connection reset, 5xx after retries)
+   are never guessed at.** `getOrders({client_order_id})` (confirmed-real
+   fields: `orders[].client_order_id`, `.ticker`) checks whether Kalshi has
+   any record of the attempt at all; the position diff from point 7 (taken
+   before the attempt, and re-queried now) is the authoritative source for
+   how many contracts actually moved, regardless of what the ambiguous HTTP
+   response did or didn't say. Fail closed: if `getOrders` finds no record
+   AND the position diff is zero, record `status: 'unknown'`, contracts 0 —
+   never assume a fill that can't be confirmed by an actual position change.
+9. **Bounded retry: 3 attempts, exponential backoff + jitter, honors
    `Retry-After`** — tighter than InsiderTradeFollower's `HistoricalClient`
    precedent (`maxRetries = 4`), since each retry re-submits against an
-   aging price/depth picture. Reconciliation (point 7) runs after the bound
+   aging price/depth picture. Reconciliation (point 8) runs after the bound
    is exhausted, not resubmission.
-9. **Entry-only scope** (see Goal) — no exit/close/cancel-a-resting-order
-   logic in this slice.
-10. **A third, independent exposure-cap check immediately before the live
+10. **Entry-only scope** (see Goal) — no exit/close/cancel-a-resting-order
+    logic in this slice.
+11. **A third, independent exposure-cap check immediately before the live
     Kalshi call** — re-queries `totalExposureCents(db, eventTicker)` and
     aborts (`declined-at-execution`, no Kalshi call) if this order would
     breach $40, even though `evaluateSizing` already checked this moments
     earlier in the same call. Matches this project's established
     defense-in-depth pattern (sizing.ts's `contractsWithinCaps` + the
     ledger's DB-level CHECK/trigger, both already redundant on purpose).
-11. **Crash-safe ordering: write a `pending` decision row *before* calling
-    `placeOrder`.** `recordDecision` gains an update-in-place capability.
-    The pending row's existence alone is what makes I4's existing
+12. **Crash-safe ordering: write a pending decision row AND a pending order
+    row (with a captured `position_before_contracts` snapshot) *before*
+    calling `placeOrder`.** `ledger.ts` gains `recordPendingDecision`/
+    `resolveDecision` and `recordPendingOrder`/`resolveOrder` pairs. The
+    pending decision row's existence alone is what makes I4's existing
     `hasDecisionForItem` dedup cover the entire execution step, the same way
     it already covers every other outcome — no new dedup mechanism needed.
-12. **Orphaned pending rows are reconciled automatically at startup**, using
-    the exact same `client_order_id`-lookup reconciliation function that
-    ambiguous mid-request failures use (point 7). A pending row can never
-    survive past the next process start.
+13. **Orphaned pending rows are reconciled automatically at startup**, using
+    the exact same `getOrders`-existence-check + position-diff
+    reconciliation that ambiguous mid-request failures use (point 8). A
+    pending row can never survive past the next process start.
 
 ## Architecture
 
@@ -121,19 +146,25 @@ New/changed files:
   env-gated simulated-fill path in `createOrder`.
 - **`src/execute/order.ts`** (new) — order-placement orchestration:
   `buildOrderBody`, `deriveClientOrderId(itemId)`, `placeOrder(decision,
-  deps)` (final exposure recheck → build body → DRY_RUN check → retry loop →
-  reconcile-on-failure), `reconcileOrder(client, clientOrderId)` (shared by
-  both the mid-request-failure path and startup pending-row recovery).
+  deps)` (final exposure recheck → snapshot position → build body → DRY_RUN
+  check → retry loop → reconcile-on-failure → re-snapshot position → diff),
+  `reconcileOrder(client, clientOrderId, marketTicker, positionBefore)`
+  (shared by both the mid-request-failure path and startup pending-row
+  recovery — checks `getOrders({client_order_id})` for existence, and
+  `getPositions(marketTicker)` for the authoritative fill count via
+  position diff).
 - **`src/decide/ledger.ts`** (modified) — new `orders` table; `decisions`
-  gains `order_status`; `recordDecision` supports an update-in-place variant
-  (`resolveDecision`, or similar — exact naming decided at plan time); new
-  `reconcilePendingOrders(db, client)` scanning for `order_status='pending'`
-  rows.
+  gains `order_status`; new `recordPendingDecision`/`resolveDecision` and
+  `recordPendingOrder`/`resolveOrder` function pairs (write-then-update-in-place,
+  exact naming may be refined at plan time but the write/resolve split is
+  fixed). `reconcilePendingOrders(db, client)` (in `order.ts`, since it needs
+  the Kalshi client, not just DB access) scans `ledger.ts`'s new
+  `findPendingOrders(db)` query and resolves each one.
 - **`src/decide/pipeline.ts`** (modified) — after `evaluateSizing` returns
-  `wouldTrade: true`: write the pending row, call `placeOrder`, then resolve
-  the row with the real outcome. Every other branch (kill switch, rumor,
-  verify-rejected, ladder-null, dedup, should-trade-false,
-  `evaluateSizing`-declines) is unchanged from slice 3.
+  `wouldTrade: true`: write the pending decision + pending order rows, call
+  `placeOrder`, then resolve both rows with the real outcome. Every other
+  branch (kill switch, rumor, verify-rejected, ladder-null, dedup,
+  should-trade-false, `evaluateSizing`-declines) is unchanged from slice 3.
 - **`src/main.ts`** (modified) — at startup, after the existing Redis PEL
   drain and before `runOnce` begins consuming, call
   `reconcilePendingOrders(db, kalshiClient)`.
@@ -148,21 +179,36 @@ New/changed files:
 evaluateSizing(...) -> { wouldTrade: true, contracts, entryPriceCents, notionalCents, ... }
   |
   v
-recordDecision(db, { ...sized values, would_trade: 0, order_status: 'pending' })
-  |  <- I4's hasDecisionForItem now covers everything from here on;
-  |     a crash here just means this row is picked up by reconcilePendingOrders next boot
+write pending rows (BEFORE any order call -- this is what makes crash recovery correct):
+  1. positionBefore = getPositions(marketTicker) -- snapshot BEFORE any order call,
+     stored durably now, not re-derived later. This matters: two DIFFERENT stories'
+     decisions can legally target the same market_ticker within one event (dedup is
+     scoped to (story_key, event_ticker), not market_ticker), so "current position at
+     reconcile time" is only a safe stand-in for "before" if it was captured at the
+     right moment and persisted -- never re-read fresh after the fact.
+  2. decisionId = recordPendingDecision(db, {...sized fields, would_trade: 0, order_status: 'pending'})
+  3. recordPendingOrder(db, {decisionId, clientOrderId, requestedContracts,
+     positionBeforeContracts: positionBefore, status: 'pending'})
+  |  <- I4's hasDecisionForItem now covers everything from here on; a crash anywhere
+  |     after this point leaves both rows in place with positionBeforeContracts
+  |     already durably captured, for reconcilePendingOrders to finish correctly
   v
 placeOrder(decision, deps):
   1. re-check totalExposureCents(db, eventTicker) + notionalCents <= 4000
      -> breach: resolve decision as declined-at-execution, STOP (no Kalshi call)
   2. build IOC-limit order body at entryPriceCents; client_order_id = hash(item_id)
-  3. KALSHI_DRY_RUN=true -> simulate a fill, skip to step 5
-  4. createOrder(...), retry up to 3x (exp backoff + jitter, honors Retry-After)
-     on 429/5xx; on final failure or any ambiguous error -> reconcileOrder(...)
-  5. write `orders` row (requested/filled/avg_price/status)
+  3. KALSHI_DRY_RUN=true -> simulate a fill (filled_contracts = requested), skip to step 5
+  4. createOrder(...), retry up to 3x (exp backoff + jitter, honors Retry-After) on
+     429/5xx; record order_id/status from the response (confirmed-real fields only)
+     -> on final failure or any ambiguous error:
+        reconcileOrder(client, client_order_id, marketTicker, positionBeforeContracts)
+  5. positionAfter = getPositions(marketTicker)
+     filled_contracts = positionAfter - positionBeforeContracts (the STORED snapshot from step 1 above)
+     avg_fill_price_cents = entryPriceCents (the limit -- never filled worse than this)
+  6. resolveOrder(db, orderId, { filledContracts, avgFillPriceCents, status, kalshiOrderId, errorDetail })
   |
   v
-resolve decisions row: would_trade = (filled_contracts > 0),
+resolveDecision(db, decisionId, ...): would_trade = (filled_contracts > 0),
                         contracts/entryPriceCents/notionalCents = ACTUAL fill,
                         order_status = 'resolved'
 ```
@@ -172,10 +218,14 @@ consumption resumes):
 
 ```
 reconcilePendingOrders(db, kalshiClient):
-  for each decisions row WHERE order_status = 'pending':
-    reconcileOrder(client, row.client_order_id)  -- same function as above
-    resolve the row with whatever's actually true (found filled/partial/unfilled, or
-    genuinely never placed -> 'unknown', 0 contracts)
+  for each orders row WHERE status = 'pending':
+    reconcileOrder(client, row.client_order_id, row.market_ticker, row.position_before_contracts)
+      -- getOrders({client_order_id}) for existence, getPositions(marketTicker) for the
+      -- CURRENT position, diffed against the row's own STORED positionBeforeContracts
+      -- (captured at pending-write time, per the "write pending rows" step above) --
+      -- never re-derived or assumed zero at reconcile time
+    resolveOrder + resolveDecision with whatever's actually true (found
+    filled/partial/unfilled, or genuinely never placed -> 'unknown', 0 contracts)
 ```
 
 ## Ledger schema
@@ -199,23 +249,34 @@ CREATE TABLE IF NOT EXISTS orders (
   decision_id INTEGER NOT NULL REFERENCES decisions(id),
   client_order_id TEXT NOT NULL UNIQUE,
   kalshi_order_id TEXT,
+  market_ticker TEXT NOT NULL,
   requested_contracts INTEGER NOT NULL CHECK (requested_contracts > 0),
+  -- Captured via getPositions(market_ticker) BEFORE createOrder is ever called, and
+  -- never re-derived later -- this is what makes reconciliation (both the inline
+  -- ambiguous-failure path and startup pending-row recovery) correct even though two
+  -- different stories' decisions can legally target the same market_ticker within one
+  -- event (dedup is scoped to (story_key, event_ticker), not market_ticker).
+  position_before_contracts INTEGER NOT NULL,
   filled_contracts INTEGER NOT NULL DEFAULT 0 CHECK (filled_contracts >= 0),
   avg_fill_price_cents INTEGER,
   status TEXT NOT NULL CHECK (status IN (
-    'filled', 'partial', 'unfilled', 'rejected', 'error', 'unknown',
+    'pending', 'filled', 'partial', 'unfilled', 'rejected', 'error', 'unknown',
     'declined-at-execution'
   )),
   error_detail TEXT,
   placed_at TEXT,
-  resolved_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  resolved_at TEXT
 );
 ```
 
 `client_order_id` is `UNIQUE` and derived from `item_id` alone (not decision
 content) — this is what makes both Kalshi's own dedup and this project's
 reconciliation lookup correct across a crash-and-redeliver, independent of
-whether a re-run would compute a different decision.
+whether a re-run would compute a different decision. A row starts `'pending'`
+(written before `createOrder` is ever called, alongside the pending
+`decisions` row) and is later updated in place to its resolved status —
+`resolved_at` is `NULL` until then, unlike `decisions.created_at` which is
+still set at insert time throughout.
 
 Both the exposure-cap trigger and `hasOpenPosition` continue to key off
 `decisions.would_trade = 1` exactly as slice 3 built them — no change to
@@ -232,23 +293,35 @@ not just the function in isolation:
   key pair, verifying the signature cryptographically (same technique as
   InsiderTradeFollower's `orderClient.test.ts`).
 - **Order building / retry / reconciliation** (`order.ts`): unit-tested with
-  a mocked HTTP layer. Required cases: full fill, partial fill, zero fill,
-  a rejected order, 429-then-success-within-the-retry-bound,
-  retries-exhausted-then-reconciliation-finds-the-real-fill,
-  retries-exhausted-then-reconciliation-finds-nothing (genuinely never
-  placed), and the final-exposure-recheck declining before any HTTP call is
-  made at all.
+  a mocked Kalshi client (mocked at the `KalshiClient` method level — not a
+  raw HTTP mock — since the tested logic is retry/diff orchestration, not
+  the client's own request plumbing, which `kalshiClient.test.ts` covers
+  separately). Required cases: full fill (`positionAfter - positionBefore
+  === requested`), partial fill (delta less than requested),  zero fill, a
+  rejected order, 429-then-success-within-the-retry-bound,
+  retries-exhausted-then-reconciliation-finds-a-real-fill-via-position-diff,
+  retries-exhausted-then-reconciliation-finds-nothing (position unchanged,
+  `getOrders` shows no record), and the final-exposure-recheck declining
+  before any HTTP call is made at all (including before the position
+  snapshot).
 - **Pipeline integration** (`pipeline.ts`): a real SQLite ledger (temp file,
   `openLedger`), Anthropic calls mocked (as slice 3 established),
   `placeOrder` mocked at the pipeline-test level but exercised for real in
   `order.test.ts`. Must include: a test proving the pending-row-first
-  ordering (write pending → simulate a crash before `placeOrder` resolves →
-  confirm the row is picked up correctly by `reconcilePendingOrders`, not
-  re-decided from scratch).
-- **`reconcilePendingOrders`** (`ledger.ts` or `order.ts`, wherever it lands
-  at plan time): a real SQLite ledger with a hand-inserted `pending` row,
-  mocked Kalshi client, asserting the row resolves correctly for each of:
-  found-and-filled, found-and-unfilled, genuinely-not-found.
+  ordering (write pending decision + pending order row with a captured
+  `positionBeforeContracts` → simulate a crash before `placeOrder` resolves
+  → confirm both rows are picked up correctly by `reconcilePendingOrders`,
+  not re-decided from scratch).
+- **`reconcilePendingOrders`**: a real SQLite ledger with a hand-inserted
+  `pending` orders row (including a specific, non-zero
+  `positionBeforeContracts`) and its parent pending decision row, mocked
+  Kalshi client, asserting the row resolves correctly for each of:
+  found-and-filled (position now higher than the stored before-snapshot),
+  found-and-unfilled (position unchanged), genuinely-not-found (`getOrders`
+  has no record AND position unchanged). Must include a case where the
+  mocked `getPositions` response reflects a DIFFERENT decision's fill on the
+  same `market_ticker` having landed in between, to prove the stored
+  snapshot (not a fresh reconcile-time read) is what's actually used.
 - **No automated test ever places a real order.** The only real-API contact
   point is the manual `scripts/smoke.ts`, run by a human, read-only, before
   ever unsetting `KALSHI_DRY_RUN`.
