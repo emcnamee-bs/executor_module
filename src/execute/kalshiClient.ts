@@ -3,6 +3,9 @@ import { createPrivateKey, sign as cryptoSign, constants as cryptoConstants, typ
 
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 
+/** Ceiling on any single Kalshi HTTP request. See the signal in `request()`. */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export interface KalshiClientConfig {
   apiKeyId: string;
   privateKeyPath: string;
@@ -134,6 +137,14 @@ export class KalshiClient {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      // Node's fetch has NO default timeout. Without this, a dead socket or stalled
+      // TLS handshake hangs forever -- and throttle() serializes every request onto
+      // one promise chain, so a single hung read (a reconciliation pass, say) also
+      // stalls placeOrder's live trading calls indefinitely, and main.ts's overlap
+      // guard, cleared only in a .finally(), latches on forever with zero log
+      // output. A timeout turns that silent hang into an AbortError rejection,
+      // which every caller here already handles.
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     const text = await res.text();

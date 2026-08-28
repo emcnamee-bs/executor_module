@@ -105,9 +105,19 @@ export async function fetchActiveLadder(seriesTicker: string): Promise<ActiveLad
   return { eventTicker: active.event_ticker, strikeDate: active.strike_date, bands };
 }
 
+/** Ceiling on the market-status fetch. See the signal below for why it exists. */
+const MARKET_STATUS_TIMEOUT_MS = 10_000;
+
 export async function fetchMarketStatus(ticker: string): Promise<MarketStatus> {
   const url = `${KALSHI_API_BASE}/markets/${encodeURIComponent(ticker)}`;
-  const res = await fetch(url);
+  // Node's fetch has NO default timeout. This call runs inside the 10-minute
+  // reconciliation pass, whose overlap guard in main.ts is cleared only in a
+  // .finally() -- a permanent hang here (dead socket, stalled TLS handshake) would
+  // latch that guard forever, silently no-opping every later tick with zero log
+  // output. Timing out turns the hang into an AbortError rejection, which the
+  // per-ticker try/catch in reconcileOpenPositions already handles as "retry next
+  // pass".
+  const res = await fetch(url, { signal: AbortSignal.timeout(MARKET_STATUS_TIMEOUT_MS) });
   if (!res.ok) {
     throw new Error(`Kalshi market status fetch failed for ${ticker}: ${res.status} ${res.statusText}`);
   }
