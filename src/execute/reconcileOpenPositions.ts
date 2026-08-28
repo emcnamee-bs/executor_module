@@ -5,6 +5,7 @@ import { positionForTicker } from './kalshiClient.js';
 import { fetchMarketStatus as realFetchMarketStatus } from '../decide/kalshi.js';
 import {
   findOpenUnsettledDecisions,
+  findPendingOrders,
   markDecisionSettled,
   blockMarket,
   type OpenUnsettledDecision,
@@ -39,6 +40,26 @@ function groupByMarketTicker(rows: OpenUnsettledDecision[]): Map<string, OpenUns
 }
 
 /**
+ * The market_tickers with an order in flight RIGHT NOW (an `orders` row still
+ * `pending`, i.e. placed but not yet resolved). Those tickers are deliberately not
+ * reconciled this pass.
+ *
+ * Why: a decision row sits at would_trade=0 for the entire multi-second duration of
+ * placeOrder (createOrder plus any retries), so a fill from an in-flight order can
+ * already be reflected in Kalshi's REAL position while the ledger legitimately does
+ * not count it as expected yet. Comparing during that window reads a healthy market
+ * as diverged and blocks it permanently on a false positive -- the exact
+ * fires-correctly-but-checked-nothing failure this project's own law names.
+ *
+ * Skipping costs nothing: the order resolves one way or the other within seconds,
+ * and the ticker is reconciled normally on the next pass. This design's own stated
+ * principle is that there is no cost to waiting ten more minutes.
+ */
+function tickersWithOrdersInFlight(db: Database.Database): Set<string> {
+  return new Set(findPendingOrders(db).map((order) => order.marketTicker));
+}
+
+/**
  * Periodic drift check between the ledger's believed open positions and Kalshi's
  * real account state (called every 10 minutes from main.ts, independent of item
  * processing -- see Task 5). A market that has genuinely finalized (result "yes" or
@@ -59,6 +80,11 @@ function groupByMarketTicker(rows: OpenUnsettledDecision[]): Map<string, OpenUns
  * even when the combined state is perfectly correct -- exactly the false-positive
  * that trains a safety mechanism out of usefulness. fetchMarketStatus is likewise
  * called once per distinct ticker, not once per row.
+ *
+ * Any ticker with an order IN FLIGHT this pass (see tickersWithOrdersInFlight) is
+ * skipped entirely -- not status-checked, not compared, never blocked -- because the
+ * ledger's expected count is legitimately behind Kalshi's real position for the
+ * seconds an order is live.
  */
 export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): Promise<void> {
   const { db, client } = deps;
@@ -66,6 +92,13 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
 
   const openRows = findOpenUnsettledDecisions(db);
   if (openRows.length === 0) return;
+
+  // Sampled BEFORE the positions fetch as well as after it, and unioned. The
+  // before-sample is not redundant: an order that was in flight when the ledger
+  // snapshot above was taken, and resolved while getPositions was in the air, is
+  // reflected in the real position but missing from `openRows` -- the after-sample
+  // alone would no longer see it as pending and would read that as a divergence.
+  const inFlightBefore = tickersWithOrdersInFlight(db);
 
   let positionsResp;
   try {
@@ -75,15 +108,29 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
     return;
   }
 
+  const inFlight = new Set([...inFlightBefore, ...tickersWithOrdersInFlight(db)]);
+
   const groups = groupByMarketTicker(openRows);
 
   for (const [marketTicker, rows] of groups) {
+    if (inFlight.has(marketTicker)) {
+      console.log(
+        `[reconcile-open-positions] skipping marketTicker=${marketTicker} this pass: an order is still in flight (a fill can be real on Kalshi before the ledger counts it)`
+      );
+      continue;
+    }
     try {
       const marketStatus = await fetchMarketStatus(marketTicker);
       if (marketStatus.status === 'finalized') {
-        for (const row of rows) {
-          markDecisionSettled(db, row.id);
-        }
+        // One transaction per ticker group: a crash midway through must not leave
+        // some of this ticker's rows settled and the rest not, which would make the
+        // next pass compare a partial expected count against the real position and
+        // block a market that is actually fine.
+        db.transaction(() => {
+          for (const row of rows) {
+            markDecisionSettled(db, row.id);
+          }
+        })();
         continue;
       }
 

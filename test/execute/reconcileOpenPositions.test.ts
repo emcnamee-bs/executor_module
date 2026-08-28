@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 import { reconcileOpenPositions } from '../../src/execute/reconcileOpenPositions.js';
 import {
   openLedger, recordPendingDecision, resolveDecision, isMarketBlocked, findOpenUnsettledDecisions,
+  recordPendingOrder, resolveOrder,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import type { KalshiClient } from '../../src/execute/kalshiClient.js';
@@ -222,6 +223,74 @@ describe('reconcileOpenPositions', () => {
     expect(row.expected_contracts).toBe(18);
     expect(row.real_contracts).toBe(12);
     expect(row.reason).toContain('expected 18');
+  });
+
+  it('skips a ticker with an order still in flight, and reconciles it normally on a later pass once that order resolves', async () => {
+    const decisionId = recordOpenDecision(db, { marketTicker: 'M', side: 'yes', contracts: 10 });
+    const orderId = recordPendingOrder(db, {
+      decisionId, clientOrderId: 'coid-in-flight', marketTicker: 'M', side: 'yes',
+      requestedContracts: 10, positionBeforeContracts: 0,
+    });
+    // A REAL divergence by the numbers (expected 10, real 0) -- the only reason not
+    // to block is the in-flight order, so this proves the skip rather than a
+    // coincidentally-matching comparison.
+    const client = mockClient({ M: 0 });
+    const checkedTickers: string[] = [];
+    const trackingFetchMarketStatus = async (ticker: string) => {
+      checkedTickers.push(ticker);
+      return { status: 'active', result: '' };
+    };
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: trackingFetchMarketStatus });
+
+    expect(isMarketBlocked(db, 'M')).toBe(false);
+    expect(checkedTickers).not.toContain('M'); // not even status-checked
+    expect(findOpenUnsettledDecisions(db)).toHaveLength(1); // still tracked for a later pass
+
+    // The order resolves (however it resolved -- the pending row is gone), so the
+    // next pass has nothing in flight and reconciles the ticker for real.
+    resolveOrder(db, orderId, {
+      filledContracts: 0, avgFillPriceCents: null, status: 'unfilled',
+      kalshiOrderId: 'kalshi-in-flight', kalshiOrderStatus: 'canceled', errorDetail: null,
+    });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: trackingFetchMarketStatus });
+
+    expect(checkedTickers).toContain('M');
+    expect(isMarketBlocked(db, 'M')).toBe(true);
+  });
+
+  it('skips only the in-flight ticker: an unrelated diverging ticker in the same pass is still blocked', async () => {
+    const decisionId = recordOpenDecision(db, { marketTicker: 'N', side: 'yes', contracts: 10 });
+    recordPendingOrder(db, {
+      decisionId, clientOrderId: 'coid-n', marketTicker: 'N', side: 'yes',
+      requestedContracts: 10, positionBeforeContracts: 0,
+    });
+    recordOpenDecision(db, { marketTicker: 'O', side: 'yes', contracts: 5 });
+    const client = mockClient({ N: 0, O: 0 }); // both diverge by the numbers
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    expect(isMarketBlocked(db, 'N')).toBe(false); // in flight -- deferred, not blocked
+    expect(isMarketBlocked(db, 'O')).toBe(true); // genuinely diverged
+  });
+
+  it('does not settle a finalized market whose ticker still has an order in flight', async () => {
+    // Settling is also a write against a ticker whose true state is mid-change --
+    // the skip must cover the whole group, not just the comparison branch.
+    const decisionId = recordOpenDecision(db, { marketTicker: 'P', side: 'yes', contracts: 10 });
+    recordPendingOrder(db, {
+      decisionId, clientOrderId: 'coid-p', marketTicker: 'P', side: 'yes',
+      requestedContracts: 10, positionBeforeContracts: 0,
+    });
+    const client = mockClient({ P: 10 });
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ P: { status: 'finalized', result: 'yes' } }),
+    });
+
+    expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
   });
 
   it('marks every decision settled when a market_ticker shared by multiple rows finalizes', async () => {
