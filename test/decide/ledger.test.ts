@@ -361,5 +361,21 @@ describe('ledger', () => {
         recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', requestedContracts: 1, positionBeforeContracts: 0 })
       ).toThrow(/UNIQUE/i);
     });
+
+    // --- resolveDecision notional-consistency regression tests ----------------
+
+    it('rejects a resolveDecision with a would-trade record whose notionalCents does not equal contracts x entryPriceCents', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(() =>
+        resolveDecision(db, decisionId, tradeRecord({ contracts: 3, entryPriceCents: 12, notionalCents: 999, wouldTrade: true, orderStatus: 'resolved' }))
+      ).toThrow(/notionalCents must equal contracts x entryPriceCents/);
+    });
+
+    it('rejects a resolveDecision with a would-trade record that has null entryPriceCents', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(() =>
+        resolveDecision(db, decisionId, tradeRecord({ contracts: 10, entryPriceCents: null, notionalCents: 0, wouldTrade: true, orderStatus: 'resolved' }))
+      ).toThrow(/must carry an entry price/);
+    });
   });
 });
