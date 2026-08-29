@@ -612,6 +612,39 @@ describe('ledger', () => {
       expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
     });
 
+    it('excludes a would-trade row with a NULL entry_price_cents, which would otherwise compute a silently wrong P&L', () => {
+      // The current schema CHECK makes this row unwritable today, so it is inserted
+      // with check constraints suspended -- exactly what a `decisions` table old
+      // enough to predate that CHECK could still be holding on disk. It must not be
+      // trusted just because today's CHECK would have caught it: OpenUnsettledDecision
+      // declares `entryPriceCents: number`, and JS evaluates `10 * null` as 0, so
+      // reconcileOpenPositions would record a loss as a realized P&L of exactly 0 and
+      // a win as pure profit -- a plausible-looking wrong number, not a crash.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      db.pragma('ignore_check_constraints = ON');
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-entry-price-item', NULL, ?, 'KXAPRPOTUS-26AUG28-40.6', 'yes', 'reported',
+            'up', 0.3, 10, NULL, 100, 3, 1, 'row with no entry price', 'resolved')`
+      ).run(EVENT);
+      db.pragma('ignore_check_constraints = OFF');
+      // The fixture really is the dangerous shape, not one the CHECK quietly rejected.
+      const stored = db.prepare("SELECT entry_price_cents, would_trade FROM decisions WHERE item_id = 'null-entry-price-item'").get() as
+        { entry_price_cents: number | null; would_trade: number };
+      expect(stored.entry_price_cents).toBeNull();
+      expect(stored.would_trade).toBe(1);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+      // Excluded LOUDLY, on the same warning path as NULL market_ticker/side -- an
+      // excluded row is a bug to investigate, not something to drop in silence.
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('entry_price_cents');
+      expect(warnSpy.mock.calls[0][0]).toContain('needs investigation');
+    });
+
     it('still returns healthy rows alongside a malformed one, rather than failing the whole pass', () => {
       const goodId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
       resolveDecision(db, goodId, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));

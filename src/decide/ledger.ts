@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS decisions (
   -- or a future bug could stamp a P&L value onto a row with no settlement event
   -- behind it, and every downstream P&L report would silently trust a number that
   -- was never actually realized.
+  --
+  -- The value stored here is GROSS of any Kalshi trading fees: it is exactly
+  -- (payout - cost) from this row's own side/contracts/entry_price_cents, and this
+  -- project models fees nowhere (an explicitly deferred item from a prior slice).
+  -- The column name reads as net, so any future reporting/aggregation slice must
+  -- treat these numbers as an upper bound on real net P&L rather than silently
+  -- assuming otherwise -- the sibling-project incident this whole slice was designed
+  -- around was an inflated P&L number feeding a compounding exposure cap.
   CHECK (realized_pnl_cents IS NULL OR (would_trade = 1 AND settled_at IS NOT NULL))
 );
 
@@ -419,23 +427,34 @@ export interface OpenUnsettledDecision {
  * confirmed finalized by Kalshi -- the working set the periodic reconciliation pass
  * checks each tick.
  *
- * Rows missing `market_ticker` or `side` are FILTERED OUT here rather than cast
- * non-null and trusted. Nothing enforces non-nullness on those two columns: the
- * schema's CHECK covers entry_price_cents/event_ticker/notional only, and
- * assertNotionalIsConsistent checks the same three -- neither says anything about
- * these. And the consequences are not cosmetic: a would_trade=1 row with a NULL
- * `side` would be summed with the WRONG SIGN into a real-money block decision (this
- * project's worst bug to date was a sign error on Kalshi's signed position), and a
- * NULL `market_ticker` would group under a null key and fail every pass forever. A
- * row in either state is a bug worth investigating, but it must not be allowed to
- * silently invert a safety check in the meantime.
+ * Rows missing `market_ticker`, `side`, or `entry_price_cents` are FILTERED OUT
+ * here rather than cast non-null and trusted. Nothing enforces non-nullness on
+ * `market_ticker`/`side` at all: the schema's CHECK covers
+ * entry_price_cents/event_ticker/notional only, and assertNotionalIsConsistent
+ * checks the same three -- neither says anything about those two. And the
+ * consequences are not cosmetic: a would_trade=1 row with a NULL `side` would be
+ * summed with the WRONG SIGN into a real-money block decision (this project's worst
+ * bug to date was a sign error on Kalshi's signed position), and a NULL
+ * `market_ticker` would group under a null key and fail every pass forever.
+ *
+ * `entry_price_cents` IS covered by a current CHECK, so today it cannot be NULL on a
+ * would-trade row -- but a database old enough to predate that CHECK could still
+ * hold one, and this function's return type now declares `entryPriceCents: number`
+ * over an unfiltered SELECT. The failure mode is the dangerous kind rather than a
+ * crash: JS evaluates `10 * null` as `0`, so reconcileOpenPositions would compute a
+ * loss as a realized P&L of exactly 0 and a win as pure profit -- a
+ * plausible-looking wrong number written durably to the ledger. Filtered on the same
+ * terms as the other two.
+ *
+ * A row in any of those states is a bug worth investigating, but it must not be
+ * allowed to silently invert a safety check or fabricate a P&L in the meantime.
  */
 export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettledDecision[] {
   const excluded = db
     .prepare(
       `SELECT id FROM decisions
        WHERE would_trade = 1 AND settled_at IS NULL
-         AND (market_ticker IS NULL OR side IS NULL)`
+         AND (market_ticker IS NULL OR side IS NULL OR entry_price_cents IS NULL)`
     )
     .all() as { id: number }[];
   if (excluded.length > 0) {
@@ -445,7 +464,8 @@ export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettled
     // the investigation trigger the comment above promises.
     console.warn(
       `[findOpenUnsettledDecisions] excluding ${excluded.length} would-trade row(s) with a ` +
-        `NULL market_ticker or side from reconciliation (decisionIds=${excluded.map((r) => r.id).join(',')}) -- ` +
+        `NULL market_ticker, side, or entry_price_cents from reconciliation ` +
+        `(decisionIds=${excluded.map((r) => r.id).join(',')}) -- ` +
         `this should not happen and needs investigation`
     );
   }
@@ -455,7 +475,7 @@ export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettled
       `SELECT id, market_ticker AS marketTicker, side, contracts, entry_price_cents AS entryPriceCents
        FROM decisions
        WHERE would_trade = 1 AND settled_at IS NULL
-         AND market_ticker IS NOT NULL AND side IS NOT NULL`
+         AND market_ticker IS NOT NULL AND side IS NOT NULL AND entry_price_cents IS NOT NULL`
     )
     .all();
   return rows as OpenUnsettledDecision[];

@@ -226,6 +226,36 @@ describe('reconcileOpenPositions', () => {
     expect(alertSpy.mock.calls[1][0]).toContain('SETTLEMENT-ANOMALY');
   });
 
+  it('never fabricates a P&L for a would-trade row with a NULL entry_price_cents, even on a finalized market', async () => {
+    // The end-to-end half of ledger.ts's entry_price_cents filter: this row is
+    // unwritable under the current CHECK, so it is inserted with check constraints
+    // suspended -- the shape a `decisions` table predating that CHECK could hold.
+    // Unfiltered, `row.contracts * row.entryPriceCents` is `10 * null` === 0, so this
+    // LOSS would settle with a realized P&L of exactly 0 rather than -120.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    db.pragma('ignore_check_constraints = ON');
+    db.prepare(
+      `INSERT INTO decisions
+         (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+          magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+          would_trade, reason, order_status)
+       VALUES ('no-entry-price', NULL, 'KXAPRPOTUS-26AUG28', 'NOPRICE', 'yes', 'reported',
+          'up', 0.3, 10, NULL, 100, 3, 1, 'row with no entry price', 'resolved')`
+    ).run();
+    db.pragma('ignore_check_constraints = OFF');
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ NOPRICE: { status: 'finalized', result: 'no' } }),
+    });
+
+    const row = db.prepare("SELECT settled_at, realized_pnl_cents FROM decisions WHERE item_id = 'no-entry-price'").get() as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(row.settled_at).toBeNull();
+    expect(row.realized_pnl_cents).toBeNull();
+  });
+
   it('does not alert a settlement anomaly for a normally-finalized market', async () => {
     const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
     recordOpenDecision(db, { marketTicker: 'HEALTHY-A', side: 'yes', contracts: 10, entryPriceCents: 12 });
