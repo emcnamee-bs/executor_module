@@ -8,6 +8,7 @@ import {
   findPendingOrders,
   markDecisionSettled,
   blockMarket,
+  isMarketBlocked,
   checkDivergencesSignal,
   type OpenUnsettledDecision,
 } from '../decide/ledger.js';
@@ -164,11 +165,27 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
       const expected = rows.reduce((sum, row) => sum + (row.side === 'yes' ? row.contracts : -row.contracts), 0);
       if (real !== expected) {
         const reason = `reconciliation divergence: expected ${expected}, real ${real}`;
+        // The spec's divergences trigger is "a NEW market_blocks row is written".
+        // blockMarket is an UPSERT that refreshes blocked_at (and clears cleared_at)
+        // on every call, so without this guard a ticker that stays diverged --
+        // exactly the state a genuine divergence leaves behind, since nothing here
+        // resolves it -- would re-trip the signal with a freshly-bumped timestamp on
+        // every 10-minute pass. Two such tickers would make the 60-minute count
+        // permanently >= 2 and the breaker literally un-clearable: it would re-trip
+        // within one pass of every `npm run clear-breaker`, forever. Sampled BEFORE
+        // blockMarket runs -- querying after would always see the just-written block.
+        const wasAlreadyBlocked = isMarketBlocked(db, marketTicker);
         blockMarket(db, marketTicker, reason, expected, real);
-        checkDivergencesSignal(db);
+        // Logged BEFORE the signal check so that, when this block is the one that
+        // trips the breaker, an operator reading the log sees the
+        // [RECONCILE-DIVERGENCE] line explaining why immediately above the
+        // [CIRCUIT-BREAKER-TRIPPED] line, rather than after it.
         console.error(
           `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} decisionIds=${rows.map((r) => r.id).join(',')} ${reason}`
         );
+        if (!wasAlreadyBlocked) {
+          checkDivergencesSignal(db);
+        }
       }
     } catch (err) {
       console.error(
