@@ -77,7 +77,11 @@ describe('fetchMarketStatus (real Kalshi API)', () => {
 describe('fetchMarketStatus / fetchActiveLadder error logging', () => {
   let dir: string;
   let db: ReturnType<typeof openLedger>;
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  // Structurally typed to just what afterEach needs (mockRestore) rather than
+  // ReturnType<typeof vi.spyOn> -- that generic default does not match the
+  // specific overloaded-signature mock instance vi.spyOn(globalThis, 'fetch')
+  // actually returns, and fails to typecheck as a result.
+  let fetchSpy: { mockRestore: () => void } | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'kalshi-errors-test-'));
