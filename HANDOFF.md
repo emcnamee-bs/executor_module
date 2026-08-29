@@ -476,10 +476,35 @@ already-blocked ticker), and a process restart following an unclean exit
 crash cannot reliably alert from inside itself).
 
 Each alert names the specific condition and the exact recovery command
-(`npm run clear-breaker` / `npm run clear-block -- <ticker>`), but does not
-duplicate the full `reason` text already visible in the console log and the
-relevant table (`circuit_breaker_trips`/`market_blocks`) — check those for
-detail before acting.
+(`npm run clear-breaker` / `npm run clear-block -- <ticker>`), runnable exactly
+as pasted. The market-block alert carries the full divergence `reason` verbatim,
+matching its own console log line; the two breaker-trip alerts deliberately do
+not, and point at `circuit_breaker_trips.reason` instead — read that table (and
+`market_blocks`) for detail before acting on either of those two.
+
+**An open `kalshi-errors` trip silently suppresses the other two alerts as
+well.** All three trip-alert sites detect a trip the same way: sample
+`isTradingHalted(db)` immediately before the signal check and again immediately
+after, and alert only on a `false → true` transition. But `isTradingHalted` is
+global — it is true if ANY signal has an open trip row, regardless of which —
+while `kalshi-errors` is the one signal that never pages. So if `kalshi-errors`
+trips first (the likely case in a real Kalshi outage, where a single order's
+retry storm can produce most of the 5-error threshold on its own — see §5a.2a),
+`isTradingHalted` already reads `true` going into any SUBSEQUENT genuine
+`failed-orders` or `divergences` trip; that trip's before-sample is not `false`,
+so its alert never fires. Worst case: during an outage, trading halts globally
+and no Slack alert is ever sent, because the one signal that doesn't page
+happened to trip first.
+
+The operator consequence: **silence is not evidence that nothing is wrong.**
+Whenever trading has stopped unexpectedly and `EXECUTOR_TRADING_HALTED` is not
+what stopped it, query `circuit_breaker_trips` directly rather than waiting for
+a Slack message — and if that table ever shows more than one open signal, assume
+at least one of them paged nobody. (The architectural fix — firing alerts from
+inside `tripBreaker`, which already has precise per-signal new-trip detection
+via its own `alreadyOpen` check, rather than each caller sampling the global
+`isTradingHalted` — is a refactor across every call site, deliberately left to a
+future slice rather than done under final review.)
 
 Delivery is fire-and-forget with one retry: a Slack outage or network blip
 never delays or crashes the trading code path that triggered the alert, but it
@@ -489,6 +514,14 @@ failure beyond a log line. Treat Slack alerting as a convenience layer on top
 of the ledger's own durable state (`circuit_breaker_trips`, `market_blocks`,
 `process_lifecycle`), never as the sole source of truth for whether something
 happened.
+
+One limitation of that durable state itself: `process_lifecycle` is a single
+global row with no per-instance identity, so unclean-exit detection assumes ONE
+process instance per `data/decisions.db` — an assumption nothing currently
+enforces (`EXECMOD_CONSUMER_NAME` exists precisely because a second consumer is
+at least contemplated). If two processes ever share one ledger file, one
+process's clean shutdown can mask the other's crash, and one process's crash can
+fire a false unclean-exit alert on an unrelated instance's next boot.
 
 ### 5a.3 Operational notes
 
