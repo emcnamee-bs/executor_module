@@ -534,11 +534,52 @@ describe('ledger', () => {
       resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
       expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
 
-      markDecisionSettled(db, id);
+      markDecisionSettled(db, id, 0);
 
       expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
       const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as { settled_at: string | null };
       expect(row.settled_at).not.toBeNull();
+    });
+
+    it('markDecisionSettled stores the realized P&L alongside settled_at', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+      markDecisionSettled(db, id, 880);
+
+      const row = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+        { settled_at: string | null; realized_pnl_cents: number | null };
+      expect(row.settled_at).not.toBeNull();
+      expect(row.realized_pnl_cents).toBe(880);
+    });
+
+    it('markDecisionSettled stores a NEGATIVE realized P&L correctly (a loss)', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+      markDecisionSettled(db, id, -120);
+
+      const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+        { realized_pnl_cents: number | null };
+      expect(row.realized_pnl_cents).toBe(-120);
+    });
+
+    it('the schema CHECK rejects a realized_pnl_cents value on a row that is not both would_trade=1 and settled', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      // NOT resolved to would_trade=1, and settled_at is still NULL -- a direct
+      // UPDATE attempting to set realized_pnl_cents here must fail the CHECK.
+      expect(() =>
+        db.prepare('UPDATE decisions SET realized_pnl_cents = 100 WHERE id = ?').run(id)
+      ).toThrow(/CHECK/);
+    });
+
+    it('findOpenUnsettledDecisions now returns entryPriceCents', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved', entryPriceCents: 37, notionalCents: 370 }));
+
+      const open = findOpenUnsettledDecisions(db);
+      expect(open).toHaveLength(1);
+      expect(open[0].entryPriceCents).toBe(37);
     });
 
     it('excludes a would-trade row with a NULL side, which would otherwise be summed with the wrong sign', () => {
@@ -889,7 +930,7 @@ describe('openLedger migration of a pre-slice-5 decisions table', () => {
     const open = findOpenUnsettledDecisions(db);
     expect(open.map((row) => row.id)).toContain(id);
 
-    markDecisionSettled(db, id);
+    markDecisionSettled(db, id, 0);
 
     expect(findOpenUnsettledDecisions(db).map((row) => row.id)).not.toContain(id);
     const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as {

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   reason TEXT NOT NULL,
   order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
   settled_at TEXT,
+  realized_pnl_cents INTEGER,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   -- The cap layer above is only worth anything if notional_cents is the real
   -- notional. Nothing else ties it to the position it describes, so a row claiming
@@ -64,7 +65,14 @@ CREATE TABLE IF NOT EXISTS decisions (
     entry_price_cents IS NOT NULL
     AND event_ticker IS NOT NULL
     AND notional_cents = contracts * entry_price_cents
-  ))
+  )),
+  -- realized_pnl_cents is only meaningful once a would-trade position has actually
+  -- settled: a pending/skip row (would_trade=0) or a still-open would-trade row
+  -- (settled_at IS NULL) has no realized outcome yet. Without this, a direct UPDATE
+  -- or a future bug could stamp a P&L value onto a row with no settlement event
+  -- behind it, and every downstream P&L report would silently trust a number that
+  -- was never actually realized.
+  CHECK (realized_pnl_cents IS NULL OR (would_trade = 1 AND settled_at IS NOT NULL))
 );
 
 -- Redis delivery is at-least-once, so the same item CAN arrive twice. The pipeline
@@ -187,11 +195,36 @@ function migrateDecisionsSettledAt(db: Database.Database): void {
   }
 }
 
+/**
+ * Same reasoning as migrateDecisionsSettledAt above, one slice later: `realized_pnl_cents`
+ * is new in `SCHEMA` as of this slice, and `CREATE TABLE IF NOT EXISTS` is a no-op against
+ * any `decisions` table that already exists -- including one that has already been through
+ * migrateDecisionsSettledAt but predates this column. Without this, markDecisionSettled's
+ * UPDATE (which now always sets realized_pnl_cents) would throw `no such column:
+ * realized_pnl_cents` on every settlement, forever. Nullable, no default: NULL is exactly
+ * correct for every pre-existing row, none of which has been settled through the
+ * P&L-aware markDecisionSettled yet.
+ *
+ * Note this ALTER TABLE cannot carry the new cross-column CHECK constraint (SQLite
+ * disallows a CHECK on an added column that references other columns) -- a migrated
+ * table therefore enforces that invariant only at the application layer
+ * (markDecisionSettled is the sole writer), same trade-off already accepted for the
+ * settled_at column above.
+ */
+function migrateDecisionsRealizedPnlCents(db: Database.Database): void {
+  const columns = db.prepare(`PRAGMA table_info(decisions)`).all() as Array<{ name: string }>;
+  const hasRealizedPnlCents = columns.some((column) => column.name === 'realized_pnl_cents');
+  if (!hasRealizedPnlCents) {
+    db.exec(`ALTER TABLE decisions ADD COLUMN realized_pnl_cents INTEGER`);
+  }
+}
+
 export function openLedger(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
   migrateDecisionsSettledAt(db);
+  migrateDecisionsRealizedPnlCents(db);
   return db;
 }
 
@@ -363,8 +396,11 @@ export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
   return rows as PendingOrderRow[];
 }
 
-export function markDecisionSettled(db: Database.Database, decisionId: number): void {
-  db.prepare(`UPDATE decisions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(decisionId);
+export function markDecisionSettled(db: Database.Database, decisionId: number, realizedPnlCents: number): void {
+  db.prepare(
+    `UPDATE decisions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), realized_pnl_cents = ?
+     WHERE id = ?`
+  ).run(realizedPnlCents, decisionId);
 }
 
 export interface OpenUnsettledDecision {
@@ -372,6 +408,7 @@ export interface OpenUnsettledDecision {
   marketTicker: string;
   side: 'yes' | 'no';
   contracts: number;
+  entryPriceCents: number;
 }
 
 /**
@@ -412,7 +449,7 @@ export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettled
 
   const rows = db
     .prepare(
-      `SELECT id, market_ticker AS marketTicker, side, contracts
+      `SELECT id, market_ticker AS marketTicker, side, contracts, entry_price_cents AS entryPriceCents
        FROM decisions
        WHERE would_trade = 1 AND settled_at IS NULL
          AND market_ticker IS NOT NULL AND side IS NOT NULL`
