@@ -47,8 +47,23 @@ function mockClient(positions: Record<string, number>): KalshiClient {
   } as unknown as KalshiClient;
 }
 
-function mockFetchMarketStatus(statuses: Record<string, MarketStatus>): typeof import('../../src/decide/kalshi.js').fetchMarketStatus {
-  return async (ticker: string) => statuses[ticker] ?? { status: 'active', result: '' };
+/**
+ * Records every (ticker, db) pair it was called with into `calls`, so a test can
+ * pin the SECOND argument as well as the first. That second argument is the
+ * ledger handle fetchMarketStatus needs to log its own failures to kalshi_errors
+ * (and so count toward the kalshi-errors circuit breaker); a mock that quietly
+ * ignored it let the whole suite stay green with `, db` deleted from the real
+ * call site -- exactly the untested-wiring regression this project has shipped
+ * twice before.
+ */
+function mockFetchMarketStatus(
+  statuses: Record<string, MarketStatus>,
+  calls: Array<{ ticker: string; db: unknown }> = []
+): typeof import('../../src/decide/kalshi.js').fetchMarketStatus {
+  return async (ticker: string, db?: unknown) => {
+    calls.push({ ticker, db });
+    return statuses[ticker] ?? { status: 'active', result: '' };
+  };
 }
 
 describe('reconcileOpenPositions', () => {
@@ -101,11 +116,20 @@ describe('reconcileOpenPositions', () => {
     recordOpenDecision(db, { marketTicker: 'A', side: 'yes', contracts: 10 });
     recordOpenDecision(db, { marketTicker: 'B', side: 'yes', contracts: 5 }); // unrelated, unaffected
     const client = mockClient({ A: 0, B: 5 }); // A real position vanished; B matches
+    const statusCalls: Array<{ ticker: string; db: unknown }> = [];
 
-    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}, statusCalls) });
 
     expect(isMarketBlocked(db, 'A')).toBe(true);
     expect(isMarketBlocked(db, 'B')).toBe(false);
+    // Every fetchMarketStatus call must carry THIS ledger handle as its second
+    // argument -- that is what lets the call's own failures land in kalshi_errors
+    // and count toward the kalshi-errors breaker. Deleting `, db` from the real
+    // call site previously left the entire suite green.
+    expect(statusCalls.map((c) => c.ticker).sort()).toEqual(['A', 'B']);
+    for (const call of statusCalls) {
+      expect(call.db).toBe(db);
+    }
     const row = db.prepare('SELECT reason, expected_contracts, real_contracts FROM market_blocks WHERE market_ticker = ?').get('A') as {
       reason: string; expected_contracts: number; real_contracts: number;
     };

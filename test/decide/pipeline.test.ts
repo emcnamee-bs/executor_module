@@ -313,6 +313,13 @@ describe('runDecisionPipeline', () => {
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
     expect(totalExposureCents(db, EVENT)).toBeGreaterThan(0);
     expect(totalExposureCents(db, EVENT)).toBeLessThanOrEqual(1000);
+    // The ledger handle MUST be threaded into the market-data fetch: that is the
+    // only way fetchActiveLadder's own failures reach kalshi_errors and count
+    // toward the kalshi-errors circuit breaker. Dropping the argument is a silent
+    // wiring regression that nothing else in the suite would catch. The series
+    // ticker is asserted literally (pipeline.ts keeps it private) so a change to
+    // either argument surfaces here.
+    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS', db);
   });
 
   it('records a skip (not a throw) when fetchLadder returns null (no active event)', async () => {
