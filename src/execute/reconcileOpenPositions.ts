@@ -10,7 +10,6 @@ import {
   markDecisionSettled,
   blockMarket,
   isMarketBlocked,
-  isTradingHalted,
   checkDivergencesSignal,
   type OpenUnsettledDecision,
 } from '../decide/ledger.js';
@@ -194,15 +193,7 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
               // pasting this line verbatim must get a cleared block, not a usage error.
               `Run npm run clear-block -- ${marketTicker} after investigating.`
           );
-          const wasHaltedBeforeCheck = isTradingHalted(db);
           checkDivergencesSignal(db);
-          if (!wasHaltedBeforeCheck && isTradingHalted(db)) {
-            sendAlert(
-              '[CIRCUIT-BREAKER-TRIPPED] signal=divergences (multiple distinct markets ' +
-                'diverged recently). Check circuit_breaker_trips.reason and run ' +
-                'npm run clear-breaker after investigating.'
-            );
-          }
         }
       }
     } catch (err) {

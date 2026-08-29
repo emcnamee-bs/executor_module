@@ -1,5 +1,6 @@
 // test/decide/ledger.test.ts
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as alertModule from '../../src/alert.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -645,6 +646,31 @@ describe('ledger', () => {
       tripBreaker(db, 'divergences', 'reason B');
       const rows = db.prepare('SELECT signal FROM circuit_breaker_trips ORDER BY signal').all();
       expect(rows).toEqual([{ signal: 'divergences' }, { signal: 'failed-orders' }]);
+    });
+
+    it('alerts on a genuinely new trip for ANY signal (including kalshi-errors, which no caller alerts on directly), but never again while that signal stays open', () => {
+      const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+
+      tripBreaker(db, 'kalshi-errors', 'reason A');
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+      expect(alertSpy.mock.calls[0][0]).toContain('kalshi-errors');
+      expect(alertSpy.mock.calls[0][0]).toContain('reason A');
+
+      // Re-tripping the SAME still-open signal must not alert again -- this is
+      // the exact cross-signal-suppression bug's fix: the dedup that decides
+      // whether to alert is now tripBreaker's own per-signal `alreadyOpen`
+      // check, not a caller-side snapshot of the GLOBAL isTradingHalted.
+      tripBreaker(db, 'kalshi-errors', 'reason A again');
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+
+      // A SECOND, distinct signal tripping while the first is still open must
+      // still alert on its own -- this is the bug this refactor closes: under
+      // the old caller-side isTradingHalted-transition guard, isTradingHalted
+      // was already true (from kalshi-errors above) before this call, so a
+      // genuine NEW failed-orders trip would have been silently swallowed.
+      tripBreaker(db, 'failed-orders', 'reason B');
+      expect(alertSpy).toHaveBeenCalledTimes(2);
+      expect(alertSpy.mock.calls[1][0]).toContain('failed-orders');
     });
 
     it('clearAllTrips clears every currently-open row when multiple signals are tripped, and returns 0 when none are open', () => {

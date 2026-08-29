@@ -467,10 +467,9 @@ failures occurred.
 ### 5a.2b Slack alerting (added in slice 7)
 
 Three events post to Slack via `SLACK_WEBHOOK_URL` (a plain incoming-webhook
-POST, no other configuration): two specific circuit breaker signals (`failed-orders`
-and `divergences`, both from slice 6 — note that `kalshi-errors` trips are
-recorded in `circuit_breaker_trips` and logged loudly but do NOT page Slack),
-any genuinely NEW market block from slice 5's reconciliation (not a re-block of an
+POST, no other configuration): any circuit breaker trip — all three signals
+(`failed-orders`, `divergences`, and `kalshi-errors`, all from slice 6) — any
+genuinely NEW market block from slice 5's reconciliation (not a re-block of an
 already-blocked ticker), and a process restart following an unclean exit
 (detected via the `process_lifecycle` table at the NEXT startup — a real
 crash cannot reliably alert from inside itself).
@@ -478,33 +477,20 @@ crash cannot reliably alert from inside itself).
 Each alert names the specific condition and the exact recovery command
 (`npm run clear-breaker` / `npm run clear-block -- <ticker>`), runnable exactly
 as pasted. The market-block alert carries the full divergence `reason` verbatim,
-matching its own console log line; the two breaker-trip alerts deliberately do
-not, and point at `circuit_breaker_trips.reason` instead — read that table (and
-`market_blocks`) for detail before acting on either of those two.
+matching its own console log line; the breaker-trip alert carries the signal
+name and its own `reason` text directly (the same string written to
+`circuit_breaker_trips.reason`) — read that table (and `market_blocks`) for
+full detail regardless.
 
-**An open `kalshi-errors` trip silently suppresses the other two alerts as
-well.** All three trip-alert sites detect a trip the same way: sample
-`isTradingHalted(db)` immediately before the signal check and again immediately
-after, and alert only on a `false → true` transition. But `isTradingHalted` is
-global — it is true if ANY signal has an open trip row, regardless of which —
-while `kalshi-errors` is the one signal that never pages. So if `kalshi-errors`
-trips first (the likely case in a real Kalshi outage, where a single order's
-retry storm can produce most of the 5-error threshold on its own — see §5a.2a),
-`isTradingHalted` already reads `true` going into any SUBSEQUENT genuine
-`failed-orders` or `divergences` trip; that trip's before-sample is not `false`,
-so its alert never fires. Worst case: during an outage, trading halts globally
-and no Slack alert is ever sent, because the one signal that doesn't page
-happened to trip first.
-
-The operator consequence: **silence is not evidence that nothing is wrong.**
-Whenever trading has stopped unexpectedly and `EXECUTOR_TRADING_HALTED` is not
-what stopped it, query `circuit_breaker_trips` directly rather than waiting for
-a Slack message — and if that table ever shows more than one open signal, assume
-at least one of them paged nobody. (The architectural fix — firing alerts from
-inside `tripBreaker`, which already has precise per-signal new-trip detection
-via its own `alreadyOpen` check, rather than each caller sampling the global
-`isTradingHalted` — is a refactor across every call site, deliberately left to a
-future slice rather than done under final review.)
+**Breaker-trip alerting fires from inside `tripBreaker` itself** (`ledger.ts`),
+not from each caller — this closes two problems a caller-side approach had
+when this was first built: it makes `kalshi-errors` alert at all (previously no
+caller ever did), and it fixes a real cross-signal suppression bug (an
+already-open, unrelated signal used to make the callers' shared
+`isTradingHalted` snapshot already `true`, silently swallowing a genuinely new
+trip on a different signal). `tripBreaker`'s own per-signal `alreadyOpen` check
+is what decides whether to alert now, so each signal alerts independently of
+whatever else may already be open.
 
 Delivery is fire-and-forget with one retry: a Slack outage or network blip
 never delays or crashes the trading code path that triggered the alert, but it
