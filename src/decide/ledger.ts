@@ -5,6 +5,8 @@ import { sendAlert } from '../alert.js';
 
 export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
 export const MAX_TOTAL_EXPOSURE_CENTS = 4000;
+export const MAX_TRADES_PER_WINDOW = 1;
+export const RATE_LIMIT_WINDOW_MINUTES = 15;
 
 export type OrderStatus =
   | 'pending' | 'filled' | 'partial' | 'unfilled'
@@ -313,6 +315,27 @@ export function totalExposureCents(db: Database.Database, eventTicker: string): 
     )
     .get(eventTicker) as { total: number };
   return row.total;
+}
+
+/**
+ * How many would-trade decisions (real fills) have been recorded in the last
+ * `windowMinutes` -- global, not scoped to any event/ticker. Only would_trade=1
+ * rows count: an order attempt that didn't fill, or a decision declined for any
+ * reason (no edge, exposure, itself rate-limited), never counts toward this
+ * window. Paces how FAST the exposure budget can be deployed, independent of
+ * MAX_TOTAL_EXPOSURE_CENTS, which only caps how much is ever at risk.
+ */
+export function recentTradeCount(db: Database.Database, windowMinutes: number): number {
+  if (!Number.isInteger(windowMinutes) || windowMinutes <= 0) {
+    throw new Error(`recentTradeCount: windowMinutes must be a positive integer, got ${windowMinutes}`);
+  }
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM decisions
+       WHERE would_trade = 1 AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+    )
+    .get(`-${windowMinutes} minutes`) as { n: number };
+  return row.n;
 }
 
 /** Writes a not-yet-executed decision: forced would_trade=0, order_status='pending', regardless of the input record's own wouldTrade -- a pending row is never a confirmed position. Returns the new row's id. */

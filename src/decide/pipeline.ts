@@ -15,6 +15,9 @@ import {
   totalExposureCents,
   isTradingHalted,
   checkFailedOrdersSignal,
+  recentTradeCount,
+  MAX_TRADES_PER_WINDOW,
+  RATE_LIMIT_WINDOW_MINUTES,
   type DecisionRecord,
 } from './ledger.js';
 import { evaluateSizing } from './sizing.js';
@@ -112,6 +115,20 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
 
     if (rung === 'rumor') {
       recordDecision(db, skipRecord(item, 'rumor rung, stake 0', { rung, orderStatus: 'resolved' }));
+      return;
+    }
+
+    // Checked BEFORE any model call: a rate-limited item must never spend real
+    // Haiku/Sonnet API cost on a decision that will be declined anyway. Global,
+    // not scoped to an event/ticker/story -- paces how FAST the exposure budget can
+    // be deployed, independent of the total-exposure cap enforced later.
+    if (recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES) >= MAX_TRADES_PER_WINDOW) {
+      recordDecision(
+        db,
+        skipRecord(item, `rate limit: ${MAX_TRADES_PER_WINDOW} trade(s) per ${RATE_LIMIT_WINDOW_MINUTES} minutes already reached`, {
+          rung, orderStatus: 'resolved',
+        })
+      );
       return;
     }
 

@@ -27,11 +27,14 @@ import {
   checkDivergencesSignal,
   recordProcessStarting,
   recordProcessStoppedCleanly,
+  recentTradeCount,
+  MAX_NOTIONAL_CENTS_PER_TRADE,
+  MAX_TOTAL_EXPOSURE_CENTS,
+  MAX_TRADES_PER_WINDOW,
+  RATE_LIMIT_WINDOW_MINUTES,
   CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD,
   CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD,
   CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD,
-  MAX_NOTIONAL_CENTS_PER_TRADE,
-  MAX_TOTAL_EXPOSURE_CENTS,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import BetterSqlite3 from 'better-sqlite3';
@@ -859,6 +862,50 @@ describe('ledger', () => {
       recordProcessStarting(db);
       expect(recordProcessStarting(db)).toBe(true); // crash 1 detected
       expect(recordProcessStarting(db)).toBe(true); // crash 2 detected -- still 'running' from crash 1's boot
+    });
+  });
+
+  describe('rate limiting', () => {
+    it('recentTradeCount is 0 with no would-trade rows', () => {
+      expect(recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES)).toBe(0);
+    });
+
+    it('recentTradeCount counts a real fill recorded just now', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+      expect(recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES)).toBe(1);
+    });
+
+    it('recentTradeCount does NOT count a would_trade=false decision', () => {
+      // The schema's notional CHECK (and assertNotionalIsConsistent's construction-time
+      // twin) both short-circuit entirely when would_trade=0 -- no other field needs
+      // adjusting for this row to be valid.
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: false, orderStatus: 'resolved' }));
+
+      expect(recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES)).toBe(0);
+    });
+
+    it('recentTradeCount does NOT count a real fill OUTSIDE the window', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+      // Backdate this row's created_at well outside the 15-minute window.
+      db.prepare("UPDATE decisions SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') WHERE id = ?").run(id);
+
+      expect(recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES)).toBe(0);
+    });
+
+    it('throws on a non-positive or non-integer windowMinutes instead of silently returning 0', () => {
+      expect(() => recentTradeCount(db, 0)).toThrow();
+      expect(() => recentTradeCount(db, -5)).toThrow();
+      expect(() => recentTradeCount(db, 1.5)).toThrow();
+      expect(() => recentTradeCount(db, NaN)).toThrow();
+    });
+
+    it('MAX_TRADES_PER_WINDOW and RATE_LIMIT_WINDOW_MINUTES are exactly 1 and 15', () => {
+      expect(MAX_TRADES_PER_WINDOW).toBe(1);
+      expect(RATE_LIMIT_WINDOW_MINUTES).toBe(15);
     });
   });
 });

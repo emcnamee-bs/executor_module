@@ -518,6 +518,53 @@ at least contemplated). If two processes ever share one ledger file, one
 process's clean shutdown can mask the other's crash, and one process's crash can
 fire a false unclean-exit alert on an unrelated instance's next boot.
 
+### 5a.2c Trade pacing limit (added in slice 9)
+
+At most `MAX_TRADES_PER_WINDOW` (1) real trades (`would_trade = 1` rows only —
+a rejected order, or any declined decision including one declined by this
+same limit, never counts) within a rolling `RATE_LIMIT_WINDOW_MINUTES` (15)
+window, checked by `recentTradeCount` (`ledger.ts`) and enforced in
+`pipeline.ts` immediately after the kill-switch/circuit-breaker and
+rumor-rung checks — before any Haiku/Sonnet call, so a rate-limited item
+never spends real API cost. Global scope, not per-event: this is a pacing
+question ("is the system trading too fast right now?"), independent of which
+market a decision happens to land on.
+
+This caps how FAST the exposure budget in `MAX_TOTAL_EXPOSURE_CENTS` can be
+deployed, not how much can ever be at risk — that is still the exposure
+cap's own job.
+
+A rate-limited decision resolves exactly like any other decline
+(`would_trade: false`, reason `rate limit: 1 trade(s) per 15 minutes already
+reached`) — it is NOT a circuit breaker. There is no halt, no
+`[CIRCUIT-BREAKER-TRIPPED]` log line, and no clear script: the limit
+self-expires as soon as the window rolls past the last real trade, the same
+way `MAX_TOTAL_EXPOSURE_CENTS` already does. A burst of several correlated
+signals in the same few minutes does NOT queue or spread out over time —
+everything after the first real trade in a window is declined outright (a
+permanent, already-resolved skip row, never redelivered), so if only one
+item in a burst ever recurs, the rest of that burst's budget is never
+deployed at all.
+
+**Dry run never exercises this limit.** A dry run always resolves
+`would_trade: false`, so a rehearsal shows unlimited pace; the first time
+this limit can actually fire is with a real order in flight.
+
+**This assumes one process per `data/decisions.db`, the same premise
+§5a.2b's unclean-exit detection already depends on** — nothing currently
+enforces it. Two consumer processes sharing one ledger could each read the
+same recent-trade count before either one's fill is durably recorded, and
+each place a real trade in the same window. `MAX_TOTAL_EXPOSURE_CENTS`
+survives that scenario because of its own DB-level CHECK/trigger; this limit
+has no equivalent, so if a second consumer is ever added, this is the first
+thing to revisit.
+
+**Shares `MAX_TOTAL_EXPOSURE_CENTS`'s one blind spot**: a `pending` row stuck
+retrying at startup (see §5a.3's note on rows that keep appearing in the
+reconcile logs) represents a real live position that neither this limit, the
+exposure cap, nor `reconcileOpenPositions` can see until it resolves to
+`would_trade = 1` — inherited from slice 4, not introduced here.
+
 ### 5a.3 Operational notes
 
 - **Startup reconciliation runs before the Redis consumer starts.**
