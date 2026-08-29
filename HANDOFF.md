@@ -433,7 +433,23 @@ direnv exec . npm run clear-breaker
 
 This clears every currently-open trip, not just one — if more than one signal
 tripped, clearing is a statement that the whole situation is resolved, not just one
-signal among several.
+signal among several. **Clearing the breaker does not fix whatever tripped it.** If
+the root cause is still live (Kalshi is still erroring, a market is still genuinely
+diverged from a cause the reconciler keeps re-detecting as a new block), the breaker
+can trip again within minutes of clearing — treat a second trip shortly after a
+clear as evidence the cause was not actually resolved, not as a flapping breaker.
+
+**Reading a `kalshi-errors` trip: 5 errors is often fewer than 5 incidents.**
+`placeOrder` retries a transient failure up to 3 times, and each attempt logs its
+own `kalshi_errors` row; an exhausted retry's follow-up `reconcileOrder` call can
+log a 4th. So a SINGLE order attempt during one Kalshi blip can produce most of the
+5-error threshold on its own, and the next unrelated API call (the next item's
+`getPositions`, or the reconciliation timer's `fetchMarketStatus`) completes the
+trip. This is deliberate — fail-closed is the right default when a real-money system
+hits unexplained API trouble — but it means an operator investigating a
+`kalshi-errors` trip should read the `kalshi_errors` rows' `call_site`/`occurred_at`
+and check whether it was one retry storm rather than assume five independent
+failures occurred.
 
 ### 5a.3 Operational notes
 
