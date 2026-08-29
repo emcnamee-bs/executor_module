@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, reconcilePendingOrders, reconcileOrphanedPendingDecisions, signedFillDelta } from '../../src/execute/order.js';
 import { KalshiClient, KalshiRequestError } from '../../src/execute/kalshiClient.js';
-import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, type DecisionRecord } from '../../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD, type DecisionRecord } from '../../src/decide/ledger.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -642,6 +642,23 @@ describe('reconcilePendingOrders', () => {
     };
     expect(decisionRow.would_trade).toBe(0);
     expect(decisionRow.order_status).toBe('resolved');
+  });
+
+  it('reconcilePendingOrders trips the failed-orders breaker after enough real startup-reconcile failures', async () => {
+    // Same fixture shape as this file's existing "resolves a crash-orphaned pending
+    // order that never filled" test just above -- an empty getOrders/getPositions
+    // response makes reconcileOrder return status 'unknown' for every row.
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      pendingSetup({ clientOrderId: `cid-startup-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(isTradingHalted(db)).toBe(true);
   });
 
   it('uses the STORED positionBeforeContracts from the pending row, not a fresh zero, so a different decision\'s intervening fill on the same ticker cannot corrupt this reconciliation', async () => {

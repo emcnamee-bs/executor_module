@@ -14,6 +14,7 @@ import {
   hasOpenPosition,
   totalExposureCents,
   isTradingHalted,
+  checkFailedOrdersSignal,
   type DecisionRecord,
 } from './ledger.js';
 import { evaluateSizing } from './sizing.js';
@@ -287,6 +288,8 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         orderStatus: 'resolved',
       });
     })();
+
+    checkFailedOrdersSignal(db, placed.status);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (pendingDecisionId !== null && pendingRecordForCrash !== null) {

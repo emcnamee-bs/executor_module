@@ -6,7 +6,7 @@ import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import { runDecisionPipeline } from '../../src/decide/pipeline.js';
-import { openLedger, hasOpenPosition, totalExposureCents, tripBreaker } from '../../src/decide/ledger.js';
+import { openLedger, hasOpenPosition, totalExposureCents, tripBreaker, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD } from '../../src/decide/ledger.js';
 import * as ledgerModule from '../../src/decide/ledger.js';
 import { computeRung } from '../../src/decide/rung.js';
 import type { Item } from '../../src/item.js';
@@ -227,6 +227,28 @@ describe('runDecisionPipeline', () => {
     const row = onlyRowFor(db, item.item_id);
     expect(row.reason).toBe('circuit breaker tripped');
     expect(row.would_trade).toBe(0);
+  });
+
+  it('trips the failed-orders breaker after enough real would-trade decisions resolve to rejected', async () => {
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'rejected-mock-client-order-id',
+      kalshiOrderId: null,
+      kalshiOrderStatus: null,
+      filledContracts: 0,
+      avgFillPriceCents: null,
+      status: 'rejected',
+      dryRun: false,
+      errorDetail: 'simulated 400 for this test',
+    });
+
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      const item = baseItem({
+        item_id: `item-rejected-${i}`, dedup_id: `dedup-rejected-${i}`, story_key: `story-rejected-${i}`,
+      });
+      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    }
+
+    expect(isTradingHalted(db)).toBe(true);
   });
 
   it('records a skip when verify reports unsupported, before decide/sizing, carrying the real rung', async () => {
