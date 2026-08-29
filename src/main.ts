@@ -144,8 +144,16 @@ export async function main(): Promise<void> {
   } catch (err) {
     console.error('[lifecycle] failed to record process start (not fatal):', err);
   }
+  // The ONE awaited sendAlert in this codebase, and deliberately so. Every other
+  // call site is fire-and-forget because it sits on the hot trading path and must
+  // never be delayed by a Slack outage. This one runs once during startup, before
+  // the Redis consumer loop has accepted any work, so there is no hot path to
+  // delay -- and awaiting it means the POST gets a real chance to land before a
+  // LATER startup step (a missing env var, say) can crash the process and abandon
+  // an in-flight unawaited request. sendAlert never throws, and it is bounded by
+  // its own fetch timeout, so this cannot hang or fail the boot.
   if (uncleanRestart) {
-    sendAlert(
+    await sendAlert(
       '[UNCLEAN-EXIT] process restarted after an unclean exit. ' +
         'Check logs for the cause before assuming trading resumed safely.'
     );
