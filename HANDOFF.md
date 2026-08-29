@@ -513,8 +513,9 @@ attempt and the retry failing) with nothing else surfacing that specific
 failure beyond a log line. Treat Slack alerting as a convenience layer on top
 of the ledger's own durable state (`circuit_breaker_trips`, `market_blocks`,
 `process_lifecycle`), never as the sole source of truth for whether something
-happened. Each POST is bounded by a 5-second timeout, so a hung Slack connection
-cannot hold the process open past a clean shutdown.
+happened. Each POST is bounded by a 5-second timeout per attempt (~12 seconds
+across both attempts and the retry delay, worst case), so a hung Slack
+connection cannot hold the process open past a clean shutdown for long.
 
 The one exception to fire-and-forget is the unclean-exit alert at startup, which
 IS awaited: it runs before the consumer loop has accepted any work (so there is

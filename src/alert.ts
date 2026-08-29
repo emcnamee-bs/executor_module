@@ -48,8 +48,10 @@ async function postToSlack(webhookUrl: string, message: string): Promise<void> {
 }
 
 /**
- * Fire-and-forget from every call site (never awaited) -- this function never
- * throws or rejects, so no call site needs its own try/catch or .catch(). On
+ * Fire-and-forget from every call site except the startup unclean-exit alert
+ * in main.ts (see the comment there for why that one is deliberately
+ * awaited) -- this function never throws or rejects regardless, so no call
+ * site needs its own try/catch or .catch(). On
  * failure, waits RETRY_DELAY_MS and tries once more; if that also fails, logs
  * loudly and gives up. Reads SLACK_WEBHOOK_URL from the environment at CALL
  * time (not import time) so tests can freely set/unset it per-case; if unset,
