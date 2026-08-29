@@ -717,4 +717,59 @@ describe('runDecisionPipeline', () => {
     expect(orderRow.filled_contracts).toBe(2);
     expect(orderRow.kalshi_order_id).toMatch(/^DRYRUN-/);
   });
+
+  // --- Task 2 (rate-time-limits slice 9): 1 real fill per 15-minute window -----
+
+  it('declines a second item within the rate-limit window, without spending a single model call on it', async () => {
+    const first = baseItem({ item_id: 'item-rate-1', dedup_id: 'dedup-rate-1', story_key: 'story-rate-1' });
+    await runDecisionPipeline(first, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    // Confirm the fixture actually produced a real fill -- if it didn't, this
+    // test would trivially "pass" for the wrong reason.
+    expect(onlyRowFor(db, first.item_id).would_trade).toBe(1);
+
+    vi.mocked(synopsisModule.synopsize).mockClear();
+    const second = baseItem({ item_id: 'item-rate-2', dedup_id: 'dedup-rate-2', story_key: 'story-rate-2' });
+    await runDecisionPipeline(second, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+
+    const row = onlyRowFor(db, second.item_id);
+    expect(row.would_trade).toBe(0);
+    expect(row.reason).toBe('rate limit: 1 trade(s) per 15 minutes already reached');
+    expect(synopsisModule.synopsize).not.toHaveBeenCalled();
+  });
+
+  it('trades normally when the prior real fill is OUTSIDE the rate-limit window', async () => {
+    const first = baseItem({ item_id: 'item-rate-old-1', dedup_id: 'dedup-rate-old-1', story_key: 'story-rate-old-1' });
+    await runDecisionPipeline(first, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    expect(onlyRowFor(db, first.item_id).would_trade).toBe(1);
+    // Backdate the first fill well outside the 15-minute window.
+    db.prepare("UPDATE decisions SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') WHERE item_id = ?").run(first.item_id);
+
+    const second = baseItem({ item_id: 'item-rate-old-2', dedup_id: 'dedup-rate-old-2', story_key: 'story-rate-old-2' });
+    await runDecisionPipeline(second, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+
+    expect(onlyRowFor(db, second.item_id).would_trade).toBe(1);
+  });
+
+  it('a burst of would_trade=false decisions never blocks a later item from trading', async () => {
+    vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({
+      direction: 'up', magnitudePts: 0.3, shouldTrade: false, reasoning: 'no edge',
+    });
+    for (let i = 0; i < 3; i++) {
+      const item = baseItem({ item_id: `item-noedge-${i}`, dedup_id: `dedup-noedge-${i}`, story_key: `story-noedge-${i}` });
+      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+      expect(onlyRowFor(db, item.item_id).would_trade).toBe(0);
+    }
+    // Re-apply the SAME default mock this file's beforeEach sets (do NOT use
+    // mockRestore() here -- that would revert to the REAL decideTrade, which
+    // makes a real Sonnet API call).
+    vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({
+      direction: 'up', magnitudePts: 0.3, shouldTrade: true,
+      reasoning: 'stronger-than-expected jobs data typically lifts approval',
+    });
+
+    const tradeable = baseItem({ item_id: 'item-noedge-then-trade', dedup_id: 'dedup-noedge-then-trade', story_key: 'story-noedge-then-trade' });
+    await runDecisionPipeline(tradeable, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+
+    expect(onlyRowFor(db, tradeable.item_id).would_trade).toBe(1);
+  });
 });
