@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
   reason TEXT NOT NULL,
   order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
+  settled_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   -- The cap layer above is only worth anything if notional_cents is the real
   -- notional. Nothing else ties it to the position it describes, so a row claiming
@@ -131,12 +132,60 @@ CREATE TABLE IF NOT EXISTS orders (
   placed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   resolved_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS market_blocks (
+  market_ticker TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  expected_contracts INTEGER NOT NULL,
+  real_contracts INTEGER NOT NULL,
+  blocked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  cleared_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kalshi_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  call_site TEXT NOT NULL,
+  error_message TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS circuit_breaker_trips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors')),
+  reason TEXT NOT NULL,
+  tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  cleared_at TEXT
+);
 `;
+
+/**
+ * `CREATE TABLE IF NOT EXISTS decisions (...)` is a NO-OP against a `decisions`
+ * table that already exists -- so on any machine carrying a `data/decisions.db`
+ * written by slices 1-4, the `settled_at` column slice 5 added to `SCHEMA` would
+ * silently never be created. The consequence is not a loud failure: `market_blocks`
+ * (a brand-new table) gets created fine, `isMarketBlocked` always answers false, and
+ * `findOpenUnsettledDecisions` throws `no such column: settled_at` on every single
+ * reconciliation pass forever while real trading continues completely unguarded by
+ * this slice's safety mechanism.
+ *
+ * This one column is the ONLY drift slice 5 introduces to a pre-existing table, so
+ * this is deliberately one targeted `ALTER TABLE`, not a general migration
+ * framework. `ADD COLUMN ... TEXT` (nullable, no default) backfills every existing
+ * row as NULL, which is exactly the correct starting state: not yet settled.
+ */
+function migrateDecisionsSettledAt(db: Database.Database): void {
+  const columns = db.prepare(`PRAGMA table_info(decisions)`).all() as Array<{ name: string }>;
+  const hasSettledAt = columns.some((column) => column.name === 'settled_at');
+  if (!hasSettledAt) {
+    db.exec(`ALTER TABLE decisions ADD COLUMN settled_at TEXT`);
+  }
+}
 
 export function openLedger(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
+  migrateDecisionsSettledAt(db);
   return db;
 }
 
@@ -293,15 +342,238 @@ export interface PendingOrderRow {
   side: 'yes' | 'no';
   requestedContracts: number;
   positionBeforeContracts: number;
+  placedAt: string;
 }
 
 export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
   const rows = db
     .prepare(
       `SELECT id, decision_id AS decisionId, client_order_id AS clientOrderId, market_ticker AS marketTicker,
-              side, requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts
+              side, requested_contracts AS requestedContracts, position_before_contracts AS positionBeforeContracts,
+              placed_at AS placedAt
        FROM orders WHERE status = 'pending'`
     )
     .all();
   return rows as PendingOrderRow[];
+}
+
+export function markDecisionSettled(db: Database.Database, decisionId: number): void {
+  db.prepare(`UPDATE decisions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(decisionId);
+}
+
+export interface OpenUnsettledDecision {
+  id: number;
+  marketTicker: string;
+  side: 'yes' | 'no';
+  contracts: number;
+}
+
+/**
+ * Every would-trade position the ledger still believes is open and not yet
+ * confirmed finalized by Kalshi -- the working set the periodic reconciliation pass
+ * checks each tick.
+ *
+ * Rows missing `market_ticker` or `side` are FILTERED OUT here rather than cast
+ * non-null and trusted. Nothing enforces non-nullness on those two columns: the
+ * schema's CHECK covers entry_price_cents/event_ticker/notional only, and
+ * assertNotionalIsConsistent checks the same three -- neither says anything about
+ * these. And the consequences are not cosmetic: a would_trade=1 row with a NULL
+ * `side` would be summed with the WRONG SIGN into a real-money block decision (this
+ * project's worst bug to date was a sign error on Kalshi's signed position), and a
+ * NULL `market_ticker` would group under a null key and fail every pass forever. A
+ * row in either state is a bug worth investigating, but it must not be allowed to
+ * silently invert a safety check in the meantime.
+ */
+export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettledDecision[] {
+  const excluded = db
+    .prepare(
+      `SELECT id FROM decisions
+       WHERE would_trade = 1 AND settled_at IS NULL
+         AND (market_ticker IS NULL OR side IS NULL)`
+    )
+    .all() as { id: number }[];
+  if (excluded.length > 0) {
+    // Filtering these out is a safety measure, not a fix -- silently dropping them
+    // from the check they're excluded from would trade one loud symptom (a
+    // per-pass reconcile error, or a spurious block) for a quieter one. This is
+    // the investigation trigger the comment above promises.
+    console.warn(
+      `[findOpenUnsettledDecisions] excluding ${excluded.length} would-trade row(s) with a ` +
+        `NULL market_ticker or side from reconciliation (decisionIds=${excluded.map((r) => r.id).join(',')}) -- ` +
+        `this should not happen and needs investigation`
+    );
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT id, market_ticker AS marketTicker, side, contracts
+       FROM decisions
+       WHERE would_trade = 1 AND settled_at IS NULL
+         AND market_ticker IS NOT NULL AND side IS NOT NULL`
+    )
+    .all();
+  return rows as OpenUnsettledDecision[];
+}
+
+export function isMarketBlocked(db: Database.Database, marketTicker: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 FROM market_blocks WHERE market_ticker = ? AND cleared_at IS NULL`)
+    .get(marketTicker);
+  return row !== undefined;
+}
+
+/**
+ * Blocks a market_ticker from further NEW order placement (checked by placeOrder).
+ * An UPSERT: blocking an already-active block updates its reason/counts; blocking a
+ * PREVIOUSLY-CLEARED ticker reactivates it (cleared_at reset to NULL) rather than
+ * silently no-op-ing -- a market can legitimately diverge again after a human clears
+ * an earlier block.
+ */
+export function blockMarket(
+  db: Database.Database,
+  marketTicker: string,
+  reason: string,
+  expectedContracts: number,
+  realContracts: number
+): void {
+  db.prepare(
+    `INSERT INTO market_blocks (market_ticker, reason, expected_contracts, real_contracts)
+     VALUES (@marketTicker, @reason, @expectedContracts, @realContracts)
+     ON CONFLICT(market_ticker) DO UPDATE SET
+       reason = @reason, expected_contracts = @expectedContracts, real_contracts = @realContracts,
+       blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), cleared_at = NULL`
+  ).run({ marketTicker, reason, expectedContracts, realContracts });
+}
+
+export type CircuitBreakerSignal = 'failed-orders' | 'divergences' | 'kalshi-errors';
+
+export const CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD = 3;
+export const CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES = 30;
+export const CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD = 2;
+export const CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES = 60;
+export const CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD = 5;
+export const CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES = 15;
+
+/**
+ * True if EITHER the manual kill switch or any automatic circuit breaker is
+ * currently tripped. Checked once per decision in pipeline.ts, alongside the
+ * existing EXECUTOR_TRADING_HALTED env var -- this only ever gates a NEW decision
+ * from proceeding to placeOrder; nothing already in flight is affected.
+ */
+export function isTradingHalted(db: Database.Database): boolean {
+  const row = db.prepare(`SELECT 1 FROM circuit_breaker_trips WHERE cleared_at IS NULL LIMIT 1`).get();
+  return row !== undefined;
+}
+
+/**
+ * Trips one signal. Deliberately per-signal, not global: if 'failed-orders' is
+ * already open and 'divergences' independently crosses its own threshold, both
+ * must be visible as their own trip rows -- collapsing them into "something is
+ * already tripped, don't bother" would hide that a second, distinct problem also
+ * fired. isTradingHalted (used by callers to decide whether to halt) only cares
+ * that ANY row is open; this function's own dedup is scoped to ONE signal.
+ */
+export function tripBreaker(db: Database.Database, signal: CircuitBreakerSignal, reason: string): void {
+  const alreadyOpen = db
+    .prepare(`SELECT 1 FROM circuit_breaker_trips WHERE signal = ? AND cleared_at IS NULL LIMIT 1`)
+    .get(signal);
+  if (alreadyOpen) return;
+  db.prepare(`INSERT INTO circuit_breaker_trips (signal, reason) VALUES (?, ?)`).run(signal, reason);
+  console.error(`[CIRCUIT-BREAKER-TRIPPED] signal=${signal} reason=${reason}`);
+}
+
+/**
+ * Clears EVERY currently-open trip, not just one -- an operator clearing the
+ * breaker is confirming the whole situation is resolved, not one signal among
+ * several in isolation. Returns the number of rows cleared (0 if none were open),
+ * for the manual clear script to report back to the operator.
+ */
+export function clearAllTrips(db: Database.Database): number {
+  const info = db
+    .prepare(`UPDATE circuit_breaker_trips SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE cleared_at IS NULL`)
+    .run();
+  return info.changes;
+}
+
+/**
+ * Logs one Kalshi API error (from any call site -- order placement, position/status
+ * reads, market data) and immediately checks whether the kalshi-errors signal
+ * should trip. Deliberately swallows its OWN failures entirely (both the insert and
+ * the count-and-trip check): this is called from inside an existing catch block
+ * that is about to rethrow the REAL error, and this logging is purely auxiliary
+ * observability that must never interfere with that rethrow.
+ */
+export function recordKalshiError(db: Database.Database, callSite: string, errorMessage: string): void {
+  try {
+    db.prepare(`INSERT INTO kalshi_errors (call_site, error_message) VALUES (?, ?)`).run(callSite, errorMessage);
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM kalshi_errors
+         WHERE occurred_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD) {
+      tripBreaker(
+        db, 'kalshi-errors',
+        `${row.n} Kalshi API errors within ${CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES} minutes (latest: ${callSite}: ${errorMessage})`
+      );
+    }
+  } catch (err) {
+    console.error('[recordKalshiError] failed to log/evaluate a Kalshi API error (not fatal):', err);
+  }
+}
+
+/**
+ * Call immediately after resolveOrder writes. Only rejected/unknown/error are real
+ * anomalies -- unfilled/partial are normal IOC outcomes and declined-at-execution is
+ * the system correctly refusing to trade, so none of those should ever count.
+ * Failure-isolated: the resolveOrder write this follows is already committed by the
+ * time this runs, so a failure here must never propagate back into the caller.
+ */
+export function checkFailedOrdersSignal(db: Database.Database, status: OrderStatus): void {
+  if (status !== 'rejected' && status !== 'unknown' && status !== 'error') return;
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM orders
+         WHERE status IN ('rejected','unknown','error')
+           AND resolved_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD) {
+      tripBreaker(
+        db, 'failed-orders',
+        `${row.n} failed/ambiguous order outcomes within ${CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES} minutes`
+      );
+    }
+  } catch (err) {
+    console.error('[checkFailedOrdersSignal] failed to evaluate the failed-orders signal (not fatal):', err);
+  }
+}
+
+/**
+ * Call immediately after blockMarket writes. market_blocks is keyed one row per
+ * market_ticker (an UPSERT), so this naturally counts DISTINCT tickers with a
+ * recent divergence, not raw event volume -- exactly the intended "how many
+ * different markets are showing a problem" signal, not "how many times has the
+ * same ticker re-triggered". Failure-isolated, same reasoning as
+ * checkFailedOrdersSignal.
+ */
+export function checkDivergencesSignal(db: Database.Database): void {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM market_blocks
+         WHERE blocked_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD) {
+      tripBreaker(
+        db, 'divergences',
+        `${row.n} reconciliation divergences within ${CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES} minutes`
+      );
+    }
+  } catch (err) {
+    console.error('[checkDivergencesSignal] failed to evaluate the divergences signal (not fatal):', err);
+  }
 }

@@ -5,9 +5,11 @@ import type Database from 'better-sqlite3';
 import {
   totalExposureCents,
   MAX_TOTAL_EXPOSURE_CENTS,
+  isMarketBlocked,
   findPendingOrders,
   resolveOrder,
   resolveDecision,
+  checkFailedOrdersSignal,
   type OrderStatus,
   type DecisionRecord,
 } from '../decide/ledger.js';
@@ -196,6 +198,14 @@ export async function placeOrder(input: PlaceOrderInput, deps: PlaceOrderDeps): 
       clientOrderId, kalshiOrderId: null, kalshiOrderStatus: null, filledContracts: 0,
       avgFillPriceCents: null, status: 'declined-at-execution', dryRun: false,
       errorDetail: `exposure cap would be breached: ${currentExposure}c + ${notionalCents}c > ${MAX_TOTAL_EXPOSURE_CENTS}c`,
+    };
+  }
+
+  if (isMarketBlocked(db, input.marketTicker)) {
+    return {
+      clientOrderId, kalshiOrderId: null, kalshiOrderStatus: null, filledContracts: 0,
+      avgFillPriceCents: null, status: 'declined-at-execution', dryRun: false,
+      errorDetail: `market_ticker ${input.marketTicker} is blocked pending manual review (reconciliation divergence) -- see market_blocks`,
     };
   }
 
@@ -393,6 +403,8 @@ export async function reconcilePendingOrders(db: Database.Database, client: Kals
           )
         );
       })();
+
+      checkFailedOrdersSignal(db, reconciled.status);
     } catch (err) {
       console.error(
         `[startup-reconcile] failed to reconcile order clientOrderId=${pending.clientOrderId} ` +

@@ -23,13 +23,29 @@ async function main(): Promise<void> {
   const balance = await client.getBalance();
   console.log(`[smoke] balance: ${JSON.stringify(balance)}`);
 
-  console.log('[smoke] fetching positions...');
+  console.log('[smoke] fetching positions (merged across all pages)...');
   const positions = await client.getPositions();
   console.log(`[smoke] positions: ${JSON.stringify(positions)}`);
   console.log(
     "[smoke] NOTE: Kalshi's `position` is SIGNED -- positive is a YES holding, " +
       'negative is a NO holding. Fill detection depends on that; if any position ' +
       'above looks like an unsigned magnitude, stop and re-verify before going live.'
+  );
+
+  // getPositions() above merges every page and drops `cursor`, so it cannot show
+  // whether the account's real position count spans more than one page, or
+  // confirm Kalshi actually names its pagination token `cursor`. This raw,
+  // single-page call is the only place that can -- see HANDOFF.md's pre-go-live
+  // checklist.
+  console.log('[smoke] fetching ONE raw, unmerged page of positions for pagination verification...');
+  const rawPage = await client.getPositionsRawPage();
+  console.log(`[smoke] raw page: ${JSON.stringify(rawPage)}`);
+  console.log(
+    `[smoke] CHECK: does the raw page above include a \`cursor\` field, and does ` +
+      `\`market_positions\` above contain fewer entries than the merged \`positions\` ` +
+      `logged above it? If the field is named something other than \`cursor\`, ` +
+      `getPositions()'s pagination loop is silently reading only page 1 -- fix the ` +
+      `field name in kalshiClient.ts before going live.`
   );
 
   // The one genuinely UNVERIFIED assumption in the reconciliation path: no sibling

@@ -6,7 +6,7 @@ import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import { runDecisionPipeline } from '../../src/decide/pipeline.js';
-import { openLedger, hasOpenPosition, totalExposureCents } from '../../src/decide/ledger.js';
+import { openLedger, hasOpenPosition, totalExposureCents, tripBreaker, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD } from '../../src/decide/ledger.js';
 import * as ledgerModule from '../../src/decide/ledger.js';
 import { computeRung } from '../../src/decide/rung.js';
 import type { Item } from '../../src/item.js';
@@ -215,6 +215,42 @@ describe('runDecisionPipeline', () => {
     expect(onlyRowFor(db, item.item_id).rung).toBe(expectedRung);
   });
 
+  it('records a skip with a "circuit breaker tripped" reason when a breaker is tripped, distinct from the manual kill switch, and makes no model calls', async () => {
+    tripBreaker(db, 'failed-orders', 'test trip');
+    const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
+    const item = baseItem();
+
+    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+
+    expect(synopsisModule.synopsize).not.toHaveBeenCalled();
+    expect(fetchLadder).not.toHaveBeenCalled();
+    const row = onlyRowFor(db, item.item_id);
+    expect(row.reason).toBe('circuit breaker tripped');
+    expect(row.would_trade).toBe(0);
+  });
+
+  it('trips the failed-orders breaker after enough real would-trade decisions resolve to rejected', async () => {
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'rejected-mock-client-order-id',
+      kalshiOrderId: null,
+      kalshiOrderStatus: null,
+      filledContracts: 0,
+      avgFillPriceCents: null,
+      status: 'rejected',
+      dryRun: false,
+      errorDetail: 'simulated 400 for this test',
+    });
+
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      const item = baseItem({
+        item_id: `item-rejected-${i}`, dedup_id: `dedup-rejected-${i}`, story_key: `story-rejected-${i}`,
+      });
+      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    }
+
+    expect(isTradingHalted(db)).toBe(true);
+  });
+
   it('records a skip when verify reports unsupported, before decide/sizing, carrying the real rung', async () => {
     vi.spyOn(verifyModule, 'verifySynopsis').mockResolvedValue({ supported: false, note: 'fabricated' });
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
@@ -277,6 +313,13 @@ describe('runDecisionPipeline', () => {
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
     expect(totalExposureCents(db, EVENT)).toBeGreaterThan(0);
     expect(totalExposureCents(db, EVENT)).toBeLessThanOrEqual(1000);
+    // The ledger handle MUST be threaded into the market-data fetch: that is the
+    // only way fetchActiveLadder's own failures reach kalshi_errors and count
+    // toward the kalshi-errors circuit breaker. Dropping the argument is a silent
+    // wiring regression that nothing else in the suite would catch. The series
+    // ticker is asserted literally (pipeline.ts keeps it private) so a change to
+    // either argument surfaces here.
+    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS', db);
   });
 
   it('records a skip (not a throw) when fetchLadder returns null (no active event)', async () => {

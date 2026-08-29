@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, reconcilePendingOrders, reconcileOrphanedPendingDecisions, signedFillDelta } from '../../src/execute/order.js';
 import { KalshiClient, KalshiRequestError } from '../../src/execute/kalshiClient.js';
-import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, type DecisionRecord } from '../../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD, type DecisionRecord } from '../../src/decide/ledger.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -256,6 +256,51 @@ describe('placeOrder', () => {
     expect(getPositionsCalled).toBe(false);
     expect(result.status).toBe('declined-at-execution');
     expect(result.filledContracts).toBe(0);
+  });
+
+  it('declines at execution (no Kalshi call at all) when the market_ticker is blocked', async () => {
+    blockMarket(db, 'KXAPRPOTUS-26AUG28-40.6', 'reconciliation divergence: expected 10, real 0', 10, 0);
+    let createOrderCalled = false;
+    let getPositionsCalled = false;
+    const client = mockClient({
+      createOrder: async () => { createOrderCalled = true; return { order: { order_id: 'x', status: 'executed' } }; },
+      getPositions: async () => { getPositionsCalled = true; return { market_positions: [] }; },
+    });
+
+    const result = await placeOrder(baseInput({ marketTicker: 'KXAPRPOTUS-26AUG28-40.6' }), { client, db });
+
+    expect(createOrderCalled).toBe(false);
+    expect(getPositionsCalled).toBe(false);
+    expect(result.status).toBe('declined-at-execution');
+    expect(result.errorDetail).toMatch(/blocked/);
+    expect(result.filledContracts).toBe(0);
+  });
+
+  it('places normally when the market_ticker has never been blocked', async () => {
+    // Regression guard: the new check must not accidentally decline every order.
+    const client = mockClient({
+      createOrder: async () => ({ order: { order_id: 'kalshi-1', status: 'executed' } }),
+      getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position: 83 }] }),
+    });
+
+    const result = await placeOrder(baseInput(), { client, db });
+
+    expect(result.status).toBe('filled');
+  });
+
+  it('places normally when a PREVIOUS block on this market_ticker was cleared', async () => {
+    blockMarket(db, 'KXAPRPOTUS-26AUG28-40.6', 'old divergence', 10, 0);
+    db.prepare(`UPDATE market_blocks SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE market_ticker = ?`).run('KXAPRPOTUS-26AUG28-40.6');
+    expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(false);
+
+    const client = mockClient({
+      createOrder: async () => ({ order: { order_id: 'kalshi-2', status: 'executed' } }),
+      getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position: 83 }] }),
+    });
+
+    const result = await placeOrder(baseInput(), { client, db });
+
+    expect(result.status).toBe('filled');
   });
 
   it('places a full fill: position (relative to the CALLER-supplied positionBeforeContracts) moves by exactly the requested contracts', async () => {
@@ -597,6 +642,23 @@ describe('reconcilePendingOrders', () => {
     };
     expect(decisionRow.would_trade).toBe(0);
     expect(decisionRow.order_status).toBe('resolved');
+  });
+
+  it('reconcilePendingOrders trips the failed-orders breaker after enough real startup-reconcile failures', async () => {
+    // Same fixture shape as this file's existing "resolves a crash-orphaned pending
+    // order that never filled" test just above -- an empty getOrders/getPositions
+    // response makes reconcileOrder return status 'unknown' for every row.
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      pendingSetup({ clientOrderId: `cid-startup-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(isTradingHalted(db)).toBe(true);
   });
 
   it('uses the STORED positionBeforeContracts from the pending row, not a fresh zero, so a different decision\'s intervening fill on the same ticker cannot corrupt this reconciliation', async () => {
