@@ -319,6 +319,7 @@ and the real exchange, which the test suite deliberately never has.
 | `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. |
 | `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
 | `ANTHROPIC_API_KEY` | **Yes** | The Haiku synopsis / Sonnet verify / Sonnet decide calls. |
+| `SLACK_WEBHOOK_URL` | No | Slack incoming-webhook URL that powers the three alert events (§5a.2b). If unset, `sendAlert` logs a warning and no-ops — every event still happens and is still recorded in the ledger, but no human is paged. Bearer-equivalent secret: never hardcoded, never defaulted, never logged (§2). |
 
 **What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
 issues an HTTP request at all — it returns a synthetic `DRYRUN-<client_order_id>` order
