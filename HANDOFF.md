@@ -466,16 +466,18 @@ failures occurred.
 ### 5a.2b Slack alerting (added in slice 7)
 
 Three events post to Slack via `SLACK_WEBHOOK_URL` (a plain incoming-webhook
-POST, no other configuration): any circuit breaker trip (slice 6), any
-genuinely NEW market block from slice 5's reconciliation (not a re-block of an
+POST, no other configuration): two specific circuit breaker signals (`failed-orders`
+and `divergences`, both from slice 6 — note that `kalshi-errors` trips are
+recorded in `circuit_breaker_trips` and logged loudly but do NOT page Slack),
+any genuinely NEW market block from slice 5's reconciliation (not a re-block of an
 already-blocked ticker), and a process restart following an unclean exit
-(detected via the `process_lifecycle` table at the NEXT startup -- a real
+(detected via the `process_lifecycle` table at the NEXT startup — a real
 crash cannot reliably alert from inside itself).
 
 Each alert names the specific condition and the exact recovery command
-(`npm run clear-breaker` / `npm run clear-block <ticker>`), but does not
+(`npm run clear-breaker` / `npm run clear-block -- <ticker>`), but does not
 duplicate the full `reason` text already visible in the console log and the
-relevant table (`circuit_breaker_trips`/`market_blocks`) -- check those for
+relevant table (`circuit_breaker_trips`/`market_blocks`) — check those for
 detail before acting.
 
 Delivery is fire-and-forget with one retry: a Slack outage or network blip
