@@ -156,6 +156,11 @@ CREATE TABLE IF NOT EXISTS circuit_breaker_trips (
   tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   cleared_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS process_lifecycle (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  state TEXT NOT NULL CHECK (state IN ('running', 'stopped_cleanly'))
+);
 `;
 
 /**
@@ -576,4 +581,31 @@ export function checkDivergencesSignal(db: Database.Database): void {
   } catch (err) {
     console.error('[checkDivergencesSignal] failed to evaluate the divergences signal (not fatal):', err);
   }
+}
+
+/**
+ * Called once at startup, right after openLedger. Returns true if the
+ * PREVIOUS run never reached recordProcessStoppedCleanly -- an unclean exit
+ * (an uncaught exception, an OOM kill, a SIGKILL) -- because the row still
+ * says 'running' from that run. A missing row (the very first boot ever)
+ * returns false, not true: there is no prior run to have crashed. Either way,
+ * marks THIS run 'running' before returning, so if this run also dies
+ * uncleanly, the NEXT startup detects it in turn.
+ */
+export function recordProcessStarting(db: Database.Database): boolean {
+  const row = db.prepare(`SELECT state FROM process_lifecycle WHERE id = 1`).get() as
+    { state: string } | undefined;
+  const wasUnclean = row?.state === 'running';
+  db.prepare(
+    `INSERT INTO process_lifecycle (id, state) VALUES (1, 'running')
+     ON CONFLICT(id) DO UPDATE SET state = 'running'`
+  ).run();
+  return wasUnclean;
+}
+
+export function recordProcessStoppedCleanly(db: Database.Database): void {
+  db.prepare(
+    `INSERT INTO process_lifecycle (id, state) VALUES (1, 'stopped_cleanly')
+     ON CONFLICT(id) DO UPDATE SET state = 'stopped_cleanly'`
+  ).run();
 }

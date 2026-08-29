@@ -24,6 +24,8 @@ import {
   recordKalshiError,
   checkFailedOrdersSignal,
   checkDivergencesSignal,
+  recordProcessStarting,
+  recordProcessStoppedCleanly,
   CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD,
   CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD,
   CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD,
@@ -733,6 +735,30 @@ describe('ledger', () => {
       expect(() => checkFailedOrdersSignal(brokenDb, 'rejected')).not.toThrow();
       expect(() => checkDivergencesSignal(brokenDb)).not.toThrow();
       expect(() => recordKalshiError(brokenDb, 'getPositions', 'boom')).not.toThrow();
+    });
+  });
+
+  describe('process lifecycle', () => {
+    it('recordProcessStarting returns false on the very first boot (no prior row)', () => {
+      expect(recordProcessStarting(db)).toBe(false);
+    });
+
+    it('recordProcessStarting returns true when the previous run never called recordProcessStoppedCleanly (an unclean exit)', () => {
+      recordProcessStarting(db); // first boot -- returns false, marks 'running'
+      // Process "crashes" here -- no recordProcessStoppedCleanly call.
+      expect(recordProcessStarting(db)).toBe(true); // next boot detects it
+    });
+
+    it('recordProcessStarting returns false again after a clean shutdown', () => {
+      recordProcessStarting(db);
+      recordProcessStoppedCleanly(db);
+      expect(recordProcessStarting(db)).toBe(false);
+    });
+
+    it('recordProcessStarting always marks the run "running", so a THIRD unclean exit in a row is still detected', () => {
+      recordProcessStarting(db);
+      expect(recordProcessStarting(db)).toBe(true); // crash 1 detected
+      expect(recordProcessStarting(db)).toBe(true); // crash 2 detected -- still 'running' from crash 1's boot
     });
   });
 });
