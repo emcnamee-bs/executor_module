@@ -22,6 +22,9 @@ describe('sendAlert', () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       calls += 1;
       expect(JSON.parse(init?.body as string)).toEqual({ text: 'hello operator' });
+      // Undici's default headersTimeout is 300s; a fire-and-forget POST nothing
+      // awaits must not be able to hold the event loop open that long.
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
       return new Response('ok', { status: 200 });
     }) as unknown as typeof fetchSpy;
 
@@ -57,6 +60,48 @@ describe('sendAlert', () => {
     await expect(promise).resolves.toBeUndefined();
 
     expect(calls).toBe(2);
+  });
+
+  it('never lets a malformed SLACK_WEBHOOK_URL reach a log line', async () => {
+    // Deliberately NOT mocking fetch: the real fetch is what throws the TypeError
+    // whose message embeds the full attempted URL ("Failed to parse URL from ..."),
+    // and that message is the actual leak path. A malformed URL fails at parse
+    // time, so this makes no network request.
+    process.env.SLACK_WEBHOOK_URL = 'ht!tp://hooks.slack.test/services/T0/B0/SUPER-SECRET-TOKEN';
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const promise = sendAlert('does this leak?');
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
+
+      expect(errorSpy).toHaveBeenCalledTimes(2); // first attempt, then the retry
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).not.toContain('SUPER-SECRET-TOKEN');
+      expect(logged).not.toContain('hooks.slack.test');
+      expect(logged).toContain('TypeError'); // the type still makes it into the log
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('logs the status and body of a non-2xx Slack response, which carries no URL', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('invalid_payload', { status: 400 })
+    ) as unknown as typeof fetchSpy;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const promise = sendAlert('rejected by slack');
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
+
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).toContain('400');
+      expect(logged).toContain('invalid_payload');
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('is a no-op (no fetch call) when SLACK_WEBHOOK_URL is unset', async () => {
