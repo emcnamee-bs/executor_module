@@ -151,6 +151,20 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
       const marketStatus = await fetchMarketStatus(marketTicker, db);
       if (marketStatus.status === 'finalized') {
         if (marketStatus.result !== 'yes' && marketStatus.result !== 'no') {
+          // Fire-and-forget, never awaited (matches every other sendAlert call site).
+          // Sent on EVERY occurrence, deliberately un-deduped: the throw below leaves
+          // this ticker's rows unsettled, so a PERSISTENT anomaly (a voided/cancelled
+          // market, any terminal result that is neither "yes" nor "no") would otherwise
+          // retry silently every 10 minutes forever -- a real settled position whose
+          // P&L is never recorded, with nothing escalating it to a human. A genuine
+          // unresolved settlement anomaly is rare, and re-alerting every 10 minutes for
+          // a real, unresolved accounting problem is a bounded signal, not a storm.
+          sendAlert(
+            `[SETTLEMENT-ANOMALY] market_ticker=${marketTicker} finalized with an unrecognized ` +
+              `result value: "${marketStatus.result}" (expected "yes" or "no"). Realized P&L for ` +
+              `this ticker's decisions cannot be computed and will keep retrying every pass until ` +
+              `this is investigated.`
+          );
           throw new Error(
             `finalized market ${marketTicker} has an unrecognized result value: "${marketStatus.result}" ` +
               `(expected "yes" or "no") -- refusing to fabricate a P&L for this ticker's rows`

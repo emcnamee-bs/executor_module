@@ -199,6 +199,46 @@ describe('reconcileOpenPositions', () => {
     expect(nowSettled.realized_pnl_cents).toBe(880);
   });
 
+  it('alerts a human on an unrecognized finalized result, on EVERY pass it keeps happening', async () => {
+    // Without this alert, a PERSISTENT anomaly (a market Kalshi voids/cancels, or any
+    // terminal result that is neither "yes" nor "no") throws on every 10-minute pass
+    // forever with nothing but a console.error -- a real settled position whose P&L is
+    // never recorded, indefinitely, and no human ever finds out. Deliberately
+    // un-deduped: the second assertion below pins that re-alerting, since the
+    // underlying accounting problem is still unresolved on the second pass.
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    recordOpenDecision(db, { marketTicker: 'ANOMALY-A', side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+    const fetchMarketStatus = mockFetchMarketStatus({
+      'ANOMALY-A': { status: 'finalized', result: 'void' },
+    });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus });
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toContain('SETTLEMENT-ANOMALY');
+    expect(alertSpy.mock.calls[0][0]).toContain('ANOMALY-A');
+    expect(alertSpy.mock.calls[0][0]).toContain('void');
+
+    // Still unresolved on the next pass -- alerts again rather than going quiet.
+    await reconcileOpenPositions({ db, client, fetchMarketStatus });
+    expect(alertSpy).toHaveBeenCalledTimes(2);
+    expect(alertSpy.mock.calls[1][0]).toContain('SETTLEMENT-ANOMALY');
+  });
+
+  it('does not alert a settlement anomaly for a normally-finalized market', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    recordOpenDecision(db, { marketTicker: 'HEALTHY-A', side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'HEALTHY-A': { status: 'finalized', result: 'yes' } }),
+    });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
   it('a closed-but-not-finalized market is still checked normally (does not get marked settled)', async () => {
     recordOpenDecision(db);
     const client = mockClient({ 'KXAPRPOTUS-26AUG28-40.6': 10 }); // matches expected -- no divergence
