@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { generateKeyPairSync, verify as cryptoVerify, constants as cryptoConstants } from 'node:crypto';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { KalshiClient, positionForTicker, KalshiRequestError } from '../../src/execute/kalshiClient.js';
 import { openLedger, isTradingHalted, CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD } from '../../src/decide/ledger.js';
+import * as alertModule from '../../src/alert.js';
 
 function generateTestKeyPair(): { privateKeyPem: string; publicKey: ReturnType<typeof generateKeyPairSync>['publicKey'] } {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -310,7 +311,8 @@ describe('KalshiClient error logging', () => {
     expect(row.error_message).toMatch(/500/);
   });
 
-  it('trips the kalshi-errors circuit breaker after enough real errors, driving the real call site', async () => {
+  it('trips the kalshi-errors circuit breaker after enough real errors, driving the real call site, and alerts (proving kalshi-errors pages Slack -- no caller ever wired this before tripBreaker itself started alerting)', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
     const client = new KalshiClient(
       { apiKeyId: 'k', privateKeyPath: keyPath },
       { db }
@@ -322,6 +324,8 @@ describe('KalshiClient error logging', () => {
       await expect(client.getBalance()).rejects.toThrow();
     }
     expect(isTradingHalted(db)).toBe(true);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toContain('kalshi-errors');
   });
 
   it('without a db, an error still throws normally and nothing is logged', async () => {

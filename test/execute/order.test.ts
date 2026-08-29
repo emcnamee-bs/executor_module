@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, reconcilePendingOrders, reconcileOrphanedPendingDecisions, signedFillDelta } from '../../src/execute/order.js';
 import { KalshiClient, KalshiRequestError } from '../../src/execute/kalshiClient.js';
-import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD, type DecisionRecord } from '../../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, isTradingHalted, tripBreaker, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD, type DecisionRecord } from '../../src/decide/ledger.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -675,6 +675,30 @@ describe('reconcilePendingOrders', () => {
     await reconcilePendingOrders(db, client);
 
     expect(alertSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('still alerts on a genuinely new failed-orders trip even while a DIFFERENT signal is already open -- the exact cross-signal suppression bug this refactor fixes', async () => {
+    // Pre-trip an unrelated signal first. Under the OLD per-call-site design
+    // (before/after isTradingHalted around checkFailedOrdersSignal), this alone
+    // would have permanently silenced the failed-orders alert below: the shared
+    // global isTradingHalted was already true going in, so a genuinely NEW trip
+    // on a DIFFERENT signal never produced the false->true transition the old
+    // guard required.
+    tripBreaker(db, 'kalshi-errors', 'pre-existing unrelated trip');
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      pendingSetup({ clientOrderId: `cid-cross-signal-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toContain('failed-orders');
   });
 
   it('alerts only once even when MORE than the threshold of pending orders fail in a single reconciliation pass', async () => {

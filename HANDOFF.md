@@ -466,7 +466,7 @@ failures occurred.
 
 ### 5a.2b Slack alerting (added in slice 7)
 
-Four events post to Slack via `SLACK_WEBHOOK_URL` (a plain incoming-webhook
+Three events post to Slack via `SLACK_WEBHOOK_URL` (a plain incoming-webhook
 POST, no other configuration): any circuit breaker trip — all three signals
 (`failed-orders`, `divergences`, and `kalshi-errors`, all from slice 6) — any
 genuinely NEW market block from slice 5's reconciliation (not a re-block of an
