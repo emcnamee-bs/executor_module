@@ -100,6 +100,190 @@ describe('reconcileOpenPositions', () => {
     expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(false);
   });
 
+  it('computes a WIN payout for a YES-side decision when result matches side', async () => {
+    const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'yes' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(880); // payout 10*100=1000, cost 10*12=120, pnl=880
+  });
+
+  it('computes a LOSS for a YES-side decision when result does not match side', async () => {
+    const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'no' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(-120); // payout 0, cost 10*12=120, pnl=-120
+  });
+
+  it('computes a WIN payout for a NO-side decision when result matches side', async () => {
+    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 30 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'no' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(700); // payout 10*100=1000, cost 10*30=300, pnl=700
+  });
+
+  it('computes a LOSS for a NO-side decision when result does not match side', async () => {
+    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 30 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'yes' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(-300); // payout 0, cost 10*30=300, pnl=-300
+  });
+
+  it('computes each row in a multi-row-per-ticker group independently, not a shared or averaged value', async () => {
+    const idA = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const idB = recordOpenDecision(db, { marketTicker: 'L', side: 'no', contracts: 5, entryPriceCents: 40 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ L: { status: 'finalized', result: 'yes' } }),
+    });
+
+    const rowA = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(idA) as { realized_pnl_cents: number | null };
+    const rowB = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(idB) as { realized_pnl_cents: number | null };
+    expect(rowA.realized_pnl_cents).toBe(880); // YES side, result=yes: win. payout 1000, cost 120, pnl=880
+    expect(rowB.realized_pnl_cents).toBe(-200); // NO side, result=yes: loss. payout 0, cost 5*40=200, pnl=-200
+  });
+
+  it('throws and leaves the row unsettled when a finalized market has an unrecognized result value, then settles normally once corrected', async () => {
+    const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    // A second, HEALTHY ticker in the SAME pass: this throw's per-ticker isolation
+    // has to hold at the real call site, not merely be inferred from a different
+    // isolation test for a different failure mode. If the throw escaped its group,
+    // this decision would go unsettled too.
+    const healthyId = recordOpenDecision(db, { marketTicker: 'HEALTHY', side: 'no', contracts: 5, entryPriceCents: 30 });
+    const client = mockClient({});
+
+    // First pass: a malformed result. Must not settle, must not crash the whole
+    // pass (the existing per-ticker try/catch isolates this).
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({
+        'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'void' },
+        HEALTHY: { status: 'finalized', result: 'no' },
+      }),
+    });
+    const stillOpen = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(stillOpen.settled_at).toBeNull();
+    expect(stillOpen.realized_pnl_cents).toBeNull();
+    // The healthy ticker settled normally IN THAT SAME PASS, with its own correct
+    // P&L: NO side, result=no -- payout 5*100=500, cost 5*30=150, pnl=350.
+    const healthy = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(healthyId) as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(healthy.settled_at).not.toBeNull();
+    expect(healthy.realized_pnl_cents).toBe(350);
+    // Only the anomalous ticker is left open.
+    expect(findOpenUnsettledDecisions(db).map((row) => row.id)).toEqual([id]);
+
+    // Second pass: a corrected result. Settles normally.
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'yes' } }),
+    });
+    const nowSettled = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(nowSettled.settled_at).not.toBeNull();
+    expect(nowSettled.realized_pnl_cents).toBe(880);
+  });
+
+  it('alerts a human on an unrecognized finalized result, on EVERY pass it keeps happening', async () => {
+    // Without this alert, a PERSISTENT anomaly (a market Kalshi voids/cancels, or any
+    // terminal result that is neither "yes" nor "no") throws on every 10-minute pass
+    // forever with nothing but a console.error -- a real settled position whose P&L is
+    // never recorded, indefinitely, and no human ever finds out. Deliberately
+    // un-deduped: the second assertion below pins that re-alerting, since the
+    // underlying accounting problem is still unresolved on the second pass.
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    recordOpenDecision(db, { marketTicker: 'ANOMALY-A', side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+    const fetchMarketStatus = mockFetchMarketStatus({
+      'ANOMALY-A': { status: 'finalized', result: 'void' },
+    });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus });
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toContain('SETTLEMENT-ANOMALY');
+    expect(alertSpy.mock.calls[0][0]).toContain('ANOMALY-A');
+    expect(alertSpy.mock.calls[0][0]).toContain('void');
+
+    // Still unresolved on the next pass -- alerts again rather than going quiet.
+    await reconcileOpenPositions({ db, client, fetchMarketStatus });
+    expect(alertSpy).toHaveBeenCalledTimes(2);
+    expect(alertSpy.mock.calls[1][0]).toContain('SETTLEMENT-ANOMALY');
+  });
+
+  it('never fabricates a P&L for a would-trade row with a NULL entry_price_cents, even on a finalized market', async () => {
+    // The end-to-end half of ledger.ts's entry_price_cents filter: this row is
+    // unwritable under the current CHECK, so it is inserted with check constraints
+    // suspended -- the shape a `decisions` table predating that CHECK could hold.
+    // Unfiltered, `row.contracts * row.entryPriceCents` is `10 * null` === 0, so this
+    // LOSS would settle with a realized P&L of exactly 0 rather than -120.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    db.pragma('ignore_check_constraints = ON');
+    db.prepare(
+      `INSERT INTO decisions
+         (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+          magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+          would_trade, reason, order_status)
+       VALUES ('no-entry-price', NULL, 'KXAPRPOTUS-26AUG28', 'NOPRICE', 'yes', 'reported',
+          'up', 0.3, 10, NULL, 100, 3, 1, 'row with no entry price', 'resolved')`
+    ).run();
+    db.pragma('ignore_check_constraints = OFF');
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ NOPRICE: { status: 'finalized', result: 'no' } }),
+    });
+
+    const row = db.prepare("SELECT settled_at, realized_pnl_cents FROM decisions WHERE item_id = 'no-entry-price'").get() as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(row.settled_at).toBeNull();
+    expect(row.realized_pnl_cents).toBeNull();
+  });
+
+  it('does not alert a settlement anomaly for a normally-finalized market', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    recordOpenDecision(db, { marketTicker: 'HEALTHY-A', side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'HEALTHY-A': { status: 'finalized', result: 'yes' } }),
+    });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
   it('a closed-but-not-finalized market is still checked normally (does not get marked settled)', async () => {
     recordOpenDecision(db);
     const client = mockClient({ 'KXAPRPOTUS-26AUG28-40.6': 10 }); // matches expected -- no divergence

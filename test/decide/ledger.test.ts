@@ -534,11 +534,52 @@ describe('ledger', () => {
       resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
       expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
 
-      markDecisionSettled(db, id);
+      markDecisionSettled(db, id, 0);
 
       expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
       const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as { settled_at: string | null };
       expect(row.settled_at).not.toBeNull();
+    });
+
+    it('markDecisionSettled stores the realized P&L alongside settled_at', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+      markDecisionSettled(db, id, 880);
+
+      const row = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+        { settled_at: string | null; realized_pnl_cents: number | null };
+      expect(row.settled_at).not.toBeNull();
+      expect(row.realized_pnl_cents).toBe(880);
+    });
+
+    it('markDecisionSettled stores a NEGATIVE realized P&L correctly (a loss)', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+      markDecisionSettled(db, id, -120);
+
+      const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+        { realized_pnl_cents: number | null };
+      expect(row.realized_pnl_cents).toBe(-120);
+    });
+
+    it('the schema CHECK rejects a realized_pnl_cents value on a row that is not both would_trade=1 and settled', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      // NOT resolved to would_trade=1, and settled_at is still NULL -- a direct
+      // UPDATE attempting to set realized_pnl_cents here must fail the CHECK.
+      expect(() =>
+        db.prepare('UPDATE decisions SET realized_pnl_cents = 100 WHERE id = ?').run(id)
+      ).toThrow(/CHECK/);
+    });
+
+    it('findOpenUnsettledDecisions now returns entryPriceCents', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved', entryPriceCents: 37, notionalCents: 370 }));
+
+      const open = findOpenUnsettledDecisions(db);
+      expect(open).toHaveLength(1);
+      expect(open[0].entryPriceCents).toBe(37);
     });
 
     it('excludes a would-trade row with a NULL side, which would otherwise be summed with the wrong sign', () => {
@@ -569,6 +610,39 @@ describe('ledger', () => {
       ).run(EVENT);
 
       expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+    });
+
+    it('excludes a would-trade row with a NULL entry_price_cents, which would otherwise compute a silently wrong P&L', () => {
+      // The current schema CHECK makes this row unwritable today, so it is inserted
+      // with check constraints suspended -- exactly what a `decisions` table old
+      // enough to predate that CHECK could still be holding on disk. It must not be
+      // trusted just because today's CHECK would have caught it: OpenUnsettledDecision
+      // declares `entryPriceCents: number`, and JS evaluates `10 * null` as 0, so
+      // reconcileOpenPositions would record a loss as a realized P&L of exactly 0 and
+      // a win as pure profit -- a plausible-looking wrong number, not a crash.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      db.pragma('ignore_check_constraints = ON');
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-entry-price-item', NULL, ?, 'KXAPRPOTUS-26AUG28-40.6', 'yes', 'reported',
+            'up', 0.3, 10, NULL, 100, 3, 1, 'row with no entry price', 'resolved')`
+      ).run(EVENT);
+      db.pragma('ignore_check_constraints = OFF');
+      // The fixture really is the dangerous shape, not one the CHECK quietly rejected.
+      const stored = db.prepare("SELECT entry_price_cents, would_trade FROM decisions WHERE item_id = 'null-entry-price-item'").get() as
+        { entry_price_cents: number | null; would_trade: number };
+      expect(stored.entry_price_cents).toBeNull();
+      expect(stored.would_trade).toBe(1);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+      // Excluded LOUDLY, on the same warning path as NULL market_ticker/side -- an
+      // excluded row is a bug to investigate, not something to drop in silence.
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('entry_price_cents');
+      expect(warnSpy.mock.calls[0][0]).toContain('needs investigation');
     });
 
     it('still returns healthy rows alongside a malformed one, rather than failing the whole pass', () => {
@@ -791,10 +865,15 @@ describe('ledger', () => {
 
 /**
  * The `decisions` table exactly as slices 1-4 created it: every column `SCHEMA` in
- * ledger.ts defines, MINUS `settled_at` (which slice 5 added). This is the real,
- * pre-existing on-disk shape on any machine that ran this system before slice 5 --
+ * ledger.ts defines, MINUS BOTH `settled_at` (which slice 5 added) AND
+ * `realized_pnl_cents` (which slice 8 added) -- the OLDEST shape still reachable on
+ * disk, so it exercises both auto-migrations at once. This is the real, pre-existing
+ * on-disk shape on any machine that ran this system before slice 5 --
  * `CREATE TABLE IF NOT EXISTS` does nothing against it, so without a migration the
- * new column never appears and every reconciliation pass throws forever.
+ * new columns never appear and every reconciliation pass throws forever.
+ *
+ * See POST_SLICE_5_DECISIONS_SCHEMA below for the shape a machine that has run
+ * slices 5-7 actually has today (`settled_at` present, `realized_pnl_cents` absent).
  */
 const PRE_SLICE_5_DECISIONS_SCHEMA = `
 CREATE TABLE decisions (
@@ -879,6 +958,10 @@ describe('openLedger migration of a pre-slice-5 decisions table', () => {
       marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
       side: 'yes',
       contracts: 7,
+      // entryPriceCents is what the P&L subtraction runs on -- pinned here too, so the
+      // migrated path proves it for itself rather than by inference from a later test
+      // on a different fixture.
+      entryPriceCents: 12,
     });
   });
 
@@ -889,7 +972,7 @@ describe('openLedger migration of a pre-slice-5 decisions table', () => {
     const open = findOpenUnsettledDecisions(db);
     expect(open.map((row) => row.id)).toContain(id);
 
-    markDecisionSettled(db, id);
+    markDecisionSettled(db, id, 0);
 
     expect(findOpenUnsettledDecisions(db).map((row) => row.id)).not.toContain(id);
     const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as {
@@ -903,5 +986,162 @@ describe('openLedger migration of a pre-slice-5 decisions table', () => {
     db = openLedger(dbPath);
     const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
     expect(columns.filter((c) => c.name === 'settled_at')).toHaveLength(1);
+  });
+
+  it('the schema CHECK on realized_pnl_cents is genuinely enforced on a migrated table, not just at the application layer', () => {
+    // legacy-item-1 is would_trade=1 but was inserted before settled_at existed, so it
+    // migrates in as settled_at IS NULL -- not both would_trade=1 and settled. A direct
+    // UPDATE attempting to set realized_pnl_cents here must fail the CHECK, proving the
+    // migrated ALTER TABLE carries the same DB-level constraint as a freshly-created table.
+    const { id } = db.prepare("SELECT id FROM decisions WHERE item_id = 'legacy-item-1'").get() as {
+      id: number;
+    };
+    expect(() =>
+      db.prepare('UPDATE decisions SET realized_pnl_cents = 100 WHERE id = ?').run(id)
+    ).toThrow(/CHECK/);
+  });
+});
+
+/**
+ * The `decisions` table as slices 5-7 left it: every column `SCHEMA` in ledger.ts
+ * defines, `settled_at` INCLUDED, missing ONLY `realized_pnl_cents`.
+ *
+ * This -- not PRE_SLICE_5_DECISIONS_SCHEMA above -- is the shape the real production
+ * database has on any machine that has actually run this system recently, and it is
+ * the exact shape migrateDecisionsRealizedPnlCents' own doc comment names as its
+ * target (a table that has already been through migrateDecisionsSettledAt but
+ * predates this column). The pre-slice-5 fixture exercises BOTH migrations at once
+ * and so cannot distinguish "realized_pnl_cents was added" from "the whole table was
+ * created fresh"; this one isolates the single migration that actually has to run in
+ * production.
+ */
+const POST_SLICE_5_DECISIONS_SCHEMA = `
+CREATE TABLE decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  story_key TEXT,
+  event_ticker TEXT,
+  market_ticker TEXT,
+  side TEXT CHECK (side IN ('yes','no') OR side IS NULL),
+  rung TEXT NOT NULL CHECK (rung IN ('rumor','reported','corroborated','confirmed')),
+  direction TEXT CHECK (direction IN ('up','down') OR direction IS NULL),
+  magnitude_pts REAL,
+  contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
+  entry_price_cents INTEGER CHECK (entry_price_cents IS NULL OR (entry_price_cents > 0 AND entry_price_cents < 100)),
+  notional_cents INTEGER NOT NULL DEFAULT 0 CHECK (notional_cents >= 0 AND (would_trade = 0 OR notional_cents <= ${MAX_NOTIONAL_CENTS_PER_TRADE})),
+  edge_cents REAL,
+  would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
+  reason TEXT NOT NULL,
+  order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
+  settled_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  CHECK (would_trade = 0 OR (
+    entry_price_cents IS NOT NULL
+    AND event_ticker IS NOT NULL
+    AND notional_cents = contracts * entry_price_cents
+  ))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_item_id ON decisions(item_id);
+CREATE TRIGGER IF NOT EXISTS enforce_total_exposure
+BEFORE INSERT ON decisions
+WHEN NEW.would_trade = 1
+BEGIN
+  SELECT RAISE(ABORT, 'total exposure cap exceeded')
+  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions
+         WHERE would_trade = 1 AND event_ticker = NEW.event_ticker)
+        + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
+END;
+CREATE TRIGGER IF NOT EXISTS enforce_total_exposure_on_resolve
+BEFORE UPDATE ON decisions
+WHEN NEW.would_trade = 1
+BEGIN
+  SELECT RAISE(ABORT, 'total exposure cap exceeded')
+  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions
+         WHERE would_trade = 1 AND event_ticker = NEW.event_ticker AND id != NEW.id)
+        + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
+END;
+`;
+
+describe('openLedger migration of the REAL production shape (post-slice-5: settled_at present, realized_pnl_cents absent)', () => {
+  let dir: string;
+  let dbPath: string;
+  let db: Database.Database;
+  let legacyId: number;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'ledger-migration-post5-test-'));
+    dbPath = path.join(dir, 'decisions.db');
+    const legacy = new BetterSqlite3(dbPath);
+    legacy.exec(POST_SLICE_5_DECISIONS_SCHEMA);
+    // A real, still-open would-trade position already on disk: 7 contracts at 12c
+    // (notional 84), settled_at NULL because nothing has finalized it yet.
+    const info = legacy
+      .prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('post5-item-1', 'story-post5', '${EVENT}', 'KXAPRPOTUS-26AUG28-40.6',
+            'yes', 'reported', 'up', 0.3, 7, 12, 84, 3, 1, 'post-slice-5 would-trade row', 'resolved')`
+      )
+      .run();
+    legacyId = Number(info.lastInsertRowid);
+    legacy.close();
+    db = openLedger(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds ONLY the realized_pnl_cents column, leaving the already-present settled_at alone', () => {
+    const columns = (db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain('realized_pnl_cents');
+    expect(columns.filter((name) => name === 'settled_at')).toHaveLength(1);
+  });
+
+  it('returns the pre-existing row from findOpenUnsettledDecisions with its entryPriceCents intact', () => {
+    // entryPriceCents is the value the P&L subtraction divides the whole slice on:
+    // if the migration or the SELECT lost it on this shape, every settlement on a
+    // real production database would compute against undefined/null.
+    const open = findOpenUnsettledDecisions(db);
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({
+      id: legacyId,
+      marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+      side: 'yes',
+      contracts: 7,
+      entryPriceCents: 12,
+    });
+  });
+
+  it('carries the realized_pnl_cents CHECK into the migrated table, not just the application layer', () => {
+    // post5-item-1 is would_trade=1 but not settled, so a direct UPDATE stamping a
+    // P&L onto it must fail the CHECK exactly as it would on a freshly-created table.
+    expect(() =>
+      db.prepare('UPDATE decisions SET realized_pnl_cents = 100 WHERE id = ?').run(legacyId)
+    ).toThrow(/CHECK/);
+  });
+
+  it('settles the pre-existing row through the real markDecisionSettled and reads the P&L back correctly', () => {
+    // The genuine end state this migration exists for: a position opened before this
+    // slice shipped, finalizing after it. 7 contracts winning at 12c: payout 700,
+    // cost 84, realized P&L 616.
+    markDecisionSettled(db, legacyId, 616);
+
+    const row = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(legacyId) as {
+      settled_at: string | null; realized_pnl_cents: number | null;
+    };
+    expect(row.settled_at).not.toBeNull();
+    expect(row.realized_pnl_cents).toBe(616);
+    expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+  });
+
+  it('is idempotent: re-opening an already-migrated database does not fail or duplicate the column', () => {
+    db.close();
+    db = openLedger(dbPath);
+    const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+    expect(columns.filter((c) => c.name === 'realized_pnl_cents')).toHaveLength(1);
   });
 });

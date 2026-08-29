@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   reason TEXT NOT NULL,
   order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
   settled_at TEXT,
+  realized_pnl_cents INTEGER,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   -- The cap layer above is only worth anything if notional_cents is the real
   -- notional. Nothing else ties it to the position it describes, so a row claiming
@@ -64,7 +65,22 @@ CREATE TABLE IF NOT EXISTS decisions (
     entry_price_cents IS NOT NULL
     AND event_ticker IS NOT NULL
     AND notional_cents = contracts * entry_price_cents
-  ))
+  )),
+  -- realized_pnl_cents is only meaningful once a would-trade position has actually
+  -- settled: a pending/skip row (would_trade=0) or a still-open would-trade row
+  -- (settled_at IS NULL) has no realized outcome yet. Without this, a direct UPDATE
+  -- or a future bug could stamp a P&L value onto a row with no settlement event
+  -- behind it, and every downstream P&L report would silently trust a number that
+  -- was never actually realized.
+  --
+  -- The value stored here is GROSS of any Kalshi trading fees: it is exactly
+  -- (payout - cost) from this row's own side/contracts/entry_price_cents, and this
+  -- project models fees nowhere (an explicitly deferred item from a prior slice).
+  -- The column name reads as net, so any future reporting/aggregation slice must
+  -- treat these numbers as an upper bound on real net P&L rather than silently
+  -- assuming otherwise -- the sibling-project incident this whole slice was designed
+  -- around was an inflated P&L number feeding a compounding exposure cap.
+  CHECK (realized_pnl_cents IS NULL OR (would_trade = 1 AND settled_at IS NOT NULL))
 );
 
 -- Redis delivery is at-least-once, so the same item CAN arrive twice. The pipeline
@@ -187,11 +203,39 @@ function migrateDecisionsSettledAt(db: Database.Database): void {
   }
 }
 
+/**
+ * Same reasoning as migrateDecisionsSettledAt above, one slice later: `realized_pnl_cents`
+ * is new in `SCHEMA` as of this slice, and `CREATE TABLE IF NOT EXISTS` is a no-op against
+ * any `decisions` table that already exists -- including one that has already been through
+ * migrateDecisionsSettledAt but predates this column. Without this, markDecisionSettled's
+ * UPDATE (which now always sets realized_pnl_cents) would throw `no such column:
+ * realized_pnl_cents` on every settlement, forever. Nullable, no default: NULL is exactly
+ * correct for every pre-existing row, none of which has been settled through the
+ * P&L-aware markDecisionSettled yet.
+ *
+ * This ALTER TABLE also carries the same cross-column CHECK constraint as `SCHEMA`'s
+ * freshly-created table. That is safe here specifically because the new column backfills
+ * as NULL for every pre-existing row, and `realized_pnl_cents IS NULL OR (would_trade = 1
+ * AND settled_at IS NOT NULL)` is trivially satisfied by NULL regardless of what
+ * would_trade or settled_at already hold on those rows -- so a migrated table ends up
+ * with the exact same DB-level enforcement as a freshly-created one, not a weaker,
+ * application-layer-only version of it.
+ */
+function migrateDecisionsRealizedPnlCents(db: Database.Database): void {
+  const columns = db.prepare(`PRAGMA table_info(decisions)`).all() as Array<{ name: string }>;
+  const hasRealizedPnlCents = columns.some((column) => column.name === 'realized_pnl_cents');
+  if (!hasRealizedPnlCents) {
+    db.exec(`ALTER TABLE decisions ADD COLUMN realized_pnl_cents INTEGER
+      CHECK (realized_pnl_cents IS NULL OR (would_trade = 1 AND settled_at IS NOT NULL))`);
+  }
+}
+
 export function openLedger(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
   migrateDecisionsSettledAt(db);
+  migrateDecisionsRealizedPnlCents(db);
   return db;
 }
 
@@ -363,8 +407,11 @@ export function findPendingOrders(db: Database.Database): PendingOrderRow[] {
   return rows as PendingOrderRow[];
 }
 
-export function markDecisionSettled(db: Database.Database, decisionId: number): void {
-  db.prepare(`UPDATE decisions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(decisionId);
+export function markDecisionSettled(db: Database.Database, decisionId: number, realizedPnlCents: number): void {
+  db.prepare(
+    `UPDATE decisions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), realized_pnl_cents = ?
+     WHERE id = ?`
+  ).run(realizedPnlCents, decisionId);
 }
 
 export interface OpenUnsettledDecision {
@@ -372,6 +419,7 @@ export interface OpenUnsettledDecision {
   marketTicker: string;
   side: 'yes' | 'no';
   contracts: number;
+  entryPriceCents: number;
 }
 
 /**
@@ -379,23 +427,34 @@ export interface OpenUnsettledDecision {
  * confirmed finalized by Kalshi -- the working set the periodic reconciliation pass
  * checks each tick.
  *
- * Rows missing `market_ticker` or `side` are FILTERED OUT here rather than cast
- * non-null and trusted. Nothing enforces non-nullness on those two columns: the
- * schema's CHECK covers entry_price_cents/event_ticker/notional only, and
- * assertNotionalIsConsistent checks the same three -- neither says anything about
- * these. And the consequences are not cosmetic: a would_trade=1 row with a NULL
- * `side` would be summed with the WRONG SIGN into a real-money block decision (this
- * project's worst bug to date was a sign error on Kalshi's signed position), and a
- * NULL `market_ticker` would group under a null key and fail every pass forever. A
- * row in either state is a bug worth investigating, but it must not be allowed to
- * silently invert a safety check in the meantime.
+ * Rows missing `market_ticker`, `side`, or `entry_price_cents` are FILTERED OUT
+ * here rather than cast non-null and trusted. Nothing enforces non-nullness on
+ * `market_ticker`/`side` at all: the schema's CHECK covers
+ * entry_price_cents/event_ticker/notional only, and assertNotionalIsConsistent
+ * checks the same three -- neither says anything about those two. And the
+ * consequences are not cosmetic: a would_trade=1 row with a NULL `side` would be
+ * summed with the WRONG SIGN into a real-money block decision (this project's worst
+ * bug to date was a sign error on Kalshi's signed position), and a NULL
+ * `market_ticker` would group under a null key and fail every pass forever.
+ *
+ * `entry_price_cents` IS covered by a current CHECK, so today it cannot be NULL on a
+ * would-trade row -- but a database old enough to predate that CHECK could still
+ * hold one, and this function's return type now declares `entryPriceCents: number`
+ * over an unfiltered SELECT. The failure mode is the dangerous kind rather than a
+ * crash: JS evaluates `10 * null` as `0`, so reconcileOpenPositions would compute a
+ * loss as a realized P&L of exactly 0 and a win as pure profit -- a
+ * plausible-looking wrong number written durably to the ledger. Filtered on the same
+ * terms as the other two.
+ *
+ * A row in any of those states is a bug worth investigating, but it must not be
+ * allowed to silently invert a safety check or fabricate a P&L in the meantime.
  */
 export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettledDecision[] {
   const excluded = db
     .prepare(
       `SELECT id FROM decisions
        WHERE would_trade = 1 AND settled_at IS NULL
-         AND (market_ticker IS NULL OR side IS NULL)`
+         AND (market_ticker IS NULL OR side IS NULL OR entry_price_cents IS NULL)`
     )
     .all() as { id: number }[];
   if (excluded.length > 0) {
@@ -405,17 +464,18 @@ export function findOpenUnsettledDecisions(db: Database.Database): OpenUnsettled
     // the investigation trigger the comment above promises.
     console.warn(
       `[findOpenUnsettledDecisions] excluding ${excluded.length} would-trade row(s) with a ` +
-        `NULL market_ticker or side from reconciliation (decisionIds=${excluded.map((r) => r.id).join(',')}) -- ` +
+        `NULL market_ticker, side, or entry_price_cents from reconciliation ` +
+        `(decisionIds=${excluded.map((r) => r.id).join(',')}) -- ` +
         `this should not happen and needs investigation`
     );
   }
 
   const rows = db
     .prepare(
-      `SELECT id, market_ticker AS marketTicker, side, contracts
+      `SELECT id, market_ticker AS marketTicker, side, contracts, entry_price_cents AS entryPriceCents
        FROM decisions
        WHERE would_trade = 1 AND settled_at IS NULL
-         AND market_ticker IS NOT NULL AND side IS NOT NULL`
+         AND market_ticker IS NOT NULL AND side IS NOT NULL AND entry_price_cents IS NOT NULL`
     )
     .all();
   return rows as OpenUnsettledDecision[];

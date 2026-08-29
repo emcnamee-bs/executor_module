@@ -150,13 +150,35 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
     try {
       const marketStatus = await fetchMarketStatus(marketTicker, db);
       if (marketStatus.status === 'finalized') {
+        if (marketStatus.result !== 'yes' && marketStatus.result !== 'no') {
+          // Fire-and-forget, never awaited (matches every other sendAlert call site).
+          // Sent on EVERY occurrence, deliberately un-deduped: the throw below leaves
+          // this ticker's rows unsettled, so a PERSISTENT anomaly (a voided/cancelled
+          // market, any terminal result that is neither "yes" nor "no") would otherwise
+          // retry silently every 10 minutes forever -- a real settled position whose
+          // P&L is never recorded, with nothing escalating it to a human. A genuine
+          // unresolved settlement anomaly is rare, and re-alerting every 10 minutes for
+          // a real, unresolved accounting problem is a bounded signal, not a storm.
+          sendAlert(
+            `[SETTLEMENT-ANOMALY] market_ticker=${marketTicker} finalized with an unrecognized ` +
+              `result value: "${marketStatus.result}" (expected "yes" or "no"). Realized P&L for ` +
+              `this ticker's decisions cannot be computed and will keep retrying every pass until ` +
+              `this is investigated.`
+          );
+          throw new Error(
+            `finalized market ${marketTicker} has an unrecognized result value: "${marketStatus.result}" ` +
+              `(expected "yes" or "no") -- refusing to fabricate a P&L for this ticker's rows`
+          );
+        }
         // One transaction per ticker group: a crash midway through must not leave
         // some of this ticker's rows settled and the rest not, which would make the
         // next pass compare a partial expected count against the real position and
         // block a market that is actually fine.
         db.transaction(() => {
           for (const row of rows) {
-            markDecisionSettled(db, row.id);
+            const payoutCents = row.side === marketStatus.result ? row.contracts * 100 : 0;
+            const realizedPnlCents = payoutCents - row.contracts * row.entryPriceCents;
+            markDecisionSettled(db, row.id, realizedPnlCents);
           }
         })();
         continue;
