@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import type { KalshiClient } from './kalshiClient.js';
 import { positionForTicker } from './kalshiClient.js';
 import { fetchMarketStatus as realFetchMarketStatus } from '../decide/kalshi.js';
+import { sendAlert } from '../alert.js';
 import {
   findOpenUnsettledDecisions,
   findPendingOrders,
@@ -184,6 +185,14 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
           `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} decisionIds=${rows.map((r) => r.id).join(',')} ${reason}`
         );
         if (!wasAlreadyBlocked) {
+          sendAlert(
+            `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} ${reason}. ` +
+              // The ticker and the `--` separator are both load-bearing: the script
+              // exits 1 with a usage message without a ticker argument, and npm needs
+              // `--` to forward a positional argument to it at all. An operator
+              // pasting this line verbatim must get a cleared block, not a usage error.
+              `Run npm run clear-block -- ${marketTicker} after investigating.`
+          );
           checkDivergencesSignal(db);
         }
       }

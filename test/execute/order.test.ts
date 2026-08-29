@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { deriveClientOrderId, buildOrderBody, reconcileOrder, placeOrder, reconcilePendingOrders, reconcileOrphanedPendingDecisions, signedFillDelta } from '../../src/execute/order.js';
 import { KalshiClient, KalshiRequestError } from '../../src/execute/kalshiClient.js';
-import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD, type DecisionRecord } from '../../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, resolveDecision, findPendingOrders, recordPendingOrder, resolveOrder, totalExposureCents, isMarketBlocked, blockMarket, isTradingHalted, tripBreaker, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD, type DecisionRecord } from '../../src/decide/ledger.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import * as alertModule from '../../src/alert.js';
 
 function mockClient(overrides: Partial<KalshiClient> = {}): KalshiClient {
   return { createOrder: async () => { throw new Error('not stubbed'); }, getOrders: async () => ({ orders: [] }), getPositions: async () => ({ market_positions: [] }), getBalance: async () => ({ balance: 0 }), ...overrides } as unknown as KalshiClient;
@@ -659,6 +660,69 @@ describe('reconcilePendingOrders', () => {
     await reconcilePendingOrders(db, client);
 
     expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('alerts exactly once when the failed-orders breaker trips via startup reconciliation', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      pendingSetup({ clientOrderId: `cid-alert-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('still alerts on a genuinely new failed-orders trip even while a DIFFERENT signal is already open -- the exact cross-signal suppression bug this refactor fixes', async () => {
+    // Pre-trip an unrelated signal first. Under the OLD per-call-site design
+    // (before/after isTradingHalted around checkFailedOrdersSignal), this alone
+    // would have permanently silenced the failed-orders alert below: the shared
+    // global isTradingHalted was already true going in, so a genuinely NEW trip
+    // on a DIFFERENT signal never produced the false->true transition the old
+    // guard required.
+    tripBreaker(db, 'kalshi-errors', 'pre-existing unrelated trip');
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      pendingSetup({ clientOrderId: `cid-cross-signal-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toContain('failed-orders');
+  });
+
+  it('alerts only once even when MORE than the threshold of pending orders fail in a single reconciliation pass', async () => {
+    // Unlike pipeline.ts, reconcilePendingOrders has no early "already halted, skip
+    // everything" gate: every pending order found at the top of this one pass is
+    // processed regardless of isTradingHalted state. So once the threshold-th
+    // failure trips the breaker, each ADDITIONAL failing order in the SAME pass
+    // still reaches checkFailedOrdersSignal with a count that is itself >= threshold
+    // (re-crossing the condition individually) -- tripBreaker's own per-signal
+    // `alreadyOpen` check (ledger.ts) is the ONLY thing standing between that and
+    // a second (and third...) sendAlert call.
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD + 2; i++) {
+      pendingSetup({ clientOrderId: `cid-alert-extra-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(isTradingHalted(db)).toBe(true);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
   it('uses the STORED positionBeforeContracts from the pending row, not a fresh zero, so a different decision\'s intervening fill on the same ticker cannot corrupt this reconciliation', async () => {

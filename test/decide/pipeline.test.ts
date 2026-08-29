@@ -15,6 +15,7 @@ import * as synopsisModule from '../../src/decide/synopsis.js';
 import * as verifyModule from '../../src/decide/verify.js';
 import * as decideModule from '../../src/decide/decide.js';
 import * as orderModule from '../../src/execute/order.js';
+import * as alertModule from '../../src/alert.js';
 
 function baseItem(overrides: Partial<Item> = {}): Item {
   return {
@@ -249,6 +250,51 @@ describe('runDecisionPipeline', () => {
     }
 
     expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('alerts exactly once when the failed-orders breaker trips; a further already-tripped failure never even reaches checkFailedOrdersSignal again', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'rejected-mock-client-order-id',
+      kalshiOrderId: null,
+      kalshiOrderStatus: null,
+      filledContracts: 0,
+      avgFillPriceCents: null,
+      status: 'rejected',
+      dryRun: false,
+      errorDetail: 'simulated 400 for this test',
+    });
+
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      const item = baseItem({
+        item_id: `item-alert-${i}`, dedup_id: `dedup-alert-${i}`, story_key: `story-alert-${i}`,
+      });
+      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    }
+    expect(alertSpy).toHaveBeenCalledTimes(1); // tripped on the LAST of the threshold failures
+
+    // The next call does not produce a second alert -- but the dedup that
+    // guarantees this now lives entirely in `tripBreaker` (ledger.ts)'s own
+    // per-signal `alreadyOpen` check, not in any before/after snapshot at this
+    // call site (a caller-side guard used to exist here and was removed: it
+    // caused a real bug, since a DIFFERENT already-open signal made the global
+    // `isTradingHalted` true before a genuinely new trip on THIS signal, and
+    // silently swallowed the alert for it -- see ledger.test.ts's
+    // 'alerts on a genuinely new trip for ANY signal...' test for that fix,
+    // proven directly against `tripBreaker`).
+    //
+    // Separately, and unrelated to alerting at all: this second call is also
+    // intercepted by the PRE-EXISTING top-of-function gate
+    // `if (manualHalt || isTradingHalted(db)) { ...; return; }`, so it never
+    // even reaches `checkFailedOrdersSignal` a second time -- proven directly
+    // below (a skip row with the breaker reason, and no synopsize call).
+    vi.mocked(synopsisModule.synopsize).mockClear();
+    const oneMore = baseItem({ item_id: 'item-alert-extra', dedup_id: 'dedup-alert-extra', story_key: 'story-alert-extra' });
+    await runDecisionPipeline(oneMore, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+
+    expect(onlyRowFor(db, oneMore.item_id).reason).toBe('circuit breaker tripped');
+    expect(synopsisModule.synopsize).not.toHaveBeenCalled();
+    expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
   it('records a skip when verify reports unsupported, before decide/sizing, carrying the real rung', async () => {

@@ -5,7 +5,12 @@ import { parseItemFields, type Item } from './item.js';
 import { formatSummaryLine } from './log.js';
 import { compilePhrases, findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
 import { loadKeyphrases, DEFAULT_KEYPHRASES_PATH } from './keyphrases/list.js';
-import { openLedger } from './decide/ledger.js';
+import {
+  openLedger,
+  recordProcessStarting,
+  recordProcessStoppedCleanly,
+} from './decide/ledger.js';
+import { sendAlert } from './alert.js';
 import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
 import { KalshiClient } from './execute/kalshiClient.js';
@@ -128,6 +133,31 @@ export async function main(): Promise<void> {
 
   const anthropicClient = new Anthropic();
   const db = openLedger(DEFAULT_LEDGER_PATH);
+  // Isolated like every other auxiliary/observability write in this codebase
+  // (checkFailedOrdersSignal, checkDivergencesSignal, recordKalshiError): a
+  // diagnostic marker failing to write must never stop the whole system from
+  // starting. A false here (the same value a first-ever boot returns) just means
+  // no unclean-exit alert this run, which is the right failure direction.
+  let uncleanRestart = false;
+  try {
+    uncleanRestart = recordProcessStarting(db);
+  } catch (err) {
+    console.error('[lifecycle] failed to record process start (not fatal):', err);
+  }
+  // The ONE awaited sendAlert in this codebase, and deliberately so. Every other
+  // call site is fire-and-forget because it sits on the hot trading path and must
+  // never be delayed by a Slack outage. This one runs once during startup, before
+  // the Redis consumer loop has accepted any work, so there is no hot path to
+  // delay -- and awaiting it means the POST gets a real chance to land before a
+  // LATER startup step (a missing env var, say) can crash the process and abandon
+  // an in-flight unawaited request. sendAlert never throws, and it is bounded by
+  // its own fetch timeout, so this cannot hang or fail the boot.
+  if (uncleanRestart) {
+    await sendAlert(
+      '[UNCLEAN-EXIT] process restarted after an unclean exit. ' +
+        'Check logs for the cause before assuming trading resumed safely.'
+    );
+  }
 
   const kalshiClient = new KalshiClient(
     { apiKeyId: mustGetEnv('KALSHI_API_KEY_ID'), privateKeyPath: mustGetEnv('KALSHI_PRIVATE_KEY_PATH') },
@@ -155,6 +185,17 @@ export async function main(): Promise<void> {
     controller.signal
   );
 
+  // Also isolated, for a second reason beyond the one above: an uncaught throw
+  // here would skip the REST of teardown -- leaving the reconciliation timer
+  // running and the Redis connection open -- and still leave the lifecycle row
+  // 'running', so the next boot would fire a spurious unclean-exit alert on top
+  // of it. A missed clean-shutdown marker costs one false alert next boot; a
+  // throw costs a dirty shutdown AND that same false alert.
+  try {
+    recordProcessStoppedCleanly(db);
+  } catch (err) {
+    console.error('[lifecycle] failed to record clean shutdown (not fatal):', err);
+  }
   reconciliationTimer.stop();
   await client.quit();
   db.close();

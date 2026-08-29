@@ -1,6 +1,7 @@
 // src/decide/ledger.ts
 import Database from 'better-sqlite3';
 import type { Rung } from './rung.js';
+import { sendAlert } from '../alert.js';
 
 export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
 export const MAX_TOTAL_EXPOSURE_CENTS = 4000;
@@ -155,6 +156,11 @@ CREATE TABLE IF NOT EXISTS circuit_breaker_trips (
   reason TEXT NOT NULL,
   tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   cleared_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS process_lifecycle (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  state TEXT NOT NULL CHECK (state IN ('running', 'stopped_cleanly'))
 );
 `;
 
@@ -480,6 +486,17 @@ export function tripBreaker(db: Database.Database, signal: CircuitBreakerSignal,
   if (alreadyOpen) return;
   db.prepare(`INSERT INTO circuit_breaker_trips (signal, reason) VALUES (?, ?)`).run(signal, reason);
   console.error(`[CIRCUIT-BREAKER-TRIPPED] signal=${signal} reason=${reason}`);
+  // Fire-and-forget, never awaited (matches every other sendAlert call site).
+  // This is the ONE place a breaker trip is genuinely new for THIS signal --
+  // `alreadyOpen` above is a per-signal check, not the global `isTradingHalted`
+  // a caller would otherwise have to sample before/after. Alerting here (not at
+  // each caller) is what makes kalshi-errors alert at all (no caller ever did)
+  // and fixes a real bug: under the old caller-side pattern, an already-open
+  // DIFFERENT signal made the global isTradingHalted already true, silently
+  // suppressing a genuinely new trip on this one.
+  sendAlert(
+    `[CIRCUIT-BREAKER-TRIPPED] signal=${signal} reason=${reason} -- run npm run clear-breaker after investigating.`
+  );
 }
 
 /**
@@ -576,4 +593,31 @@ export function checkDivergencesSignal(db: Database.Database): void {
   } catch (err) {
     console.error('[checkDivergencesSignal] failed to evaluate the divergences signal (not fatal):', err);
   }
+}
+
+/**
+ * Called once at startup, right after openLedger. Returns true if the
+ * PREVIOUS run never reached recordProcessStoppedCleanly -- an unclean exit
+ * (an uncaught exception, an OOM kill, a SIGKILL) -- because the row still
+ * says 'running' from that run. A missing row (the very first boot ever)
+ * returns false, not true: there is no prior run to have crashed. Either way,
+ * marks THIS run 'running' before returning, so if this run also dies
+ * uncleanly, the NEXT startup detects it in turn.
+ */
+export function recordProcessStarting(db: Database.Database): boolean {
+  const row = db.prepare(`SELECT state FROM process_lifecycle WHERE id = 1`).get() as
+    { state: string } | undefined;
+  const wasUnclean = row?.state === 'running';
+  db.prepare(
+    `INSERT INTO process_lifecycle (id, state) VALUES (1, 'running')
+     ON CONFLICT(id) DO UPDATE SET state = 'running'`
+  ).run();
+  return wasUnclean;
+}
+
+export function recordProcessStoppedCleanly(db: Database.Database): void {
+  db.prepare(
+    `INSERT INTO process_lifecycle (id, state) VALUES (1, 'stopped_cleanly')
+     ON CONFLICT(id) DO UPDATE SET state = 'stopped_cleanly'`
+  ).run();
 }

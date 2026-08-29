@@ -12,6 +12,7 @@ import {
 } from '../../src/decide/ledger.js';
 import type { KalshiClient } from '../../src/execute/kalshiClient.js';
 import type { MarketStatus } from '../../src/decide/kalshi.js';
+import * as alertModule from '../../src/alert.js';
 
 let itemSeq = 0;
 /**
@@ -452,6 +453,36 @@ describe('reconcileOpenPositions', () => {
 
     expect(isMarketBlocked(db, 'RECUR-A')).toBe(true);
     expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('alerts once on a genuinely new market block, but not on a re-block of an already-blocked ticker', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    recordOpenDecision(db, { marketTicker: 'ALERT-A', side: 'yes', contracts: 10 });
+    const client = mockClient({ 'ALERT-A': 0 }); // a real divergence
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    // The recovery command must be runnable exactly as pasted: clear-market-block.ts
+    // exits 1 without a ticker argument, and npm needs `--` to forward one.
+    expect(alertSpy.mock.calls[0][0]).toContain('npm run clear-block -- ALERT-A');
+
+    // Second pass: still diverged, but already blocked -- must not alert again.
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('alerts a second time, for the breaker itself, once enough distinct new blocks cross the divergences threshold', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    recordOpenDecision(db, { marketTicker: 'ALERT-B', side: 'yes', contracts: 10 });
+    const clientB = mockClient({ 'ALERT-B': 0 });
+    await reconcileOpenPositions({ db, client: clientB, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(alertSpy).toHaveBeenCalledTimes(1); // market-block alert only
+
+    recordOpenDecision(db, { marketTicker: 'ALERT-C', side: 'yes', contracts: 5 });
+    const clientC = mockClient({ 'ALERT-B': 0, 'ALERT-C': 0 });
+    await reconcileOpenPositions({ db, client: clientC, fetchMarketStatus: mockFetchMarketStatus({}) });
+    // A second new market-block alert, PLUS the breaker-trip alert -- 3 total.
+    expect(alertSpy).toHaveBeenCalledTimes(3);
   });
 });
 

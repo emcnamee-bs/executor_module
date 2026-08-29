@@ -319,6 +319,7 @@ and the real exchange, which the test suite deliberately never has.
 | `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. |
 | `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
 | `ANTHROPIC_API_KEY` | **Yes** | The Haiku synopsis / Sonnet verify / Sonnet decide calls. |
+| `SLACK_WEBHOOK_URL` | No | Slack incoming-webhook URL that powers the three alert events (§5a.2b). If unset, `sendAlert` logs a warning and no-ops — every event still happens and is still recorded in the ledger, but no human is paged. Bearer-equivalent secret: never hardcoded, never defaulted, never logged (§2). |
 
 **What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
 issues an HTTP request at all — it returns a synthetic `DRYRUN-<client_order_id>` order
@@ -405,6 +406,12 @@ about the code, never about the exchange (§4, lesson 2).
    pages.
 6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
    and restart before the first live item arrives, not after.
+7. **Confirm `SLACK_WEBHOOK_URL` is set before trading with real money.**
+   Without it, `sendAlert` silently no-ops (logged as a warning) — every
+   circuit-breaker trip, market-block, and unclean-exit restart still happens
+   and is still recorded in the ledger, but no human gets paged. Verify with a
+   real (throwaway) webhook URL that a test message actually lands in the
+   right Slack channel before relying on this in production.
 
 ### 5a.2a Automatic circuit breakers (added in slice 6)
 
@@ -456,6 +463,60 @@ hits unexplained API trouble — but it means an operator investigating a
 `kalshi-errors` trip should read the `kalshi_errors` rows' `call_site`/`occurred_at`
 and check whether it was one retry storm rather than assume five independent
 failures occurred.
+
+### 5a.2b Slack alerting (added in slice 7)
+
+Three events post to Slack via `SLACK_WEBHOOK_URL` (a plain incoming-webhook
+POST, no other configuration): any circuit breaker trip — all three signals
+(`failed-orders`, `divergences`, and `kalshi-errors`, all from slice 6) — any
+genuinely NEW market block from slice 5's reconciliation (not a re-block of an
+already-blocked ticker), and a process restart following an unclean exit
+(detected via the `process_lifecycle` table at the NEXT startup — a real
+crash cannot reliably alert from inside itself).
+
+Each alert names the specific condition and the exact recovery command
+(`npm run clear-breaker` / `npm run clear-block -- <ticker>`), runnable exactly
+as pasted. The market-block alert carries the full divergence `reason` verbatim,
+matching its own console log line; the breaker-trip alert carries the signal
+name and its own `reason` text directly (the same string written to
+`circuit_breaker_trips.reason`) — read that table (and `market_blocks`) for
+full detail regardless.
+
+**Breaker-trip alerting fires from inside `tripBreaker` itself** (`ledger.ts`),
+not from each caller — this closes two problems a caller-side approach had
+when this was first built: it makes `kalshi-errors` alert at all (previously no
+caller ever did), and it fixes a real cross-signal suppression bug (an
+already-open, unrelated signal used to make the callers' shared
+`isTradingHalted` snapshot already `true`, silently swallowing a genuinely new
+trip on a different signal). `tripBreaker`'s own per-signal `alreadyOpen` check
+is what decides whether to alert now, so each signal alerts independently of
+whatever else may already be open.
+
+Delivery is fire-and-forget with one retry: a Slack outage or network blip
+never delays or crashes the trading code path that triggered the alert, but it
+does mean an alert can occasionally be lost entirely (both the original
+attempt and the retry failing) with nothing else surfacing that specific
+failure beyond a log line. Treat Slack alerting as a convenience layer on top
+of the ledger's own durable state (`circuit_breaker_trips`, `market_blocks`,
+`process_lifecycle`), never as the sole source of truth for whether something
+happened. Each POST is bounded by a 5-second timeout per attempt (~12 seconds
+across both attempts and the retry delay, worst case), so a hung Slack
+connection cannot hold the process open past a clean shutdown for long.
+
+The one exception to fire-and-forget is the unclean-exit alert at startup, which
+IS awaited: it runs before the consumer loop has accepted any work (so there is
+no trading path to delay), and awaiting it stops a later startup failure from
+abandoning the in-flight POST. With Slack unreachable this can add up to ~12
+seconds to boot (two attempts plus the retry delay) and no more — it can never
+fail the boot.
+
+One limitation of that durable state itself: `process_lifecycle` is a single
+global row with no per-instance identity, so unclean-exit detection assumes ONE
+process instance per `data/decisions.db` — an assumption nothing currently
+enforces (`EXECMOD_CONSUMER_NAME` exists precisely because a second consumer is
+at least contemplated). If two processes ever share one ledger file, one
+process's clean shutdown can mask the other's crash, and one process's crash can
+fire a false unclean-exit alert on an unrelated instance's next boot.
 
 ### 5a.3 Operational notes
 
