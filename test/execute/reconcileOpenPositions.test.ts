@@ -7,7 +7,7 @@ import type Database from 'better-sqlite3';
 import { reconcileOpenPositions, startReconciliationTimer } from '../../src/execute/reconcileOpenPositions.js';
 import {
   openLedger, recordPendingDecision, resolveDecision, isMarketBlocked, findOpenUnsettledDecisions,
-  recordPendingOrder, resolveOrder,
+  recordPendingOrder, resolveOrder, isTradingHalted,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import type { KalshiClient } from '../../src/execute/kalshiClient.js';
@@ -343,6 +343,19 @@ describe('reconcileOpenPositions', () => {
       expect(row.settled_at).not.toBeNull();
     }
     expect(isMarketBlocked(db, 'L')).toBe(false);
+  });
+
+  it('trips the divergences breaker once enough distinct tickers diverge across passes', async () => {
+    recordOpenDecision(db, { marketTicker: 'DIVERGE-A', side: 'yes', contracts: 10 });
+    const client = mockClient({ 'DIVERGE-A': 0 }); // real divergence
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(false); // only one distinct ticker so far
+
+    recordOpenDecision(db, { marketTicker: 'DIVERGE-B', side: 'yes', contracts: 5 });
+    const client2 = mockClient({ 'DIVERGE-A': 0, 'DIVERGE-B': 0 });
+    await reconcileOpenPositions({ db, client: client2, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(true);
   });
 });
 

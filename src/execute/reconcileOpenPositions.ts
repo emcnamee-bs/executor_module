@@ -8,6 +8,7 @@ import {
   findPendingOrders,
   markDecisionSettled,
   blockMarket,
+  checkDivergencesSignal,
   type OpenUnsettledDecision,
 } from '../decide/ledger.js';
 
@@ -164,6 +165,7 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
       if (real !== expected) {
         const reason = `reconciliation divergence: expected ${expected}, real ${real}`;
         blockMarket(db, marketTicker, reason, expected, real);
+        checkDivergencesSignal(db);
         console.error(
           `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} decisionIds=${rows.map((r) => r.id).join(',')} ${reason}`
         );
