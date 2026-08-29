@@ -1,6 +1,11 @@
 // test/decide/kalshi.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { fetchActiveLadder, fetchMarketStatus } from '../../src/decide/kalshi.js';
+import { openLedger } from '../../src/decide/ledger.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { vi } from 'vitest';
 
 describe('fetchActiveLadder (real Kalshi API)', () => {
   it('returns the currently active KXAPRPOTUS weekly event with a full band ladder', async () => {
@@ -67,4 +72,62 @@ describe('fetchMarketStatus (real Kalshi API)', () => {
     expect(status.status).toBe('closed');
     expect(status.result).toBe('');
   }, 15000);
+});
+
+describe('fetchMarketStatus / fetchActiveLadder error logging', () => {
+  let dir: string;
+  let db: ReturnType<typeof openLedger>;
+  // Structurally typed to just what afterEach needs (mockRestore) rather than
+  // ReturnType<typeof vi.spyOn> -- that generic default does not match the
+  // specific overloaded-signature mock instance vi.spyOn(globalThis, 'fetch')
+  // actually returns, and fails to typecheck as a result.
+  let fetchSpy: { mockRestore: () => void } | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'kalshi-errors-test-'));
+    db = openLedger(path.join(dir, 'test.db'));
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    fetchSpy?.mockRestore();
+  });
+
+  it('fetchMarketStatus logs to kalshi_errors and still throws, given a db', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('down', { status: 500, statusText: 'Internal Server Error' })
+    );
+
+    await expect(fetchMarketStatus('SOME-TICKER', db)).rejects.toThrow();
+
+    const row = db.prepare('SELECT call_site FROM kalshi_errors').get() as { call_site: string };
+    expect(row.call_site).toBe('fetchMarketStatus');
+  });
+
+  it('fetchMarketStatus without a db still throws normally (no crash from the missing db)', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('down', { status: 500, statusText: 'Internal Server Error' })
+    );
+    await expect(fetchMarketStatus('SOME-TICKER')).rejects.toThrow();
+  });
+
+  it('fetchActiveLadder logs to kalshi_errors and still throws, given a db', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('down', { status: 500, statusText: 'Internal Server Error' })
+    );
+
+    await expect(fetchActiveLadder('KXAPRPOTUS', db)).rejects.toThrow();
+
+    const row = db.prepare('SELECT call_site FROM kalshi_errors').get() as { call_site: string };
+    expect(row.call_site).toBe('fetchActiveLadder');
+  });
+
+  it('fetchMarketStatus logs to kalshi_errors on fetch rejection (network error) and still throws', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
+
+    await expect(fetchMarketStatus('SOME-TICKER', db)).rejects.toThrow('ECONNREFUSED');
+
+    const row = db.prepare('SELECT call_site FROM kalshi_errors').get() as { call_site: string };
+    expect(row.call_site).toBe('fetchMarketStatus');
+  });
 });

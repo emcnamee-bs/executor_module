@@ -13,6 +13,8 @@ import {
   hasDecisionForItem,
   hasOpenPosition,
   totalExposureCents,
+  isTradingHalted,
+  checkFailedOrdersSignal,
   type DecisionRecord,
 } from './ledger.js';
 import { evaluateSizing } from './sizing.js';
@@ -101,8 +103,10 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
   // at all. A recorded skip row is the trace. (This has already happened once in
   // production: a transient truncated-JSON parse error left nothing behind.)
   try {
-    if (process.env.EXECUTOR_TRADING_HALTED === 'true') {
-      recordDecision(db, skipRecord(item, 'kill switch active', { rung, orderStatus: 'resolved' }));
+    const manualHalt = process.env.EXECUTOR_TRADING_HALTED === 'true';
+    if (manualHalt || isTradingHalted(db)) {
+      const reason = manualHalt ? 'kill switch active' : 'circuit breaker tripped';
+      recordDecision(db, skipRecord(item, reason, { rung, orderStatus: 'resolved' }));
       return;
     }
 
@@ -124,7 +128,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       return;
     }
 
-    const ladder: ActiveLadder | null = await fetchLadder(KALSHI_SERIES_TICKER);
+    const ladder: ActiveLadder | null = await fetchLadder(KALSHI_SERIES_TICKER, db);
     if (ladder === null) {
       recordDecision(
         db,
@@ -284,6 +288,8 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         orderStatus: 'resolved',
       });
     })();
+
+    checkFailedOrdersSignal(db, placed.status);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (pendingDecisionId !== null && pendingRecordForCrash !== null) {

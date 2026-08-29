@@ -18,6 +18,15 @@ import {
   findOpenUnsettledDecisions,
   isMarketBlocked,
   blockMarket,
+  isTradingHalted,
+  tripBreaker,
+  clearAllTrips,
+  recordKalshiError,
+  checkFailedOrdersSignal,
+  checkDivergencesSignal,
+  CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD,
+  CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD,
+  CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD,
   MAX_NOTIONAL_CENTS_PER_TRADE,
   MAX_TOTAL_EXPOSURE_CENTS,
   type DecisionRecord,
@@ -606,6 +615,124 @@ describe('ledger', () => {
       };
       expect(row.reason).toBe('second divergence');
       expect(row.cleared_at).toBeNull();
+    });
+  });
+
+  describe('circuit breakers', () => {
+    it('isTradingHalted is false with no trips', () => {
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('tripBreaker halts trading, and clearAllTrips un-halts it', () => {
+      tripBreaker(db, 'failed-orders', 'test reason');
+      expect(isTradingHalted(db)).toBe(true);
+      const cleared = clearAllTrips(db);
+      expect(cleared).toBe(1);
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('does not insert a second trip row for the same signal while it is still open', () => {
+      tripBreaker(db, 'failed-orders', 'first reason');
+      tripBreaker(db, 'failed-orders', 'second reason');
+      const rows = db.prepare('SELECT * FROM circuit_breaker_trips').all();
+      expect(rows).toHaveLength(1);
+    });
+
+    it('trips a second, distinct signal independently while the first is still open', () => {
+      tripBreaker(db, 'failed-orders', 'reason A');
+      tripBreaker(db, 'divergences', 'reason B');
+      const rows = db.prepare('SELECT signal FROM circuit_breaker_trips ORDER BY signal').all();
+      expect(rows).toEqual([{ signal: 'divergences' }, { signal: 'failed-orders' }]);
+    });
+
+    it('clearAllTrips clears every currently-open row when multiple signals are tripped, and returns 0 when none are open', () => {
+      tripBreaker(db, 'failed-orders', 'reason A');
+      tripBreaker(db, 'divergences', 'reason B');
+      expect(clearAllTrips(db)).toBe(2);
+      expect(isTradingHalted(db)).toBe(false);
+      expect(clearAllTrips(db)).toBe(0);
+    });
+
+    it('recordKalshiError logs a row and trips kalshi-errors at exactly the threshold', () => {
+      for (let i = 0; i < CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD - 1; i++) {
+        recordKalshiError(db, 'getPositions', `error ${i}`);
+      }
+      expect(isTradingHalted(db)).toBe(false);
+      recordKalshiError(db, 'getPositions', 'the final straw');
+      expect(isTradingHalted(db)).toBe(true);
+      const trip = db.prepare('SELECT signal FROM circuit_breaker_trips').get() as { signal: string };
+      expect(trip.signal).toBe('kalshi-errors');
+    });
+
+    it('a kalshi_errors row outside the lookback window does not count toward the threshold', () => {
+      for (let i = 0; i < CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD; i++) {
+        recordKalshiError(db, 'getPositions', `error ${i}`);
+      }
+      clearAllTrips(db);
+      // Backdate every logged row well outside the 15-minute window.
+      db.prepare("UPDATE kalshi_errors SET occurred_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')").run();
+      recordKalshiError(db, 'getPositions', 'one fresh error');
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('checkFailedOrdersSignal trips failed-orders at exactly the threshold, counting only rejected/unknown/error', () => {
+      let coidSeq = 0;
+      const makeOrder = () => {
+        const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+        return recordPendingOrder(db, {
+          decisionId, clientOrderId: `coid-${++coidSeq}`, marketTicker: 'TICK', side: 'yes',
+          requestedContracts: 10, positionBeforeContracts: 0,
+        });
+      };
+      const resolveWith = (orderId: number, status: 'unfilled' | 'rejected' | 'unknown') =>
+        resolveOrder(db, orderId, {
+          filledContracts: 0, avgFillPriceCents: null, status,
+          kalshiOrderId: null, kalshiOrderStatus: null, errorDetail: null,
+        });
+
+      // Two unfilled orders (normal outcome) never count, however many there are.
+      resolveWith(makeOrder(), 'unfilled');
+      checkFailedOrdersSignal(db, 'unfilled');
+      resolveWith(makeOrder(), 'unfilled');
+      checkFailedOrdersSignal(db, 'unfilled');
+      expect(isTradingHalted(db)).toBe(false);
+
+      // Now CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD real failures.
+      for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD - 1; i++) {
+        const id = makeOrder();
+        resolveWith(id, 'rejected');
+        checkFailedOrdersSignal(db, 'rejected');
+      }
+      expect(isTradingHalted(db)).toBe(false);
+      const lastId = makeOrder();
+      resolveWith(lastId, 'unknown');
+      checkFailedOrdersSignal(db, 'unknown');
+      expect(isTradingHalted(db)).toBe(true);
+    });
+
+    it('checkDivergencesSignal trips divergences at exactly the threshold, ignoring blocks outside the window', () => {
+      blockMarket(db, 'TICKER-A', 'reason A', 10, 5);
+      checkDivergencesSignal(db);
+      expect(isTradingHalted(db)).toBe(false);
+
+      blockMarket(db, 'TICKER-B', 'reason B', 8, 2);
+      checkDivergencesSignal(db);
+      expect(isTradingHalted(db)).toBe(true);
+    });
+
+    it('a market_blocks row outside the divergences window does not count', () => {
+      blockMarket(db, 'TICKER-A', 'reason A', 10, 5);
+      db.prepare("UPDATE market_blocks SET blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours') WHERE market_ticker = 'TICKER-A'").run();
+      blockMarket(db, 'TICKER-B', 'reason B', 8, 2);
+      checkDivergencesSignal(db);
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('a breaker check failure is caught and logged, never propagated', () => {
+      const brokenDb = { prepare: () => { throw new Error('simulated DB failure'); } } as unknown as Database.Database;
+      expect(() => checkFailedOrdersSignal(brokenDb, 'rejected')).not.toThrow();
+      expect(() => checkDivergencesSignal(brokenDb)).not.toThrow();
+      expect(() => recordKalshiError(brokenDb, 'getPositions', 'boom')).not.toThrow();
     });
   });
 });

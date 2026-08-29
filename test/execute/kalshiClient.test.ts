@@ -4,6 +4,7 @@ import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { KalshiClient, positionForTicker, KalshiRequestError } from '../../src/execute/kalshiClient.js';
+import { openLedger, isTradingHalted, CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD } from '../../src/decide/ledger.js';
 
 function generateTestKeyPair(): { privateKeyPem: string; publicKey: ReturnType<typeof generateKeyPairSync>['publicKey'] } {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -268,5 +269,99 @@ describe('KalshiClient getPositions pagination', () => {
 
     await expect(client.getPositions()).rejects.toThrow(/did not terminate after 50 pages/);
     expect(urls).toHaveLength(50);
+  });
+});
+
+describe('KalshiClient error logging', () => {
+  let dir: string;
+  let keyPath: string;
+  let dbDir: string;
+  let db: ReturnType<typeof openLedger>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'kalshi-key-test-'));
+    keyPath = path.join(dir, 'kalshi_key.pem');
+    const { privateKeyPem } = generateTestKeyPair();
+    writeFileSync(keyPath, privateKeyPem);
+
+    dbDir = mkdtempSync(path.join(tmpdir(), 'kalshi-client-errors-test-'));
+    db = openLedger(path.join(dbDir, 'test.db'));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dbDir, { recursive: true, force: true });
+  });
+
+  it('logs a kalshi_errors row (call_site without the query string) and still rethrows the original error', async () => {
+    const client = new KalshiClient(
+      { apiKeyId: 'k', privateKeyPath: keyPath },
+      { db }
+    );
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () =>
+      new Response('server exploded', { status: 500, statusText: 'Internal Server Error' });
+
+    await expect(client.getBalance()).rejects.toThrow(/500/);
+
+    const row = db.prepare('SELECT call_site, error_message FROM kalshi_errors').get() as
+      { call_site: string; error_message: string };
+    expect(row.call_site).toBe('/portfolio/balance');
+    expect(row.error_message).toMatch(/500/);
+  });
+
+  it('trips the kalshi-errors circuit breaker after enough real errors, driving the real call site', async () => {
+    const client = new KalshiClient(
+      { apiKeyId: 'k', privateKeyPath: keyPath },
+      { db }
+    );
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () =>
+      new Response('down', { status: 500, statusText: 'Internal Server Error' });
+
+    for (let i = 0; i < CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD; i++) {
+      await expect(client.getBalance()).rejects.toThrow();
+    }
+    expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('without a db, an error still throws normally and nothing is logged', async () => {
+    const client = new KalshiClient({ apiKeyId: 'k', privateKeyPath: keyPath });
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () =>
+      new Response('down', { status: 500, statusText: 'Internal Server Error' });
+    await expect(client.getBalance()).rejects.toThrow(/500/);
+  });
+
+  it('logs a kalshi_errors row when _fetchFn throws (network error path) and rethrows the original error', async () => {
+    const client = new KalshiClient(
+      { apiKeyId: 'k', privateKeyPath: keyPath },
+      { db }
+    );
+    const networkError = new Error('ECONNREFUSED: connection refused');
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () => {
+      throw networkError;
+    };
+
+    await expect(client.getBalance()).rejects.toThrow('ECONNREFUSED: connection refused');
+
+    const row = db.prepare('SELECT call_site, error_message FROM kalshi_errors').get() as
+      { call_site: string; error_message: string };
+    expect(row.call_site).toBe('/portfolio/balance');
+    expect(row.error_message).toBe('ECONNREFUSED: connection refused');
+  });
+
+  it('strips query string from call_site when logging errors on endpoints with query parameters', async () => {
+    const client = new KalshiClient(
+      { apiKeyId: 'k', privateKeyPath: keyPath },
+      { db }
+    );
+    (client as unknown as { _fetchFn: typeof fetch })._fetchFn = async () =>
+      new Response('not found', { status: 500, statusText: 'Internal Server Error' });
+
+    await expect(client.getOrders({ client_order_id: 'test-order-123' })).rejects.toThrow(/500/);
+
+    const row = db.prepare('SELECT call_site, error_message FROM kalshi_errors').get() as
+      { call_site: string; error_message: string };
+    expect(row.call_site).toBe('/portfolio/orders');
+    expect(row.error_message).toMatch(/500/);
   });
 });

@@ -514,7 +514,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       controller.signal
     );
 
-    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS');
+    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS', db);
 
     const rows = db
       .prepare(

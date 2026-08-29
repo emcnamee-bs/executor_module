@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createPrivateKey, sign as cryptoSign, constants as cryptoConstants, type KeyObject } from 'node:crypto';
+import type Database from 'better-sqlite3';
+import { recordKalshiError } from '../decide/ledger.js';
 
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 
@@ -94,12 +96,14 @@ export class KalshiClient {
   private chain: Promise<void> = Promise.resolve();
   /** Test-only fetch injection point; production code always uses the real global fetch. */
   private _fetchFn: typeof fetch = fetch;
+  private readonly db?: Database.Database;
 
-  constructor(config: KalshiClientConfig, opts: { now?: () => number } = {}) {
+  constructor(config: KalshiClientConfig, opts: { now?: () => number; db?: Database.Database } = {}) {
     this.apiKeyId = config.apiKeyId;
     this.privateKeyPath = config.privateKeyPath;
     this.now = opts.now ?? (() => Date.now());
     this.minIntervalMs = Math.max(1, Math.ceil(1000 / Math.max(1, config.requestsPerSecond ?? 5)));
+    this.db = opts.db;
   }
 
   private key(): KeyObject {
@@ -145,20 +149,28 @@ export class KalshiClient {
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-    const res = await this._fetchFn(url.toString(), {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      // Node's fetch has NO default timeout. Without this, a dead socket or stalled
-      // TLS handshake hangs forever, and main.ts's overlap guard -- cleared only in
-      // a .finally() -- latches on forever with zero log output (throttle() only
-      // spaces out request START times via a delay it awaits itself; it does not
-      // wait for a prior response, so a hung request does not block later ones on
-      // its own -- the guard-latching risk is the one this timeout closes). A
-      // timeout turns that silent hang into an AbortError rejection, which every
-      // caller here already handles.
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    const callSite = endpoint.split('?')[0];
+    let res: Response;
+    try {
+      res = await this._fetchFn(url.toString(), {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        // Node's fetch has NO default timeout. Without this, a dead socket or stalled
+        // TLS handshake hangs forever, and main.ts's overlap guard -- cleared only in
+        // a .finally() -- latches on forever with zero log output (throttle() only
+        // spaces out request START times via a delay it awaits itself; it does not
+        // wait for a prior response, so a hung request does not block later ones on
+        // its own -- the guard-latching risk is the one this timeout closes). A
+        // timeout turns that silent hang into an AbortError rejection, which every
+        // caller here already handles.
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.db) recordKalshiError(this.db, callSite, message);
+      throw err;
+    }
 
     const text = await res.text();
     let json: unknown = null;
@@ -171,11 +183,9 @@ export class KalshiClient {
     }
 
     if (!res.ok) {
-      throw new KalshiRequestError(
-        `Kalshi ${method} ${endpoint} -> ${res.status}: ${text.slice(0, 500)}`,
-        res.status,
-        retryAfterMsFromHeader(res)
-      );
+      const message = `Kalshi ${method} ${endpoint} -> ${res.status}: ${text.slice(0, 500)}`;
+      if (this.db) recordKalshiError(this.db, callSite, message);
+      throw new KalshiRequestError(message, res.status, retryAfterMsFromHeader(res));
     }
     return (json ?? {}) as T;
   }

@@ -141,6 +141,21 @@ CREATE TABLE IF NOT EXISTS market_blocks (
   blocked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   cleared_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS kalshi_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  call_site TEXT NOT NULL,
+  error_message TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS circuit_breaker_trips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors')),
+  reason TEXT NOT NULL,
+  tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  cleared_at TEXT
+);
 `;
 
 /**
@@ -428,4 +443,137 @@ export function blockMarket(
        reason = @reason, expected_contracts = @expectedContracts, real_contracts = @realContracts,
        blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), cleared_at = NULL`
   ).run({ marketTicker, reason, expectedContracts, realContracts });
+}
+
+export type CircuitBreakerSignal = 'failed-orders' | 'divergences' | 'kalshi-errors';
+
+export const CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD = 3;
+export const CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES = 30;
+export const CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD = 2;
+export const CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES = 60;
+export const CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD = 5;
+export const CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES = 15;
+
+/**
+ * True if EITHER the manual kill switch or any automatic circuit breaker is
+ * currently tripped. Checked once per decision in pipeline.ts, alongside the
+ * existing EXECUTOR_TRADING_HALTED env var -- this only ever gates a NEW decision
+ * from proceeding to placeOrder; nothing already in flight is affected.
+ */
+export function isTradingHalted(db: Database.Database): boolean {
+  const row = db.prepare(`SELECT 1 FROM circuit_breaker_trips WHERE cleared_at IS NULL LIMIT 1`).get();
+  return row !== undefined;
+}
+
+/**
+ * Trips one signal. Deliberately per-signal, not global: if 'failed-orders' is
+ * already open and 'divergences' independently crosses its own threshold, both
+ * must be visible as their own trip rows -- collapsing them into "something is
+ * already tripped, don't bother" would hide that a second, distinct problem also
+ * fired. isTradingHalted (used by callers to decide whether to halt) only cares
+ * that ANY row is open; this function's own dedup is scoped to ONE signal.
+ */
+export function tripBreaker(db: Database.Database, signal: CircuitBreakerSignal, reason: string): void {
+  const alreadyOpen = db
+    .prepare(`SELECT 1 FROM circuit_breaker_trips WHERE signal = ? AND cleared_at IS NULL LIMIT 1`)
+    .get(signal);
+  if (alreadyOpen) return;
+  db.prepare(`INSERT INTO circuit_breaker_trips (signal, reason) VALUES (?, ?)`).run(signal, reason);
+  console.error(`[CIRCUIT-BREAKER-TRIPPED] signal=${signal} reason=${reason}`);
+}
+
+/**
+ * Clears EVERY currently-open trip, not just one -- an operator clearing the
+ * breaker is confirming the whole situation is resolved, not one signal among
+ * several in isolation. Returns the number of rows cleared (0 if none were open),
+ * for the manual clear script to report back to the operator.
+ */
+export function clearAllTrips(db: Database.Database): number {
+  const info = db
+    .prepare(`UPDATE circuit_breaker_trips SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE cleared_at IS NULL`)
+    .run();
+  return info.changes;
+}
+
+/**
+ * Logs one Kalshi API error (from any call site -- order placement, position/status
+ * reads, market data) and immediately checks whether the kalshi-errors signal
+ * should trip. Deliberately swallows its OWN failures entirely (both the insert and
+ * the count-and-trip check): this is called from inside an existing catch block
+ * that is about to rethrow the REAL error, and this logging is purely auxiliary
+ * observability that must never interfere with that rethrow.
+ */
+export function recordKalshiError(db: Database.Database, callSite: string, errorMessage: string): void {
+  try {
+    db.prepare(`INSERT INTO kalshi_errors (call_site, error_message) VALUES (?, ?)`).run(callSite, errorMessage);
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM kalshi_errors
+         WHERE occurred_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD) {
+      tripBreaker(
+        db, 'kalshi-errors',
+        `${row.n} Kalshi API errors within ${CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES} minutes (latest: ${callSite}: ${errorMessage})`
+      );
+    }
+  } catch (err) {
+    console.error('[recordKalshiError] failed to log/evaluate a Kalshi API error (not fatal):', err);
+  }
+}
+
+/**
+ * Call immediately after resolveOrder writes. Only rejected/unknown/error are real
+ * anomalies -- unfilled/partial are normal IOC outcomes and declined-at-execution is
+ * the system correctly refusing to trade, so none of those should ever count.
+ * Failure-isolated: the resolveOrder write this follows is already committed by the
+ * time this runs, so a failure here must never propagate back into the caller.
+ */
+export function checkFailedOrdersSignal(db: Database.Database, status: OrderStatus): void {
+  if (status !== 'rejected' && status !== 'unknown' && status !== 'error') return;
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM orders
+         WHERE status IN ('rejected','unknown','error')
+           AND resolved_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD) {
+      tripBreaker(
+        db, 'failed-orders',
+        `${row.n} failed/ambiguous order outcomes within ${CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES} minutes`
+      );
+    }
+  } catch (err) {
+    console.error('[checkFailedOrdersSignal] failed to evaluate the failed-orders signal (not fatal):', err);
+  }
+}
+
+/**
+ * Call immediately after blockMarket writes. market_blocks is keyed one row per
+ * market_ticker (an UPSERT), so this naturally counts DISTINCT tickers with a
+ * recent divergence, not raw event volume -- exactly the intended "how many
+ * different markets are showing a problem" signal, not "how many times has the
+ * same ticker re-triggered". Failure-isolated, same reasoning as
+ * checkFailedOrdersSignal.
+ */
+export function checkDivergencesSignal(db: Database.Database): void {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM market_blocks
+         WHERE blocked_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD) {
+      tripBreaker(
+        db, 'divergences',
+        `${row.n} reconciliation divergences within ${CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES} minutes`
+      );
+    }
+  } catch (err) {
+    console.error('[checkDivergencesSignal] failed to evaluate the divergences signal (not fatal):', err);
+  }
 }

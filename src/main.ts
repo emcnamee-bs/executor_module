@@ -129,10 +129,10 @@ export async function main(): Promise<void> {
   const anthropicClient = new Anthropic();
   const db = openLedger(DEFAULT_LEDGER_PATH);
 
-  const kalshiClient = new KalshiClient({
-    apiKeyId: mustGetEnv('KALSHI_API_KEY_ID'),
-    privateKeyPath: mustGetEnv('KALSHI_PRIVATE_KEY_PATH'),
-  });
+  const kalshiClient = new KalshiClient(
+    { apiKeyId: mustGetEnv('KALSHI_API_KEY_ID'), privateKeyPath: mustGetEnv('KALSHI_PRIVATE_KEY_PATH') },
+    { db }
+  );
 
   console.log('[startup] reconciling any orphaned pending orders...');
   await reconcilePendingOrders(db, kalshiClient);

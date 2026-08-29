@@ -9,6 +9,7 @@ import {
   findPendingOrders,
   resolveOrder,
   resolveDecision,
+  checkFailedOrdersSignal,
   type OrderStatus,
   type DecisionRecord,
 } from '../decide/ledger.js';
@@ -402,6 +403,8 @@ export async function reconcilePendingOrders(db: Database.Database, client: Kals
           )
         );
       })();
+
+      checkFailedOrdersSignal(db, reconciled.status);
     } catch (err) {
       console.error(
         `[startup-reconcile] failed to reconcile order clientOrderId=${pending.clientOrderId} ` +

@@ -7,7 +7,7 @@ import type Database from 'better-sqlite3';
 import { reconcileOpenPositions, startReconciliationTimer } from '../../src/execute/reconcileOpenPositions.js';
 import {
   openLedger, recordPendingDecision, resolveDecision, isMarketBlocked, findOpenUnsettledDecisions,
-  recordPendingOrder, resolveOrder,
+  recordPendingOrder, resolveOrder, isTradingHalted, clearAllTrips,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import type { KalshiClient } from '../../src/execute/kalshiClient.js';
@@ -47,8 +47,23 @@ function mockClient(positions: Record<string, number>): KalshiClient {
   } as unknown as KalshiClient;
 }
 
-function mockFetchMarketStatus(statuses: Record<string, MarketStatus>): typeof import('../../src/decide/kalshi.js').fetchMarketStatus {
-  return async (ticker: string) => statuses[ticker] ?? { status: 'active', result: '' };
+/**
+ * Records every (ticker, db) pair it was called with into `calls`, so a test can
+ * pin the SECOND argument as well as the first. That second argument is the
+ * ledger handle fetchMarketStatus needs to log its own failures to kalshi_errors
+ * (and so count toward the kalshi-errors circuit breaker); a mock that quietly
+ * ignored it let the whole suite stay green with `, db` deleted from the real
+ * call site -- exactly the untested-wiring regression this project has shipped
+ * twice before.
+ */
+function mockFetchMarketStatus(
+  statuses: Record<string, MarketStatus>,
+  calls: Array<{ ticker: string; db: unknown }> = []
+): typeof import('../../src/decide/kalshi.js').fetchMarketStatus {
+  return async (ticker: string, db?: unknown) => {
+    calls.push({ ticker, db });
+    return statuses[ticker] ?? { status: 'active', result: '' };
+  };
 }
 
 describe('reconcileOpenPositions', () => {
@@ -101,11 +116,20 @@ describe('reconcileOpenPositions', () => {
     recordOpenDecision(db, { marketTicker: 'A', side: 'yes', contracts: 10 });
     recordOpenDecision(db, { marketTicker: 'B', side: 'yes', contracts: 5 }); // unrelated, unaffected
     const client = mockClient({ A: 0, B: 5 }); // A real position vanished; B matches
+    const statusCalls: Array<{ ticker: string; db: unknown }> = [];
 
-    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}, statusCalls) });
 
     expect(isMarketBlocked(db, 'A')).toBe(true);
     expect(isMarketBlocked(db, 'B')).toBe(false);
+    // Every fetchMarketStatus call must carry THIS ledger handle as its second
+    // argument -- that is what lets the call's own failures land in kalshi_errors
+    // and count toward the kalshi-errors breaker. Deleting `, db` from the real
+    // call site previously left the entire suite green.
+    expect(statusCalls.map((c) => c.ticker).sort()).toEqual(['A', 'B']);
+    for (const call of statusCalls) {
+      expect(call.db).toBe(db);
+    }
     const row = db.prepare('SELECT reason, expected_contracts, real_contracts FROM market_blocks WHERE market_ticker = ?').get('A') as {
       reason: string; expected_contracts: number; real_contracts: number;
     };
@@ -343,6 +367,91 @@ describe('reconcileOpenPositions', () => {
       expect(row.settled_at).not.toBeNull();
     }
     expect(isMarketBlocked(db, 'L')).toBe(false);
+  });
+
+  it('trips the divergences breaker once enough distinct tickers diverge across passes', async () => {
+    recordOpenDecision(db, { marketTicker: 'DIVERGE-A', side: 'yes', contracts: 10 });
+    const client = mockClient({ 'DIVERGE-A': 0 }); // real divergence
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(false); // only one distinct ticker so far
+
+    recordOpenDecision(db, { marketTicker: 'DIVERGE-B', side: 'yes', contracts: 5 });
+    const client2 = mockClient({ 'DIVERGE-A': 0, 'DIVERGE-B': 0 });
+    await reconcileOpenPositions({ db, client: client2, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('never trips the divergences breaker off ONE ticker that stays diverged across many passes', async () => {
+    // Nothing in this system resolves a divergence, so a genuinely diverged ticker
+    // stays diverged pass after pass and gets re-UPSERTed into market_blocks every
+    // time. Only a genuinely NEW block is a divergence event -- one market's
+    // ongoing problem must never accumulate into a systemic signal on its own.
+    recordOpenDecision(db, { marketTicker: 'STUCK-DIVERGED', side: 'yes', contracts: 10 });
+    const client = mockClient({ 'STUCK-DIVERGED': 0 }); // diverged, and stays diverged
+
+    for (let pass = 1; pass <= 3; pass += 1) {
+      await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+      expect(isMarketBlocked(db, 'STUCK-DIVERGED')).toBe(true);
+      expect(isTradingHalted(db)).toBe(false);
+    }
+  });
+
+  it('stays clearable: re-blocking already-blocked tickers after an operator clears the breaker does not immediately re-trip it', async () => {
+    // The operational consequence of counting re-blocks: blockMarket's UPSERT
+    // refreshes blocked_at, so two permanently-diverged tickers would keep the
+    // 60-minute count at 2 forever and re-trip the breaker within one pass of every
+    // `npm run clear-breaker` -- an un-clearable halt with no operator way back to
+    // trading short of editing the database by hand.
+    recordOpenDecision(db, { marketTicker: 'PERSIST-A', side: 'yes', contracts: 10 });
+    recordOpenDecision(db, { marketTicker: 'PERSIST-B', side: 'yes', contracts: 5 });
+    const client = mockClient({ 'PERSIST-A': 0, 'PERSIST-B': 0 });
+
+    // Both diverge for the first time -> two NEW blocks -> the breaker trips.
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(true);
+
+    // An operator investigates and clears the halt (the real clear-breaker path).
+    expect(clearAllTrips(db)).toBe(1);
+    expect(isTradingHalted(db)).toBe(false);
+
+    // Both markets are still diverged and get re-blocked on the next two passes --
+    // but neither is a NEW block, so the breaker stays clear.
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(false);
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(false);
+
+    // Both blocks are still in force, though -- clearing the breaker does not
+    // unblock the markets, and placeOrder still declines on them.
+    expect(isMarketBlocked(db, 'PERSIST-A')).toBe(true);
+    expect(isMarketBlocked(db, 'PERSIST-B')).toBe(true);
+  });
+
+  it('still counts a ticker blocked again AFTER an operator cleared its market block', async () => {
+    // The guard keys off "is this ticker CURRENTLY blocked", not "has it ever been
+    // blocked": a market a human deliberately un-blocked, that then diverges again,
+    // is a genuinely new divergence event and must still count toward the signal.
+    recordOpenDecision(db, { marketTicker: 'RECUR-A', side: 'yes', contracts: 10 });
+    recordOpenDecision(db, { marketTicker: 'RECUR-B', side: 'yes', contracts: 5 });
+    const client = mockClient({ 'RECUR-A': 0, 'RECUR-B': 0 });
+
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+    expect(isTradingHalted(db)).toBe(true);
+
+    // Operator investigates, clears the halt, and un-blocks RECUR-A specifically
+    // (the real clear-market-block path's effect on the ledger).
+    clearAllTrips(db);
+    db.prepare("UPDATE market_blocks SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE market_ticker = 'RECUR-A'").run();
+    expect(isMarketBlocked(db, 'RECUR-A')).toBe(false);
+    expect(isTradingHalted(db)).toBe(false);
+
+    // RECUR-A diverges again -- a NEW block, not a re-block of a live one -- so the
+    // signal is evaluated and (with RECUR-B still recently blocked) trips again.
+    await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
+
+    expect(isMarketBlocked(db, 'RECUR-A')).toBe(true);
+    expect(isTradingHalted(db)).toBe(true);
   });
 });
 

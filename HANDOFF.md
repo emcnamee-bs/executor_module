@@ -406,6 +406,57 @@ about the code, never about the exchange (§4, lesson 2).
 6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
    and restart before the first live item arrives, not after.
 
+### 5a.2a Automatic circuit breakers (added in slice 6)
+
+Three independent automatic triggers halt ALL new order placement, the same global
+effect as `EXECUTOR_TRADING_HALTED`, when recent history crosses a fixed threshold:
+
+- **Failed/ambiguous orders**: 3 orders resolving to `rejected`/`unknown`/`error`
+  within 30 minutes.
+- **Reconciliation divergences**: 2 distinct markets blocked by slice 5's
+  reconciliation within 60 minutes.
+- **Kalshi API errors**: 5 errors from any Kalshi API call (order placement,
+  position/status reads, market data) within 15 minutes.
+
+A trip is visible in the `circuit_breaker_trips` table and logged loudly as
+`[CIRCUIT-BREAKER-TRIPPED]`. It halts only NEW decisions (matching this system's
+entry-only scope) — nothing already in flight is affected, and slice 5's per-market
+`market_blocks` mechanism is completely independent of this.
+
+**Recovery is manual only** — there is no auto-expiry. Investigate the real cause
+(check `circuit_breaker_trips.reason`, and the underlying `orders`/`market_blocks`/
+`kalshi_errors` rows it references) before clearing. To clear:
+
+```
+direnv exec . npm run clear-breaker
+```
+
+This clears every currently-open trip, not just one — if more than one signal
+tripped, clearing is a statement that the whole situation is resolved, not just one
+signal among several. **Clearing the breaker does not fix whatever tripped it.** If
+the root cause is still live (Kalshi is still erroring, or a market blocked by
+slice 5's reconciliation is still genuinely diverged), the breaker can trip again
+shortly after clearing — treat a second trip shortly after a clear as evidence the
+cause was not actually resolved, not as a flapping breaker. Note specifically for
+divergences: a still-blocked market from BEFORE the clear does not by itself
+re-trip the signal (only a genuinely new block does), but it still counts toward
+the 60-minute window, so any single new divergence elsewhere completes the
+threshold sooner than the trip reason's raw count might suggest — read
+`market_blocks.blocked_at` alongside `circuit_breaker_trips.reason`, not the
+reason string alone.
+
+**Reading a `kalshi-errors` trip: 5 errors is often fewer than 5 incidents.**
+`placeOrder` retries a transient failure up to 3 times, and each attempt logs its
+own `kalshi_errors` row; an exhausted retry's follow-up `reconcileOrder` call can
+log a 4th. So a SINGLE order attempt during one Kalshi blip can produce most of the
+5-error threshold on its own, and the next unrelated API call (the next item's
+`getPositions`, or the reconciliation timer's `fetchMarketStatus`) completes the
+trip. This is deliberate — fail-closed is the right default when a real-money system
+hits unexplained API trouble — but it means an operator investigating a
+`kalshi-errors` trip should read the `kalshi_errors` rows' `call_site`/`occurred_at`
+and check whether it was one retry storm rather than assume five independent
+failures occurred.
+
 ### 5a.3 Operational notes
 
 - **Startup reconciliation runs before the Redis consumer starts.**
