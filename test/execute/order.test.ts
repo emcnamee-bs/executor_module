@@ -677,6 +677,30 @@ describe('reconcilePendingOrders', () => {
     expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('alerts only once even when MORE than the threshold of pending orders fail in a single reconciliation pass', async () => {
+    // Unlike pipeline.ts, reconcilePendingOrders has no early "already halted, skip
+    // everything" gate: every pending order found at the top of this one pass is
+    // processed regardless of isTradingHalted state. So once the threshold-th
+    // failure trips the breaker, each ADDITIONAL failing order in the SAME pass
+    // still reaches checkFailedOrdersSignal with a count that is itself >= threshold
+    // (re-crossing the condition individually) -- the before/after isTradingHalted
+    // guard around that call is the ONLY thing standing between that and a second
+    // (and third...) sendAlert call.
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD + 2; i++) {
+      pendingSetup({ clientOrderId: `cid-alert-extra-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(isTradingHalted(db)).toBe(true);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the STORED positionBeforeContracts from the pending row, not a fresh zero, so a different decision\'s intervening fill on the same ticker cannot corrupt this reconciliation', async () => {
     pendingSetup({ positionBeforeContracts: 20, requestedContracts: 40 });
     const client = mockClient({
