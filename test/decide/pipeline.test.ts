@@ -329,8 +329,14 @@ describe('runDecisionPipeline', () => {
   it('skips a story that already has an open position for the active event, without calling Sonnet decide', async () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     // First run: real would-trade path.
-    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    const first = baseItem();
+    await runDecisionPipeline(first, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
+    // Backdate the first fill well outside the 15-minute rate-limit window, so
+    // the second call below is intercepted by hasOpenPosition -- the code path
+    // this test exists to prove -- rather than by the rate limit, which would
+    // otherwise fire first and make this test pass for the wrong reason.
+    db.prepare("UPDATE decisions SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') WHERE item_id = ?").run(first.item_id);
 
     vi.mocked(decideModule.decideTrade).mockClear();
     await runDecisionPipeline(baseItem({ item_id: 'item-2' }), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
