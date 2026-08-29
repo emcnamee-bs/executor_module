@@ -513,7 +513,15 @@ attempt and the retry failing) with nothing else surfacing that specific
 failure beyond a log line. Treat Slack alerting as a convenience layer on top
 of the ledger's own durable state (`circuit_breaker_trips`, `market_blocks`,
 `process_lifecycle`), never as the sole source of truth for whether something
-happened.
+happened. Each POST is bounded by a 5-second timeout, so a hung Slack connection
+cannot hold the process open past a clean shutdown.
+
+The one exception to fire-and-forget is the unclean-exit alert at startup, which
+IS awaited: it runs before the consumer loop has accepted any work (so there is
+no trading path to delay), and awaiting it stops a later startup failure from
+abandoning the in-flight POST. With Slack unreachable this can add up to ~12
+seconds to boot (two attempts plus the retry delay) and no more — it can never
+fail the boot.
 
 One limitation of that durable state itself: `process_lifecycle` is a single
 global row with no per-instance identity, so unclean-exit detection assumes ONE
