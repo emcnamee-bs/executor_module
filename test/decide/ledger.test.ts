@@ -958,6 +958,10 @@ describe('openLedger migration of a pre-slice-5 decisions table', () => {
       marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
       side: 'yes',
       contracts: 7,
+      // entryPriceCents is what the P&L subtraction runs on -- pinned here too, so the
+      // migrated path proves it for itself rather than by inference from a later test
+      // on a different fixture.
+      entryPriceCents: 12,
     });
   });
 

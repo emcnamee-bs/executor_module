@@ -174,19 +174,34 @@ describe('reconcileOpenPositions', () => {
 
   it('throws and leaves the row unsettled when a finalized market has an unrecognized result value, then settles normally once corrected', async () => {
     const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    // A second, HEALTHY ticker in the SAME pass: this throw's per-ticker isolation
+    // has to hold at the real call site, not merely be inferred from a different
+    // isolation test for a different failure mode. If the throw escaped its group,
+    // this decision would go unsettled too.
+    const healthyId = recordOpenDecision(db, { marketTicker: 'HEALTHY', side: 'no', contracts: 5, entryPriceCents: 30 });
     const client = mockClient({});
 
     // First pass: a malformed result. Must not settle, must not crash the whole
     // pass (the existing per-ticker try/catch isolates this).
     await reconcileOpenPositions({
       db, client,
-      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'void' } }),
+      fetchMarketStatus: mockFetchMarketStatus({
+        'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'void' },
+        HEALTHY: { status: 'finalized', result: 'no' },
+      }),
     });
     const stillOpen = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
       { settled_at: string | null; realized_pnl_cents: number | null };
     expect(stillOpen.settled_at).toBeNull();
     expect(stillOpen.realized_pnl_cents).toBeNull();
-    expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
+    // The healthy ticker settled normally IN THAT SAME PASS, with its own correct
+    // P&L: NO side, result=no -- payout 5*100=500, cost 5*30=150, pnl=350.
+    const healthy = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(healthyId) as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(healthy.settled_at).not.toBeNull();
+    expect(healthy.realized_pnl_cents).toBe(350);
+    // Only the anomalous ticker is left open.
+    expect(findOpenUnsettledDecisions(db).map((row) => row.id)).toEqual([id]);
 
     // Second pass: a corrected result. Settles normally.
     await reconcileOpenPositions({
