@@ -5,7 +5,12 @@ import { parseItemFields, type Item } from './item.js';
 import { formatSummaryLine } from './log.js';
 import { compilePhrases, findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
 import { loadKeyphrases, DEFAULT_KEYPHRASES_PATH } from './keyphrases/list.js';
-import { openLedger } from './decide/ledger.js';
+import {
+  openLedger,
+  recordProcessStarting,
+  recordProcessStoppedCleanly,
+} from './decide/ledger.js';
+import { sendAlert } from './alert.js';
 import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
 import { KalshiClient } from './execute/kalshiClient.js';
@@ -128,6 +133,12 @@ export async function main(): Promise<void> {
 
   const anthropicClient = new Anthropic();
   const db = openLedger(DEFAULT_LEDGER_PATH);
+  if (recordProcessStarting(db)) {
+    sendAlert(
+      '[UNCLEAN-EXIT] process restarted after an unclean exit. ' +
+        'Check logs for the cause before assuming trading resumed safely.'
+    );
+  }
 
   const kalshiClient = new KalshiClient(
     { apiKeyId: mustGetEnv('KALSHI_API_KEY_ID'), privateKeyPath: mustGetEnv('KALSHI_PRIVATE_KEY_PATH') },
@@ -155,6 +166,7 @@ export async function main(): Promise<void> {
     controller.signal
   );
 
+  recordProcessStoppedCleanly(db);
   reconciliationTimer.stop();
   await client.quit();
   db.close();
