@@ -406,7 +406,7 @@ about the code, never about the exchange (§4, lesson 2).
 6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
    and restart before the first live item arrives, not after.
 7. **Confirm `SLACK_WEBHOOK_URL` is set before trading with real money.**
-   Without it, `sendAlert` silently no-ops (logged as a warning) -- every
+   Without it, `sendAlert` silently no-ops (logged as a warning) — every
    circuit-breaker trip, market-block, and unclean-exit restart still happens
    and is still recorded in the ledger, but no human gets paged. Verify with a
    real (throwaway) webhook URL that a test message actually lands in the
