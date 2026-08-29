@@ -2,6 +2,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
 import type { Item } from '../item.js';
+import { sendAlert } from '../alert.js';
 import { computeRung, type Rung } from './rung.js';
 import { fetchActiveLadder, type ActiveLadder } from './kalshi.js';
 import {
@@ -289,7 +290,15 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       });
     })();
 
+    const wasHaltedBeforeCheck = isTradingHalted(db);
     checkFailedOrdersSignal(db, placed.status);
+    if (!wasHaltedBeforeCheck && isTradingHalted(db)) {
+      sendAlert(
+        '[CIRCUIT-BREAKER-TRIPPED] signal=failed-orders (repeated failed/ambiguous ' +
+          'order outcomes). Check circuit_breaker_trips.reason and run ' +
+          'npm run clear-breaker after investigating.'
+      );
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (pendingDecisionId !== null && pendingRecordForCrash !== null) {

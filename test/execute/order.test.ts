@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import * as alertModule from '../../src/alert.js';
 
 function mockClient(overrides: Partial<KalshiClient> = {}): KalshiClient {
   return { createOrder: async () => { throw new Error('not stubbed'); }, getOrders: async () => ({ orders: [] }), getPositions: async () => ({ market_positions: [] }), getBalance: async () => ({ balance: 0 }), ...overrides } as unknown as KalshiClient;
@@ -659,6 +660,21 @@ describe('reconcilePendingOrders', () => {
     await reconcilePendingOrders(db, client);
 
     expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('alerts exactly once when the failed-orders breaker trips via startup reconciliation', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      pendingSetup({ clientOrderId: `cid-alert-${i}` });
+    }
+    const client = mockClient({
+      getOrders: async () => ({ orders: [] }),
+      getPositions: async () => ({ market_positions: [] }),
+    });
+
+    await reconcilePendingOrders(db, client);
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
   it('uses the STORED positionBeforeContracts from the pending row, not a fresh zero, so a different decision\'s intervening fill on the same ticker cannot corrupt this reconciliation', async () => {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { CreateOrderBody } from './kalshiClient.js';
 import { KalshiClient, KalshiRequestError, positionForTicker } from './kalshiClient.js';
 import type Database from 'better-sqlite3';
+import { sendAlert } from '../alert.js';
 import {
   totalExposureCents,
   MAX_TOTAL_EXPOSURE_CENTS,
@@ -10,6 +11,7 @@ import {
   resolveOrder,
   resolveDecision,
   checkFailedOrdersSignal,
+  isTradingHalted,
   type OrderStatus,
   type DecisionRecord,
 } from '../decide/ledger.js';
@@ -404,7 +406,15 @@ export async function reconcilePendingOrders(db: Database.Database, client: Kals
         );
       })();
 
+      const wasHaltedBeforeCheck = isTradingHalted(db);
       checkFailedOrdersSignal(db, reconciled.status);
+      if (!wasHaltedBeforeCheck && isTradingHalted(db)) {
+        sendAlert(
+          '[CIRCUIT-BREAKER-TRIPPED] signal=failed-orders (repeated failed/ambiguous ' +
+            'order outcomes, detected during startup reconciliation). Check ' +
+            'circuit_breaker_trips.reason and run npm run clear-breaker after investigating.'
+        );
+      }
     } catch (err) {
       console.error(
         `[startup-reconcile] failed to reconcile order clientOrderId=${pending.clientOrderId} ` +

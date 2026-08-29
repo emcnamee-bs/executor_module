@@ -15,6 +15,7 @@ import * as synopsisModule from '../../src/decide/synopsis.js';
 import * as verifyModule from '../../src/decide/verify.js';
 import * as decideModule from '../../src/decide/decide.js';
 import * as orderModule from '../../src/execute/order.js';
+import * as alertModule from '../../src/alert.js';
 
 function baseItem(overrides: Partial<Item> = {}): Item {
   return {
@@ -249,6 +250,34 @@ describe('runDecisionPipeline', () => {
     }
 
     expect(isTradingHalted(db)).toBe(true);
+  });
+
+  it('alerts exactly once when the failed-orders breaker trips, not again on a further already-tripped failure', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
+      clientOrderId: 'rejected-mock-client-order-id',
+      kalshiOrderId: null,
+      kalshiOrderStatus: null,
+      filledContracts: 0,
+      avgFillPriceCents: null,
+      status: 'rejected',
+      dryRun: false,
+      errorDetail: 'simulated 400 for this test',
+    });
+
+    for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD; i++) {
+      const item = baseItem({
+        item_id: `item-alert-${i}`, dedup_id: `dedup-alert-${i}`, story_key: `story-alert-${i}`,
+      });
+      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    }
+    expect(alertSpy).toHaveBeenCalledTimes(1); // tripped on the LAST of the threshold failures
+
+    // One more failure while already tripped -- checkFailedOrdersSignal's own
+    // per-signal dedup means isTradingHalted stays true->true, so no new alert.
+    const oneMore = baseItem({ item_id: 'item-alert-extra', dedup_id: 'dedup-alert-extra', story_key: 'story-alert-extra' });
+    await runDecisionPipeline(oneMore, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
   it('records a skip when verify reports unsupported, before decide/sizing, carrying the real rung', async () => {
