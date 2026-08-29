@@ -150,13 +150,21 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
     try {
       const marketStatus = await fetchMarketStatus(marketTicker, db);
       if (marketStatus.status === 'finalized') {
+        if (marketStatus.result !== 'yes' && marketStatus.result !== 'no') {
+          throw new Error(
+            `finalized market ${marketTicker} has an unrecognized result value: "${marketStatus.result}" ` +
+              `(expected "yes" or "no") -- refusing to fabricate a P&L for this ticker's rows`
+          );
+        }
         // One transaction per ticker group: a crash midway through must not leave
         // some of this ticker's rows settled and the rest not, which would make the
         // next pass compare a partial expected count against the real position and
         // block a market that is actually fine.
         db.transaction(() => {
           for (const row of rows) {
-            markDecisionSettled(db, row.id);
+            const payoutCents = row.side === marketStatus.result ? row.contracts * 100 : 0;
+            const realizedPnlCents = payoutCents - row.contracts * row.entryPriceCents;
+            markDecisionSettled(db, row.id, realizedPnlCents);
           }
         })();
         continue;

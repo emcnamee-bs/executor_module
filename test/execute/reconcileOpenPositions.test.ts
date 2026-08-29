@@ -100,6 +100,105 @@ describe('reconcileOpenPositions', () => {
     expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(false);
   });
 
+  it('computes a WIN payout for a YES-side decision when result matches side', async () => {
+    const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'yes' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(880); // payout 10*100=1000, cost 10*12=120, pnl=880
+  });
+
+  it('computes a LOSS for a YES-side decision when result does not match side', async () => {
+    const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'no' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(-120); // payout 0, cost 10*12=120, pnl=-120
+  });
+
+  it('computes a WIN payout for a NO-side decision when result matches side', async () => {
+    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 30 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'no' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(700); // payout 10*100=1000, cost 10*30=300, pnl=700
+  });
+
+  it('computes a LOSS for a NO-side decision when result does not match side', async () => {
+    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 30 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'yes' } }),
+    });
+
+    const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { realized_pnl_cents: number | null };
+    expect(row.realized_pnl_cents).toBe(-300); // payout 0, cost 10*30=300, pnl=-300
+  });
+
+  it('computes each row in a multi-row-per-ticker group independently, not a shared or averaged value', async () => {
+    const idA = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const idB = recordOpenDecision(db, { marketTicker: 'L', side: 'no', contracts: 5, entryPriceCents: 40 });
+    const client = mockClient({});
+
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ L: { status: 'finalized', result: 'yes' } }),
+    });
+
+    const rowA = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(idA) as { realized_pnl_cents: number | null };
+    const rowB = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(idB) as { realized_pnl_cents: number | null };
+    expect(rowA.realized_pnl_cents).toBe(880); // YES side, result=yes: win. payout 1000, cost 120, pnl=880
+    expect(rowB.realized_pnl_cents).toBe(-200); // NO side, result=yes: loss. payout 0, cost 5*40=200, pnl=-200
+  });
+
+  it('throws and leaves the row unsettled when a finalized market has an unrecognized result value, then settles normally once corrected', async () => {
+    const id = recordOpenDecision(db, { side: 'yes', contracts: 10, entryPriceCents: 12 });
+    const client = mockClient({});
+
+    // First pass: a malformed result. Must not settle, must not crash the whole
+    // pass (the existing per-ticker try/catch isolates this).
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'void' } }),
+    });
+    const stillOpen = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(stillOpen.settled_at).toBeNull();
+    expect(stillOpen.realized_pnl_cents).toBeNull();
+    expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
+
+    // Second pass: a corrected result. Settles normally.
+    await reconcileOpenPositions({
+      db, client,
+      fetchMarketStatus: mockFetchMarketStatus({ 'KXAPRPOTUS-26AUG28-40.6': { status: 'finalized', result: 'yes' } }),
+    });
+    const nowSettled = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
+      { settled_at: string | null; realized_pnl_cents: number | null };
+    expect(nowSettled.settled_at).not.toBeNull();
+    expect(nowSettled.realized_pnl_cents).toBe(880);
+  });
+
   it('a closed-but-not-finalized market is still checked normally (does not get marked settled)', async () => {
     recordOpenDecision(db);
     const client = mockClient({ 'KXAPRPOTUS-26AUG28-40.6': 10 }); // matches expected -- no divergence
