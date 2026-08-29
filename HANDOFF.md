@@ -532,10 +532,16 @@ fire a false unclean-exit alert on an unrelated instance's next boot.
   add columns to a table that already exists in a pre-existing `data/decisions.db`. If
   one exists from before this branch, migrate or recreate it before starting — a missing
   `side` column will fail at the first order, loudly, which is the correct direction to
-  fail. The one exception is `decisions.settled_at` (added in slice 5): `openLedger`
-  explicitly ALTERs it in when absent, because that column's absence fails *silently*
-  (reconciliation throws on every pass while trading continues unguarded) rather than
-  loudly. Every other column drift still needs a manual migration.
+  fail. The exceptions are the TWO auto-migrated columns —
+  `decisions.settled_at` (added in slice 5) and `decisions.realized_pnl_cents` (added
+  in slice 8): `openLedger` explicitly ALTERs each of them in when absent, so neither
+  needs a manual migration. Both are auto-migrated for the same reason — their absence
+  fails *silently* rather than loudly (without `settled_at`, reconciliation throws on
+  every pass while trading continues unguarded; without `realized_pnl_cents`, every
+  settlement throws, so a real settled position's P&L is never recorded).
+  `realized_pnl_cents`' ALTER carries the same cross-column CHECK as a freshly-created
+  table, so a migrated database gets identical DB-level enforcement. Every other column
+  drift still needs a manual migration.
 
 ---
 

@@ -865,10 +865,15 @@ describe('ledger', () => {
 
 /**
  * The `decisions` table exactly as slices 1-4 created it: every column `SCHEMA` in
- * ledger.ts defines, MINUS `settled_at` (which slice 5 added). This is the real,
- * pre-existing on-disk shape on any machine that ran this system before slice 5 --
+ * ledger.ts defines, MINUS BOTH `settled_at` (which slice 5 added) AND
+ * `realized_pnl_cents` (which slice 8 added) -- the OLDEST shape still reachable on
+ * disk, so it exercises both auto-migrations at once. This is the real, pre-existing
+ * on-disk shape on any machine that ran this system before slice 5 --
  * `CREATE TABLE IF NOT EXISTS` does nothing against it, so without a migration the
- * new column never appears and every reconciliation pass throws forever.
+ * new columns never appear and every reconciliation pass throws forever.
+ *
+ * See POST_SLICE_5_DECISIONS_SCHEMA below for the shape a machine that has run
+ * slices 5-7 actually has today (`settled_at` present, `realized_pnl_cents` absent).
  */
 const PRE_SLICE_5_DECISIONS_SCHEMA = `
 CREATE TABLE decisions (
