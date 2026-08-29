@@ -405,6 +405,12 @@ about the code, never about the exchange (§4, lesson 2).
    pages.
 6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
    and restart before the first live item arrives, not after.
+7. **Confirm `SLACK_WEBHOOK_URL` is set before trading with real money.**
+   Without it, `sendAlert` silently no-ops (logged as a warning) -- every
+   circuit-breaker trip, market-block, and unclean-exit restart still happens
+   and is still recorded in the ledger, but no human gets paged. Verify with a
+   real (throwaway) webhook URL that a test message actually lands in the
+   right Slack channel before relying on this in production.
 
 ### 5a.2a Automatic circuit breakers (added in slice 6)
 
@@ -456,6 +462,30 @@ hits unexplained API trouble — but it means an operator investigating a
 `kalshi-errors` trip should read the `kalshi_errors` rows' `call_site`/`occurred_at`
 and check whether it was one retry storm rather than assume five independent
 failures occurred.
+
+### 5a.2b Slack alerting (added in slice 7)
+
+Three events post to Slack via `SLACK_WEBHOOK_URL` (a plain incoming-webhook
+POST, no other configuration): any circuit breaker trip (slice 6), any
+genuinely NEW market block from slice 5's reconciliation (not a re-block of an
+already-blocked ticker), and a process restart following an unclean exit
+(detected via the `process_lifecycle` table at the NEXT startup -- a real
+crash cannot reliably alert from inside itself).
+
+Each alert names the specific condition and the exact recovery command
+(`npm run clear-breaker` / `npm run clear-block <ticker>`), but does not
+duplicate the full `reason` text already visible in the console log and the
+relevant table (`circuit_breaker_trips`/`market_blocks`) -- check those for
+detail before acting.
+
+Delivery is fire-and-forget with one retry: a Slack outage or network blip
+never delays or crashes the trading code path that triggered the alert, but it
+does mean an alert can occasionally be lost entirely (both the original
+attempt and the retry failing) with nothing else surfacing that specific
+failure beyond a log line. Treat Slack alerting as a convenience layer on top
+of the ledger's own durable state (`circuit_breaker_trips`, `market_blocks`,
+`process_lifecycle`), never as the sole source of truth for whether something
+happened.
 
 ### 5a.3 Operational notes
 
