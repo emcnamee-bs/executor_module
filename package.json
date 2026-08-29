@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "generate-keyphrases": "tsx src/keyphrases/generate.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "clear-block": "tsx scripts/clear-market-block.ts",
+    "clear-breaker": "tsx scripts/clear-breaker.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -6,15 +6,23 @@ import { computeRung, type Rung } from './rung.js';
 import { fetchActiveLadder, type ActiveLadder } from './kalshi.js';
 import {
   recordDecision,
+  recordPendingDecision,
+  resolveDecision,
+  recordPendingOrder,
+  resolveOrder,
   hasDecisionForItem,
   hasOpenPosition,
   totalExposureCents,
+  isTradingHalted,
+  checkFailedOrdersSignal,
   type DecisionRecord,
 } from './ledger.js';
 import { evaluateSizing } from './sizing.js';
 import { synopsize } from './synopsis.js';
 import { verifySynopsis } from './verify.js';
 import { decideTrade } from './decide.js';
+import { placeOrder, deriveClientOrderId } from '../execute/order.js';
+import { positionForTicker, type KalshiClient } from '../execute/kalshiClient.js';
 
 const KALSHI_SERIES_TICKER = 'KXAPRPOTUS';
 
@@ -22,6 +30,7 @@ export interface PipelineDeps {
   anthropicClient: Anthropic;
   db: Database.Database;
   fetchLadder: typeof fetchActiveLadder;
+  kalshiClient: KalshiClient;
 }
 
 /**
@@ -49,12 +58,16 @@ function skipRecord(
     edgeCents: null,
     wouldTrade: false,
     reason,
+    // A skip is always fully resolved the instant it's recorded -- never pending.
+    // Every call site below also passes this explicitly (redundant, deliberately),
+    // but the default keeps skipRecord's own return type sound on its own terms.
+    orderStatus: 'resolved',
     ...overrides,
   };
 }
 
 export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promise<void> {
-  const { anthropicClient, db, fetchLadder } = deps;
+  const { anthropicClient, db, fetchLadder, kalshiClient } = deps;
 
   // Redis delivery is at-least-once: a crash or restart mid-item re-delivers the
   // unacked entry. An item that already has a ledger row was fully processed by an
@@ -76,18 +89,29 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     corroborations: item.corroborations,
   });
 
+  // Hoisted so the catch below can tell whether the pending decision row was
+  // already written (i.e. the crash happened at or after `recordPendingOrder` /
+  // during `placeOrder`) BEFORE it decides how to record the failure: once that row
+  // exists, `item_id`'s unique index means a second recordDecision(...) INSERT for
+  // this item would itself throw, so that row must be UPDATEd in place instead.
+  let pendingDecisionId: number | null = null;
+  let pendingOrderId: number | null = null;
+  let pendingRecordForCrash: DecisionRecord | null = null;
+
   // Everything from here on is wrapped: the Redis consumer acks the entry once this
   // handler returns, so an escaping exception loses the item with no durable trace
   // at all. A recorded skip row is the trace. (This has already happened once in
   // production: a transient truncated-JSON parse error left nothing behind.)
   try {
-    if (process.env.EXECUTOR_TRADING_HALTED === 'true') {
-      recordDecision(db, skipRecord(item, 'kill switch active', { rung }));
+    const manualHalt = process.env.EXECUTOR_TRADING_HALTED === 'true';
+    if (manualHalt || isTradingHalted(db)) {
+      const reason = manualHalt ? 'kill switch active' : 'circuit breaker tripped';
+      recordDecision(db, skipRecord(item, reason, { rung, orderStatus: 'resolved' }));
       return;
     }
 
     if (rung === 'rumor') {
-      recordDecision(db, skipRecord(item, 'rumor rung, stake 0', { rung }));
+      recordDecision(db, skipRecord(item, 'rumor rung, stake 0', { rung, orderStatus: 'resolved' }));
       return;
     }
 
@@ -96,14 +120,20 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     if (!verification.supported) {
       recordDecision(
         db,
-        skipRecord(item, `synopsis not supported by source: ${verification.note}`, { rung })
+        skipRecord(item, `synopsis not supported by source: ${verification.note}`, {
+          rung,
+          orderStatus: 'resolved',
+        })
       );
       return;
     }
 
-    const ladder: ActiveLadder | null = await fetchLadder(KALSHI_SERIES_TICKER);
+    const ladder: ActiveLadder | null = await fetchLadder(KALSHI_SERIES_TICKER, db);
     if (ladder === null) {
-      recordDecision(db, skipRecord(item, 'no active KXAPRPOTUS event found', { rung }));
+      recordDecision(
+        db,
+        skipRecord(item, 'no active KXAPRPOTUS event found', { rung, orderStatus: 'resolved' })
+      );
       return;
     }
 
@@ -113,6 +143,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         skipRecord(item, 'story already has an open position for the active event', {
           rung,
           eventTicker: ladder.eventTicker,
+          orderStatus: 'resolved',
         })
       );
       return;
@@ -127,6 +158,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
           eventTicker: ladder.eventTicker,
           direction: decision.direction,
           magnitudePts: decision.magnitudePts,
+          orderStatus: 'resolved',
         })
       );
       return;
@@ -140,7 +172,31 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       currentTotalExposureCents: totalExposureCents(db, ladder.eventTicker),
     });
 
-    recordDecision(db, {
+    if (!sizing.wouldTrade) {
+      recordDecision(db, {
+        itemId: item.item_id,
+        storyKey: item.story_key,
+        eventTicker: ladder.eventTicker,
+        marketTicker: sizing.marketTicker,
+        side: sizing.side,
+        rung,
+        direction: decision.direction,
+        magnitudePts: decision.magnitudePts,
+        contracts: sizing.contracts,
+        entryPriceCents: sizing.entryPriceCents,
+        notionalCents: sizing.notionalCents,
+        edgeCents: sizing.edgeCents,
+        wouldTrade: sizing.wouldTrade,
+        reason: sizing.reason,
+        orderStatus: 'resolved',
+      });
+      return;
+    }
+
+    // Pending rows written BEFORE placeOrder is ever called -- this is what makes
+    // hasDecisionForItem's dedup cover the entire execution step, and what durably
+    // captures position_before_contracts even if the process crashes moments later.
+    const pendingRecord: DecisionRecord = {
       itemId: item.item_id,
       storyKey: item.story_key,
       eventTicker: ladder.eventTicker,
@@ -153,13 +209,136 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       entryPriceCents: sizing.entryPriceCents,
       notionalCents: sizing.notionalCents,
       edgeCents: sizing.edgeCents,
-      wouldTrade: sizing.wouldTrade,
+      wouldTrade: true,
       reason: sizing.reason,
+      orderStatus: 'pending',
+    };
+    const decisionId = recordPendingDecision(db, pendingRecord);
+    pendingDecisionId = decisionId;
+    pendingRecordForCrash = pendingRecord;
+
+    const clientOrderId = deriveClientOrderId(item.item_id);
+    // Captured ONCE, here, before any order call -- stored durably in the orders row
+    // (for reconcilePendingOrders to use if this process crashes moments later) and
+    // passed into placeOrder directly, so there is exactly one read at exactly one
+    // moment, never re-derived.
+    const positionBeforeContracts = positionForTicker(await kalshiClient.getPositions(), sizing.marketTicker!);
+    const orderId = recordPendingOrder(db, {
+      decisionId,
+      clientOrderId,
+      marketTicker: sizing.marketTicker!,
+      // Stored durably because Kalshi's `position` is SIGNED: crash recovery has
+      // only this row to interpret a position diff against, and reading a NO fill
+      // as a YES-shaped diff records a real position as zero contracts.
+      side: sizing.side!,
+      requestedContracts: sizing.contracts,
+      positionBeforeContracts,
     });
+    pendingOrderId = orderId;
+
+    const placed = await placeOrder(
+      {
+        itemId: item.item_id,
+        eventTicker: ladder.eventTicker,
+        marketTicker: sizing.marketTicker!,
+        side: sizing.side!,
+        contracts: sizing.contracts,
+        entryPriceCents: sizing.entryPriceCents!,
+        notionalCents: sizing.notionalCents,
+        positionBeforeContracts,
+      },
+      { client: kalshiClient, db }
+    );
+
+    // A DRY_RUN's "fill" is simulated locally and is NOT a real position. The
+    // `orders` row still records the simulation (already unmistakably marked by the
+    // DRYRUN- prefix on kalshi_order_id) for audit, but the `decisions` row -- the
+    // one every exposure-cap and dedup query actually reads -- must record it as a
+    // skip. Otherwise the documented "dry run first, then go live" workflow leaves
+    // phantom positions consuming the real $40 cap and makes hasOpenPosition true
+    // for stories that never traded.
+    const isRealFill = !placed.dryRun && placed.filledContracts > 0;
+    const actualNotionalCents = isRealFill ? placed.filledContracts * (placed.avgFillPriceCents ?? 0) : 0;
+    const resolvedReason = placed.dryRun
+      ? `[DRY_RUN simulated] would have filled ${placed.filledContracts}/${sizing.contracts} contracts ` +
+        `at ${placed.avgFillPriceCents}c -- not a real position`
+      : (placed.errorDetail ?? `order ${placed.status}: ${placed.filledContracts}/${sizing.contracts} contracts filled`);
+
+    // ONE transaction: resolveOrder alone committing a terminal status while
+    // resolveDecision fails (or the process dies in the gap) makes the order
+    // invisible to reconcilePendingOrders -- which scans only status='pending' --
+    // leaving a real filled position permanently reported as zero exposure.
+    // Rolled back together, both rows stay pending and startup recovery fixes them.
+    db.transaction(() => {
+      resolveOrder(db, orderId, {
+        filledContracts: placed.filledContracts,
+        avgFillPriceCents: placed.avgFillPriceCents,
+        status: placed.status,
+        kalshiOrderId: placed.kalshiOrderId,
+        kalshiOrderStatus: placed.kalshiOrderStatus,
+        errorDetail: placed.errorDetail,
+      });
+      resolveDecision(db, decisionId, {
+        ...pendingRecord,
+        contracts: isRealFill ? placed.filledContracts : 0,
+        entryPriceCents: isRealFill ? placed.avgFillPriceCents : null,
+        notionalCents: actualNotionalCents,
+        wouldTrade: isRealFill,
+        reason: resolvedReason,
+        orderStatus: 'resolved',
+      });
+    })();
+
+    checkFailedOrdersSignal(db, placed.status);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (pendingDecisionId !== null && pendingRecordForCrash !== null) {
+      // A pending decision row for this item already exists (recordPendingDecision
+      // ran before the exception, e.g. placeOrder threw per its own documented
+      // uncaught-exception case). item_id's unique index means a second
+      // recordDecision INSERT here would itself throw, so this path updates that
+      // row in place instead -- but ONLY when the associated `orders` row is STILL
+      // 'pending'. If it has already reached a terminal status, that means
+      // resolveOrder already durably recorded a REAL fill outcome (e.g.
+      // resolveDecision's own UPDATE below is what threw, after placeOrder and
+      // resolveOrder both already succeeded) -- rewriting the decision row to
+      // would_trade=false at that point would silently UNDER-report an actual
+      // fill. That is not the safe direction: totalExposureCents sums would_trade=1
+      // rows, so under-reporting a real fill undercounts real exposure and permits
+      // MORE real risk than intended, not less. Worse, the orders row is no longer
+      // 'pending', so Task 5's reconcilePendingOrders will never revisit it and fix
+      // the mistake later. So: rethrow instead, letting main.ts's own backstop log
+      // it loudly rather than this silently papering over an already-resolved order.
+      //
+      // The transactional resolve above now makes this state unreachable via the
+      // success path (a failing resolveDecision rolls resolveOrder back with it, so
+      // the orders row is still 'pending' here and recovery CAN fix it later). This
+      // guard stays as the invariant check for any other path that could leave a
+      // terminal orders row behind an unresolved decision row.
+      const orderRow = pendingOrderId !== null
+        ? (db.prepare('SELECT status FROM orders WHERE id = ?').get(pendingOrderId) as
+            | { status: string }
+            | undefined)
+        : undefined;
+      if (orderRow !== undefined && orderRow.status !== 'pending') {
+        throw err;
+      }
+      // The orders row is still pending (or was never reached at all) -- the true
+      // fill outcome is genuinely unknown, so it is safe to update the decision row
+      // in place. Its order_status stays 'pending' rather than 'resolved': this
+      // update only makes the interim state legible, it does not claim to be the
+      // final answer -- Task 5's reconcilePendingOrders is what determines and
+      // records the real outcome for both rows together at next boot.
+      resolveDecision(db, pendingDecisionId, {
+        ...pendingRecordForCrash,
+        wouldTrade: false,
+        reason: `pipeline error: ${message}`,
+        orderStatus: 'pending',
+      });
+      return;
+    }
     // If THIS insert throws too (a genuinely malformed record, or the DB itself),
     // let it propagate: main.ts's catch is the final backstop and will log it.
-    recordDecision(db, skipRecord(item, `pipeline error: ${message}`, { rung }));
+    recordDecision(db, skipRecord(item, `pipeline error: ${message}`, { rung, orderStatus: 'resolved' }));
   }
 }

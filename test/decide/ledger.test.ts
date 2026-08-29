@@ -9,8 +9,29 @@ import {
   hasDecisionForItem,
   hasOpenPosition,
   totalExposureCents,
+  recordPendingDecision,
+  resolveDecision,
+  recordPendingOrder,
+  resolveOrder,
+  findPendingOrders,
+  markDecisionSettled,
+  findOpenUnsettledDecisions,
+  isMarketBlocked,
+  blockMarket,
+  isTradingHalted,
+  tripBreaker,
+  clearAllTrips,
+  recordKalshiError,
+  checkFailedOrdersSignal,
+  checkDivergencesSignal,
+  CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD,
+  CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD,
+  CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD,
+  MAX_NOTIONAL_CENTS_PER_TRADE,
+  MAX_TOTAL_EXPOSURE_CENTS,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
+import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 
 const EVENT = 'KXAPRPOTUS-26AUG28';
@@ -40,6 +61,7 @@ function skipRecord(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     edgeCents: null,
     wouldTrade: false,
     reason: 'rumor rung, stake 0',
+    orderStatus: 'resolved',
     ...overrides,
   };
 }
@@ -60,6 +82,7 @@ function tradeRecord(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     edgeCents: 3,
     wouldTrade: true,
     reason: '10 contracts, 3c edge',
+    orderStatus: 'resolved',
     ...overrides,
   };
 }
@@ -267,5 +290,566 @@ describe('ledger', () => {
   it('makes a second row for the same item_id impossible at the DB layer', () => {
     recordDecision(db, skipRecord({ itemId: 'item-dup' }));
     expect(() => recordDecision(db, skipRecord({ itemId: 'item-dup' }))).toThrow(/UNIQUE/i);
+  });
+
+  // --- pending decision + order flow (slice 4) --------------------------------
+
+  describe('pending decision + order flow (slice 4)', () => {
+    it('recordPendingDecision writes a would_trade=0, order_status=pending row and returns its id', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(decisionId).toBeGreaterThan(0);
+
+      const row = db.prepare('SELECT would_trade, order_status FROM decisions WHERE id = ?').get(decisionId) as {
+        would_trade: number;
+        order_status: string;
+      };
+      // Even though tradeRecord() defaults wouldTrade: true, a pending row is never a
+      // confirmed position yet -- recordPendingDecision forces would_trade to 0
+      // regardless of what the input record says, exactly like a genuine 0-fill outcome.
+      expect(row.would_trade).toBe(0);
+      expect(row.order_status).toBe('pending');
+    });
+
+    it('resolveDecision updates an existing pending row in place to the real outcome', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, decisionId, tradeRecord({ contracts: 3, entryPriceCents: 12, notionalCents: 36, wouldTrade: true, orderStatus: 'resolved' }));
+
+      const row = db.prepare('SELECT would_trade, contracts, notional_cents, order_status FROM decisions WHERE id = ?').get(decisionId) as {
+        would_trade: number;
+        contracts: number;
+        notional_cents: number;
+        order_status: string;
+      };
+      expect(row.would_trade).toBe(1);
+      expect(row.contracts).toBe(3);
+      expect(row.notional_cents).toBe(36);
+      expect(row.order_status).toBe('resolved');
+    });
+
+    // --- enforce_total_exposure_on_resolve: the UPDATE-path mirror of the cap ---
+
+    it('rejects a resolveDecision that would push total exposure over the $40 cap on the UPDATE path, not just INSERT', () => {
+      // A real trade's only INSERT is recordPendingDecision, which always forces
+      // would_trade=0 -- so the INSERT-side enforce_total_exposure trigger's WHEN
+      // (would_trade = 1) is never true for it. Only resolveDecision's later UPDATE
+      // ever sets would_trade=1, so this is the entire live-trade cap-enforcement
+      // path this project relies on. Fill EVENT to the $40 cap via three already
+      // would_trade=1 rows...
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-p', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-q', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-r', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-s', eventTicker: EVENT }));
+      expect(totalExposureCents(db, EVENT)).toBe(4000);
+
+      // ...then resolve a pending row (currently would_trade=0, contributing nothing)
+      // to a real fill that would push the event over the cap. Without the
+      // UPDATE-path trigger, this UPDATE would silently succeed.
+      const decisionId = recordPendingDecision(
+        db,
+        tradeRecord({ storyKey: 's-over', eventTicker: EVENT, orderStatus: 'pending' })
+      );
+      expect(() =>
+        resolveDecision(
+          db,
+          decisionId,
+          tradeRecordOfNotional(1, { storyKey: 's-over', eventTicker: EVENT, wouldTrade: true, orderStatus: 'resolved' })
+        )
+      ).toThrow(/total exposure cap exceeded/);
+
+      // The rejected UPDATE must not have partially applied -- still would_trade=0.
+      const row = db.prepare('SELECT would_trade FROM decisions WHERE id = ?').get(decisionId) as {
+        would_trade: number;
+      };
+      expect(row.would_trade).toBe(0);
+    });
+
+    it('allows a resolveDecision to would_trade=1 when it does not breach the cap, excluding the row being updated from its own sum', () => {
+      // Three rows at $10 each = $30, leaving exactly $10 of headroom.
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-t', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-u', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-v', eventTicker: EVENT }));
+
+      const decisionId = recordPendingDecision(
+        db,
+        tradeRecord({ storyKey: 's-fits', eventTicker: EVENT, orderStatus: 'pending' })
+      );
+      expect(() =>
+        resolveDecision(
+          db,
+          decisionId,
+          tradeRecordOfNotional(1000, { storyKey: 's-fits', eventTicker: EVENT, wouldTrade: true, orderStatus: 'resolved' })
+        )
+      ).not.toThrow();
+      expect(totalExposureCents(db, EVENT)).toBe(4000);
+    });
+
+    it('recordPendingOrder writes a pending orders row referencing its decision, and findPendingOrders finds it', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      const orderId = recordPendingOrder(db, {
+        decisionId,
+        clientOrderId: 'cid-abc',
+        marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        side: 'yes',
+        requestedContracts: 83,
+        positionBeforeContracts: 0,
+      });
+      expect(orderId).toBeGreaterThan(0);
+
+      const pending = findPendingOrders(db);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        id: orderId,
+        decisionId,
+        clientOrderId: 'cid-abc',
+        marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        side: 'yes',
+        requestedContracts: 83,
+        positionBeforeContracts: 0,
+      });
+    });
+
+    // --- C1: the orders row must carry the side, for both legs -----------------
+
+    it.each(['yes', 'no'] as const)(
+      'round-trips side=%s through recordPendingOrder -> findPendingOrders, so crash recovery can interpret a SIGNED position diff',
+      (side) => {
+        // Without this column, reconcilePendingOrders has no way to tell a NO fill
+        // (which moves Kalshi's signed `position` DOWN) from no fill at all.
+        const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending', side }));
+        recordPendingOrder(db, {
+          decisionId, clientOrderId: `cid-${side}`, marketTicker: 'T', side,
+          requestedContracts: 5, positionBeforeContracts: side === 'no' ? -10 : 10,
+        });
+
+        const pending = findPendingOrders(db);
+        expect(pending).toHaveLength(1);
+        expect(pending[0].side).toBe(side);
+        expect(pending[0].positionBeforeContracts).toBe(side === 'no' ? -10 : 10);
+      }
+    );
+
+    it('rejects an orders row with a side outside yes/no at the DB layer', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO orders (decision_id, client_order_id, market_ticker, side,
+                                 requested_contracts, position_before_contracts, status)
+             VALUES (?, 'cid-bad-side', 'T', 'maybe', 1, 0, 'pending')`
+          )
+          .run(decisionId)
+      ).toThrow(/constraint/i);
+    });
+
+    it('resolveOrder updates an existing pending order row in place and it no longer appears in findPendingOrders', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      const orderId = recordPendingOrder(db, {
+        decisionId, clientOrderId: 'cid-def', marketTicker: 'T', side: 'yes', requestedContracts: 10, positionBeforeContracts: 0,
+      });
+
+      resolveOrder(db, orderId, {
+        filledContracts: 10, avgFillPriceCents: 12, status: 'filled', kalshiOrderId: 'kalshi-1',
+        kalshiOrderStatus: 'executed', errorDetail: null,
+      });
+
+      expect(findPendingOrders(db)).toHaveLength(0);
+      const row = db.prepare('SELECT filled_contracts, avg_fill_price_cents, status, kalshi_order_id, kalshi_order_status, resolved_at FROM orders WHERE id = ?').get(orderId) as {
+        filled_contracts: number; avg_fill_price_cents: number; status: string; kalshi_order_id: string; kalshi_order_status: string | null; resolved_at: string | null;
+      };
+      expect(row.filled_contracts).toBe(10);
+      expect(row.avg_fill_price_cents).toBe(12);
+      expect(row.status).toBe('filled');
+      expect(row.kalshi_order_id).toBe('kalshi-1');
+      // I3: Kalshi's own status word for the order is persisted as an audit trail.
+      expect(row.kalshi_order_status).toBe('executed');
+      expect(row.resolved_at).not.toBeNull();
+    });
+
+    it('persists kalshi_order_status as NULL on a path where no createOrder response was received', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      const orderId = recordPendingOrder(db, {
+        decisionId, clientOrderId: 'cid-ambiguous', marketTicker: 'T', side: 'no', requestedContracts: 10, positionBeforeContracts: 0,
+      });
+
+      resolveOrder(db, orderId, {
+        filledContracts: 0, avgFillPriceCents: null, status: 'unknown', kalshiOrderId: null,
+        kalshiOrderStatus: null, errorDetail: 'ECONNRESET',
+      });
+
+      const row = db.prepare('SELECT kalshi_order_status FROM orders WHERE id = ?').get(orderId) as {
+        kalshi_order_status: string | null;
+      };
+      expect(row.kalshi_order_status).toBeNull();
+    });
+
+    it('client_order_id is UNIQUE across orders', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', side: 'yes', requestedContracts: 1, positionBeforeContracts: 0 });
+      expect(() =>
+        recordPendingOrder(db, { decisionId, clientOrderId: 'cid-dup', marketTicker: 'T', side: 'yes', requestedContracts: 1, positionBeforeContracts: 0 })
+      ).toThrow(/UNIQUE/i);
+    });
+
+    // --- resolveDecision notional-consistency regression tests ----------------
+
+    it('rejects a resolveDecision with a would-trade record whose notionalCents does not equal contracts x entryPriceCents', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(() =>
+        resolveDecision(db, decisionId, tradeRecord({ contracts: 3, entryPriceCents: 12, notionalCents: 999, wouldTrade: true, orderStatus: 'resolved' }))
+      ).toThrow(/notionalCents must equal contracts x entryPriceCents/);
+    });
+
+    it('rejects a resolveDecision with a would-trade record that has null entryPriceCents', () => {
+      const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      expect(() =>
+        resolveDecision(db, decisionId, tradeRecord({ contracts: 10, entryPriceCents: null, notionalCents: 0, wouldTrade: true, orderStatus: 'resolved' }))
+      ).toThrow(/must carry an entry price/);
+    });
+  });
+
+  describe('settlement tracking', () => {
+    it('findOpenUnsettledDecisions returns only would_trade=1 rows with settled_at still null', () => {
+      const openId = (() => {
+        const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+        resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+        return id;
+      })();
+      recordDecision(db, skipRecord()); // a skip -- would_trade=0, must not appear
+
+      const open = findOpenUnsettledDecisions(db);
+      expect(open).toHaveLength(1);
+      expect(open[0]).toMatchObject({
+        id: openId,
+        marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+        side: 'yes',
+        contracts: 10,
+      });
+    });
+
+    it('markDecisionSettled removes a row from findOpenUnsettledDecisions afterward', () => {
+      const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(1);
+
+      markDecisionSettled(db, id);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+      const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as { settled_at: string | null };
+      expect(row.settled_at).not.toBeNull();
+    });
+
+    it('excludes a would-trade row with a NULL side, which would otherwise be summed with the wrong sign', () => {
+      // Nothing enforces non-null side: the schema CHECK and
+      // assertNotionalIsConsistent both cover entry_price_cents/event_ticker/notional
+      // only. Such a row reaching reconciliation would invert the expected signed
+      // count feeding a real-money block decision, so it is filtered out here.
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-side-item', NULL, ?, 'KXAPRPOTUS-26AUG28-40.6', NULL, 'reported',
+            'up', 0.3, 10, 10, 100, 3, 1, 'row with no side', 'resolved')`
+      ).run(EVENT);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+    });
+
+    it('excludes a would-trade row with a NULL market_ticker, which would otherwise group under a null key', () => {
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-ticker-item', NULL, ?, NULL, 'yes', 'reported',
+            'up', 0.3, 10, 10, 100, 3, 1, 'row with no market_ticker', 'resolved')`
+      ).run(EVENT);
+
+      expect(findOpenUnsettledDecisions(db)).toHaveLength(0);
+    });
+
+    it('still returns healthy rows alongside a malformed one, rather than failing the whole pass', () => {
+      const goodId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+      resolveDecision(db, goodId, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+      db.prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('null-side-item-2', NULL, ?, 'KXAPRPOTUS-26AUG28-40.6', NULL, 'reported',
+            'up', 0.3, 10, 10, 100, 3, 1, 'row with no side', 'resolved')`
+      ).run(EVENT);
+
+      const open = findOpenUnsettledDecisions(db);
+      expect(open.map((row) => row.id)).toEqual([goodId]);
+    });
+  });
+
+  describe('market_blocks', () => {
+    it('isMarketBlocked is false for a market never blocked', () => {
+      expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(false);
+    });
+
+    it('blockMarket makes isMarketBlocked true, recording the reason and counts', () => {
+      blockMarket(db, 'KXAPRPOTUS-26AUG28-40.6', 'reconciliation divergence: expected 10, real 0', 10, 0);
+
+      expect(isMarketBlocked(db, 'KXAPRPOTUS-26AUG28-40.6')).toBe(true);
+      const row = db.prepare('SELECT reason, expected_contracts, real_contracts, cleared_at FROM market_blocks WHERE market_ticker = ?')
+        .get('KXAPRPOTUS-26AUG28-40.6') as { reason: string; expected_contracts: number; real_contracts: number; cleared_at: string | null };
+      expect(row.reason).toMatch(/expected 10, real 0/);
+      expect(row.expected_contracts).toBe(10);
+      expect(row.real_contracts).toBe(0);
+      expect(row.cleared_at).toBeNull();
+    });
+
+    it('a cleared block reports isMarketBlocked as false, but blocking the same ticker again reactivates it', () => {
+      blockMarket(db, 'T', 'first divergence', 5, 0);
+      db.prepare(`UPDATE market_blocks SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE market_ticker = 'T'`).run();
+      expect(isMarketBlocked(db, 'T')).toBe(false);
+
+      blockMarket(db, 'T', 'second divergence', 8, 2);
+
+      expect(isMarketBlocked(db, 'T')).toBe(true);
+      const row = db.prepare('SELECT reason, cleared_at FROM market_blocks WHERE market_ticker = ?').get('T') as {
+        reason: string; cleared_at: string | null;
+      };
+      expect(row.reason).toBe('second divergence');
+      expect(row.cleared_at).toBeNull();
+    });
+  });
+
+  describe('circuit breakers', () => {
+    it('isTradingHalted is false with no trips', () => {
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('tripBreaker halts trading, and clearAllTrips un-halts it', () => {
+      tripBreaker(db, 'failed-orders', 'test reason');
+      expect(isTradingHalted(db)).toBe(true);
+      const cleared = clearAllTrips(db);
+      expect(cleared).toBe(1);
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('does not insert a second trip row for the same signal while it is still open', () => {
+      tripBreaker(db, 'failed-orders', 'first reason');
+      tripBreaker(db, 'failed-orders', 'second reason');
+      const rows = db.prepare('SELECT * FROM circuit_breaker_trips').all();
+      expect(rows).toHaveLength(1);
+    });
+
+    it('trips a second, distinct signal independently while the first is still open', () => {
+      tripBreaker(db, 'failed-orders', 'reason A');
+      tripBreaker(db, 'divergences', 'reason B');
+      const rows = db.prepare('SELECT signal FROM circuit_breaker_trips ORDER BY signal').all();
+      expect(rows).toEqual([{ signal: 'divergences' }, { signal: 'failed-orders' }]);
+    });
+
+    it('clearAllTrips clears every currently-open row when multiple signals are tripped, and returns 0 when none are open', () => {
+      tripBreaker(db, 'failed-orders', 'reason A');
+      tripBreaker(db, 'divergences', 'reason B');
+      expect(clearAllTrips(db)).toBe(2);
+      expect(isTradingHalted(db)).toBe(false);
+      expect(clearAllTrips(db)).toBe(0);
+    });
+
+    it('recordKalshiError logs a row and trips kalshi-errors at exactly the threshold', () => {
+      for (let i = 0; i < CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD - 1; i++) {
+        recordKalshiError(db, 'getPositions', `error ${i}`);
+      }
+      expect(isTradingHalted(db)).toBe(false);
+      recordKalshiError(db, 'getPositions', 'the final straw');
+      expect(isTradingHalted(db)).toBe(true);
+      const trip = db.prepare('SELECT signal FROM circuit_breaker_trips').get() as { signal: string };
+      expect(trip.signal).toBe('kalshi-errors');
+    });
+
+    it('a kalshi_errors row outside the lookback window does not count toward the threshold', () => {
+      for (let i = 0; i < CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD; i++) {
+        recordKalshiError(db, 'getPositions', `error ${i}`);
+      }
+      clearAllTrips(db);
+      // Backdate every logged row well outside the 15-minute window.
+      db.prepare("UPDATE kalshi_errors SET occurred_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')").run();
+      recordKalshiError(db, 'getPositions', 'one fresh error');
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('checkFailedOrdersSignal trips failed-orders at exactly the threshold, counting only rejected/unknown/error', () => {
+      let coidSeq = 0;
+      const makeOrder = () => {
+        const decisionId = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+        return recordPendingOrder(db, {
+          decisionId, clientOrderId: `coid-${++coidSeq}`, marketTicker: 'TICK', side: 'yes',
+          requestedContracts: 10, positionBeforeContracts: 0,
+        });
+      };
+      const resolveWith = (orderId: number, status: 'unfilled' | 'rejected' | 'unknown') =>
+        resolveOrder(db, orderId, {
+          filledContracts: 0, avgFillPriceCents: null, status,
+          kalshiOrderId: null, kalshiOrderStatus: null, errorDetail: null,
+        });
+
+      // Two unfilled orders (normal outcome) never count, however many there are.
+      resolveWith(makeOrder(), 'unfilled');
+      checkFailedOrdersSignal(db, 'unfilled');
+      resolveWith(makeOrder(), 'unfilled');
+      checkFailedOrdersSignal(db, 'unfilled');
+      expect(isTradingHalted(db)).toBe(false);
+
+      // Now CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD real failures.
+      for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD - 1; i++) {
+        const id = makeOrder();
+        resolveWith(id, 'rejected');
+        checkFailedOrdersSignal(db, 'rejected');
+      }
+      expect(isTradingHalted(db)).toBe(false);
+      const lastId = makeOrder();
+      resolveWith(lastId, 'unknown');
+      checkFailedOrdersSignal(db, 'unknown');
+      expect(isTradingHalted(db)).toBe(true);
+    });
+
+    it('checkDivergencesSignal trips divergences at exactly the threshold, ignoring blocks outside the window', () => {
+      blockMarket(db, 'TICKER-A', 'reason A', 10, 5);
+      checkDivergencesSignal(db);
+      expect(isTradingHalted(db)).toBe(false);
+
+      blockMarket(db, 'TICKER-B', 'reason B', 8, 2);
+      checkDivergencesSignal(db);
+      expect(isTradingHalted(db)).toBe(true);
+    });
+
+    it('a market_blocks row outside the divergences window does not count', () => {
+      blockMarket(db, 'TICKER-A', 'reason A', 10, 5);
+      db.prepare("UPDATE market_blocks SET blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours') WHERE market_ticker = 'TICKER-A'").run();
+      blockMarket(db, 'TICKER-B', 'reason B', 8, 2);
+      checkDivergencesSignal(db);
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
+    it('a breaker check failure is caught and logged, never propagated', () => {
+      const brokenDb = { prepare: () => { throw new Error('simulated DB failure'); } } as unknown as Database.Database;
+      expect(() => checkFailedOrdersSignal(brokenDb, 'rejected')).not.toThrow();
+      expect(() => checkDivergencesSignal(brokenDb)).not.toThrow();
+      expect(() => recordKalshiError(brokenDb, 'getPositions', 'boom')).not.toThrow();
+    });
+  });
+});
+
+/**
+ * The `decisions` table exactly as slices 1-4 created it: every column `SCHEMA` in
+ * ledger.ts defines, MINUS `settled_at` (which slice 5 added). This is the real,
+ * pre-existing on-disk shape on any machine that ran this system before slice 5 --
+ * `CREATE TABLE IF NOT EXISTS` does nothing against it, so without a migration the
+ * new column never appears and every reconciliation pass throws forever.
+ */
+const PRE_SLICE_5_DECISIONS_SCHEMA = `
+CREATE TABLE decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  story_key TEXT,
+  event_ticker TEXT,
+  market_ticker TEXT,
+  side TEXT CHECK (side IN ('yes','no') OR side IS NULL),
+  rung TEXT NOT NULL CHECK (rung IN ('rumor','reported','corroborated','confirmed')),
+  direction TEXT CHECK (direction IN ('up','down') OR direction IS NULL),
+  magnitude_pts REAL,
+  contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
+  entry_price_cents INTEGER CHECK (entry_price_cents IS NULL OR (entry_price_cents > 0 AND entry_price_cents < 100)),
+  notional_cents INTEGER NOT NULL DEFAULT 0 CHECK (notional_cents >= 0 AND (would_trade = 0 OR notional_cents <= ${MAX_NOTIONAL_CENTS_PER_TRADE})),
+  edge_cents REAL,
+  would_trade INTEGER NOT NULL CHECK (would_trade IN (0,1)),
+  reason TEXT NOT NULL,
+  order_status TEXT NOT NULL DEFAULT 'resolved' CHECK (order_status IN ('pending','resolved')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  CHECK (would_trade = 0 OR (
+    entry_price_cents IS NOT NULL
+    AND event_ticker IS NOT NULL
+    AND notional_cents = contracts * entry_price_cents
+  ))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_item_id ON decisions(item_id);
+CREATE TRIGGER IF NOT EXISTS enforce_total_exposure
+BEFORE INSERT ON decisions
+WHEN NEW.would_trade = 1
+BEGIN
+  SELECT RAISE(ABORT, 'total exposure cap exceeded')
+  WHERE (SELECT COALESCE(SUM(notional_cents), 0) FROM decisions
+         WHERE would_trade = 1 AND event_ticker = NEW.event_ticker)
+        + NEW.notional_cents > ${MAX_TOTAL_EXPOSURE_CENTS};
+END;
+`;
+
+describe('openLedger migration of a pre-slice-5 decisions table', () => {
+  let dir: string;
+  let dbPath: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'ledger-migration-test-'));
+    dbPath = path.join(dir, 'decisions.db');
+    const legacy = new BetterSqlite3(dbPath);
+    legacy.exec(PRE_SLICE_5_DECISIONS_SCHEMA);
+    // A real would-trade position already on disk from before slice 5 -- it must
+    // survive the migration and show up as open-and-unsettled afterward.
+    legacy
+      .prepare(
+        `INSERT INTO decisions
+           (item_id, story_key, event_ticker, market_ticker, side, rung, direction,
+            magnitude_pts, contracts, entry_price_cents, notional_cents, edge_cents,
+            would_trade, reason, order_status)
+         VALUES ('legacy-item-1', 'story-legacy', '${EVENT}', 'KXAPRPOTUS-26AUG28-40.6',
+            'yes', 'reported', 'up', 0.3, 7, 12, 84, 3, 1, 'legacy would-trade row', 'resolved')`
+      )
+      .run();
+    legacy.close();
+    db = openLedger(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds the settled_at column to a decisions table that predates it', () => {
+    const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toContain('settled_at');
+  });
+
+  it('leaves a pre-existing would-trade row visible to findOpenUnsettledDecisions instead of throwing "no such column"', () => {
+    // Before the migration existed, this threw `no such column: settled_at` on every
+    // reconciliation pass, forever, while trading continued unguarded.
+    expect(() => findOpenUnsettledDecisions(db)).not.toThrow();
+    const open = findOpenUnsettledDecisions(db);
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({
+      marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
+      side: 'yes',
+      contracts: 7,
+    });
+  });
+
+  it('records and settles a NEW would-trade decision through the normal path on a migrated database', () => {
+    const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
+    resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved' }));
+
+    const open = findOpenUnsettledDecisions(db);
+    expect(open.map((row) => row.id)).toContain(id);
+
+    markDecisionSettled(db, id);
+
+    expect(findOpenUnsettledDecisions(db).map((row) => row.id)).not.toContain(id);
+    const row = db.prepare('SELECT settled_at FROM decisions WHERE id = ?').get(id) as {
+      settled_at: string | null;
+    };
+    expect(row.settled_at).not.toBeNull();
+  });
+
+  it('is idempotent: re-opening an already-migrated database does not fail or duplicate the column', () => {
+    db.close();
+    db = openLedger(dbPath);
+    const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
+    expect(columns.filter((c) => c.name === 'settled_at')).toHaveLength(1);
   });
 });

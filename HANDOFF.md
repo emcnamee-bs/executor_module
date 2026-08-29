@@ -302,6 +302,182 @@ Measured 2026-08-24, on `Internet_Info_Plug`'s `main` branch:
 
 ---
 
+## 5a. Operator runbook: going live with real money
+
+**Added 2026-08-28, with the Kalshi execution client (slice 4).** From the moment
+`KALSHI_DRY_RUN` is unset, this process places real orders with real money. Everything
+below is a pre-go-live gate, not a suggestion. Each checklist item exists because it
+**cannot be verified by an automated test** — every one of them needs live credentials
+and the real exchange, which the test suite deliberately never has.
+
+### 5a.1 Environment variables
+
+| Variable | Required? | What it does |
+|---|---|---|
+| `KALSHI_API_KEY_ID` | **Yes** | Kalshi API key id, used as the `KALSHI-ACCESS-KEY` header. `main()` fails loudly at startup naming it if absent. Never hardcoded, never defaulted (§2). |
+| `KALSHI_PRIVATE_KEY_PATH` | **Yes** | Path to the RSA private key PEM used for RSA-PSS request signing (canonically `~/.kalshi-spine/kalshi_key.pem`, mode 600). The file itself is never committed, logged, or printed. |
+| `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. |
+| `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
+| `ANTHROPIC_API_KEY` | **Yes** | The Haiku synopsis / Sonnet verify / Sonnet decide calls. |
+
+**What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
+issues an HTTP request at all — it returns a synthetic `DRYRUN-<client_order_id>` order
+locally. `placeOrder` then returns a *simulated* full fill flagged `dryRun: true`, and
+the pipeline records that simulation in the `decisions` table as a **skip**
+(`would_trade = 0`, contracts 0, notional 0, with a `[DRY_RUN simulated] …` reason). This
+matters: `decisions` is the table every exposure-cap and dedup query reads, so a dry run
+consumes none of the real $40 per-event cap and creates no phantom open position. The
+`orders` row still records the simulation for audit, unmistakably marked by the
+`DRYRUN-` prefix on `kalshi_order_id`.
+
+Note that `KALSHI_DRY_RUN` gates only the **order** path. The read-only Kalshi calls
+(`getPositions`, `getOrders`, `getBalance`, the ladder fetch) and all three model calls
+are made for real in dry-run mode, which is the point: it is a rehearsal of the whole
+pipeline, not an offline simulation.
+
+### 5a.2 Pre-go-live checklist
+
+Do these in order. Do not skip one because the suite is green — the suite proves things
+about the code, never about the exchange (§4, lesson 2).
+
+1. **Run `npm run smoke` first.** Read-only: `getBalance`, `getPositions`, and the
+   `getOrders` probe below. Nothing is ordered. This is the only end-to-end check that
+   the API key id, the PEM on disk, and the RSA-PSS signing all actually work together
+   against the live API — a signing bug is otherwise indistinguishable from a
+   credentials bug at 3am, and neither is reachable from a test that injects its own
+   `fetch`.
+2. **Confirm the `client_order_id` query filter really works.** `scripts/smoke.ts` calls
+   `getOrders({ client_order_id: <a made-up uuid> })` and prints the raw response.
+   *Why this is here:* the response FIELDS this branch reads
+   (`orders[].client_order_id`, `.ticker`) are confirmed from real production code in
+   `Fast99Follower`/`kalshi-spine`, but the **query parameter is not** — neither sibling
+   repo has ever called `getOrders` with that filter. Expect an empty `orders` list. If
+   Kalshi instead returns unrelated orders, it is ignoring the filter; reconciliation
+   still only counts an exact `client_order_id` match so it degrades to a broader scan
+   rather than a false positive, but you should know that before relying on it.
+3. **Confirm positions read back SIGNED, as `position` (not only `position_fp`).** In the
+   same smoke output, check that any NO holding shows as a **negative** `position`. All
+   fill detection is a signed position diff (a NO fill moves `position` down); if the live
+   API ever returned an unsigned magnitude instead, every NO fill would be recorded as
+   zero contracts and zero exposure. This is exactly the defect the final whole-branch
+   review caught in code — verify the premise it now rests on. Separately: `kalshi-spine`
+   and `Fast99Follower`'s own `normalize.js` both fall back to a fixed-point `position_fp`
+   field when `position` is absent — this branch deliberately does NOT implement that
+   fallback (no confirmed evidence it's what a live response actually sends), and instead
+   throws loudly if a matching position entry's `position` field is missing or
+   non-numeric. Confirm the live response really does carry a numeric `position` field
+   directly; if it doesn't, `positionForTicker` needs the `position_fp` fallback added
+   before this is safe to run unattended.
+4. **Place one real, small, deliberate order on EACH side — one YES and one NO — with
+   `KALSHI_DRY_RUN` unset.** Then inspect `data/decisions.db` by hand and confirm:
+   - the `orders` row has the right `side`, and `filled_contracts` matches what actually
+     executed — **especially for the NO order**, which is the case mocked tests can only
+     ever prove against a mock;
+   - the `decisions` row shows `would_trade = 1` with `notional_cents = contracts ×
+     entry_price_cents` for a real fill;
+   - the `getPositions` read taken immediately after placement already reflected the
+     fill. **`placeOrder` assumes Kalshi's portfolio-positions endpoint is
+     read-your-writes consistent with order execution on that timescale, and nothing
+     establishes that.** (`Fast99Follower`, this design's precedent, reads positions on a
+     *later* reconcile pass, not inline.) If the position read lags, a real fill lands as
+     `unfilled` until the next startup reconciliation catches it. Verify before trusting
+     it; if it lags, the fix is to move fill determination to a delayed reconcile pass.
+5. **Confirm whether `GET /portfolio/positions` really paginates, and with what default
+   page size.** `npm run smoke` now logs a raw, single-page, unmerged call
+   (`getPositionsRawPage()`) alongside the normal merged `getPositions()` call
+   specifically so this is checkable — the merged call alone drops `cursor` entirely and
+   can't show it. Check whether that raw response carries a `cursor` field and whether
+   `market_positions` on the merged log line is ever longer than on the raw one.
+   *Why this is here:* `getPositions()` follows `cursor` to completion and asks for
+   `limit=1000`, because a ticker that falls off an unfetched page reads back as absent
+   — and absent means position 0, which is indistinguishable from "really flat" and
+   fires a spurious permanent market block (or masks a real divergence). This also rides
+   on every live positions read, not just reconciliation's — including the pre-order
+   snapshot inside `placeOrder` — so if Kalshi rejects `limit=1000` outright, `npm run
+   smoke` fails loudly rather than this surfacing later as a live order failure. But the
+   pagination was built **without live API access**: the `cursor` field name and the
+   `limit` parameter are the documented/sibling-repo pattern (`kalshi-spine`'s
+   `getTrades`), not something confirmed against this endpoint, exactly as the
+   `finalized`/`settled` vocabulary was confirmed live before slice 5 relied on it. If
+   the real response names its paging token something else, the loop silently reads only
+   the first page again — verify before relying on it. Note also that the client now
+   throws rather than returning a truncated list if the cursor never terminates after 50
+   pages.
+6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
+   and restart before the first live item arrives, not after.
+
+### 5a.2a Automatic circuit breakers (added in slice 6)
+
+Three independent automatic triggers halt ALL new order placement, the same global
+effect as `EXECUTOR_TRADING_HALTED`, when recent history crosses a fixed threshold:
+
+- **Failed/ambiguous orders**: 3 orders resolving to `rejected`/`unknown`/`error`
+  within 30 minutes.
+- **Reconciliation divergences**: 2 distinct markets blocked by slice 5's
+  reconciliation within 60 minutes.
+- **Kalshi API errors**: 5 errors from any Kalshi API call (order placement,
+  position/status reads, market data) within 15 minutes.
+
+A trip is visible in the `circuit_breaker_trips` table and logged loudly as
+`[CIRCUIT-BREAKER-TRIPPED]`. It halts only NEW decisions (matching this system's
+entry-only scope) — nothing already in flight is affected, and slice 5's per-market
+`market_blocks` mechanism is completely independent of this.
+
+**Recovery is manual only** — there is no auto-expiry. Investigate the real cause
+(check `circuit_breaker_trips.reason`, and the underlying `orders`/`market_blocks`/
+`kalshi_errors` rows it references) before clearing. To clear:
+
+```
+direnv exec . npm run clear-breaker
+```
+
+This clears every currently-open trip, not just one — if more than one signal
+tripped, clearing is a statement that the whole situation is resolved, not just one
+signal among several. **Clearing the breaker does not fix whatever tripped it.** If
+the root cause is still live (Kalshi is still erroring, or a market blocked by
+slice 5's reconciliation is still genuinely diverged), the breaker can trip again
+shortly after clearing — treat a second trip shortly after a clear as evidence the
+cause was not actually resolved, not as a flapping breaker. Note specifically for
+divergences: a still-blocked market from BEFORE the clear does not by itself
+re-trip the signal (only a genuinely new block does), but it still counts toward
+the 60-minute window, so any single new divergence elsewhere completes the
+threshold sooner than the trip reason's raw count might suggest — read
+`market_blocks.blocked_at` alongside `circuit_breaker_trips.reason`, not the
+reason string alone.
+
+**Reading a `kalshi-errors` trip: 5 errors is often fewer than 5 incidents.**
+`placeOrder` retries a transient failure up to 3 times, and each attempt logs its
+own `kalshi_errors` row; an exhausted retry's follow-up `reconcileOrder` call can
+log a 4th. So a SINGLE order attempt during one Kalshi blip can produce most of the
+5-error threshold on its own, and the next unrelated API call (the next item's
+`getPositions`, or the reconciliation timer's `fetchMarketStatus`) completes the
+trip. This is deliberate — fail-closed is the right default when a real-money system
+hits unexplained API trouble — but it means an operator investigating a
+`kalshi-errors` trip should read the `kalshi_errors` rows' `call_site`/`occurred_at`
+and check whether it was one retry storm rather than assume five independent
+failures occurred.
+
+### 5a.3 Operational notes
+
+- **Startup reconciliation runs before the Redis consumer starts.**
+  `reconcilePendingOrders(db, kalshiClient)` resolves any order left `pending` by a crash,
+  determining the real outcome from Kalshi's own records, and then sweeps `decisions` rows
+  stuck at `order_status = 'pending'` that no `orders`-row scan could reach. Per-row
+  failures are logged (`[startup-reconcile] …`) and skipped, never fatal — one transient
+  exchange error must not become a boot loop. **A row that keeps appearing in those logs
+  across restarts needs a human**, because it is being retried identically every time.
+- **The ledger schema changed in this slice** (`orders` gained `side` and
+  `kalshi_order_status`). `openLedger` runs `CREATE TABLE IF NOT EXISTS`, which does NOT
+  add columns to a table that already exists in a pre-existing `data/decisions.db`. If
+  one exists from before this branch, migrate or recreate it before starting — a missing
+  `side` column will fail at the first order, loudly, which is the correct direction to
+  fail. The one exception is `decisions.settled_at` (added in slice 5): `openLedger`
+  explicitly ALTERs it in when absent, because that column's absence fails *silently*
+  (reconciliation throws on every pass while trading continues unguarded) rather than
+  loudly. Every other column drift still needs a manual migration.
+
+---
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.

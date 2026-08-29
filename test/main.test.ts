@@ -7,7 +7,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createRedisClient } from '../src/redis/client.js';
 import { runOnce, makeOnItem, type ItemOutcome } from '../src/main.js';
 import { compilePhrases } from '../src/keyphrases/match.js';
-import { openLedger } from '../src/decide/ledger.js';
+import { openLedger, recordPendingDecision, recordPendingOrder } from '../src/decide/ledger.js';
+import { reconcilePendingOrders } from '../src/execute/order.js';
+import * as orderModule from '../src/execute/order.js';
 import type { ActiveLadder } from '../src/decide/kalshi.js';
 import * as synopsisModule from '../src/decide/synopsis.js';
 import * as verifyModule from '../src/decide/verify.js';
@@ -419,6 +421,16 @@ describe('runOnce with keyphrase matching (end-to-end)', () => {
 });
 
 /**
+ * The pipeline reads a position snapshot directly (via kalshiClient.getPositions())
+ * before placeOrder is ever called -- same stub shape as
+ * `test/decide/pipeline.test.ts`'s `stubKalshiClient()`, duplicated rather than
+ * imported for the same reason `stubLadder()` above is.
+ */
+function stubKalshiClient(position = 0) {
+  return { getPositions: async () => ({ market_positions: [{ ticker: 'KXAPRPOTUS-26AUG28-40.6', position }] }) } as any;
+}
+
+/**
  * The one test that proves the WIRING, not the pieces. `test/decide/pipeline.test.ts`
  * calls `runDecisionPipeline` directly and the suite above drives `runOnce` with its
  * own callback, so before this existed, deleting the `runDecisionPipeline` call from
@@ -448,6 +460,20 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       shouldTrade: true,
       reasoning: 'stronger-than-expected jobs data typically lifts approval',
     });
+    // Default: a clean full fill at the sized price/contracts, matching
+    // `test/decide/pipeline.test.ts`'s own default -- this suite tests the WIRING
+    // (a real stream entry reaching a real ledger row), not execution specifics,
+    // which are already covered by the pipeline's own tests.
+    vi.spyOn(orderModule, 'placeOrder').mockImplementation(async (input) => ({
+      clientOrderId: 'default-mock-client-order-id',
+      kalshiOrderId: 'default-mock-kalshi-order-id',
+      kalshiOrderStatus: 'executed',
+      filledContracts: input.contracts,
+      avgFillPriceCents: input.entryPriceCents,
+      status: 'filled',
+      dryRun: false,
+      errorDetail: null,
+    }));
     // The real callback logs a summary line and a [KEYPHRASE-MATCH] line per item;
     // silenced so this test's output stays clean, not to suppress a failure.
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -473,6 +499,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       anthropicClient: new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' }),
       db,
       fetchLadder,
+      kalshiClient: stubKalshiClient(),
     });
 
     const controller = new AbortController();
@@ -487,7 +514,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       controller.signal
     );
 
-    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS');
+    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS', db);
 
     const rows = db
       .prepare(
@@ -524,6 +551,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       anthropicClient: new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' }),
       db,
       fetchLadder,
+      kalshiClient: stubKalshiClient(),
     });
 
     const controller = new AbortController();
@@ -540,5 +568,35 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
 
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM decisions`).get()).toEqual({ n: 0 });
+  });
+
+  /**
+   * This test exercises `reconcilePendingOrders` directly (already fully tested in
+   * Task 5) -- its purpose here is only to confirm this file's imports/fixtures line
+   * up with the real call, since `main()` itself wires the actual startup call and
+   * isn't independently re-tested (no test drives `main()` end-to-end; that would
+   * require a real Redis + Kalshi credentials).
+   */
+  it('startup reconciles an orphaned pending order before consuming any stream entries', async () => {
+    // Hand-insert a pending decision+order pair, simulating a prior crash.
+    const decisionId = recordPendingDecision(db, {
+      itemId: 'orphan-1', storyKey: null, eventTicker: 'KXAPRPOTUS-26AUG28', marketTicker: 'T',
+      side: 'yes', rung: 'reported', direction: 'up', magnitudePts: 0.3, contracts: 5,
+      entryPriceCents: 12, notionalCents: 60, edgeCents: 3, wouldTrade: true, reason: 'pre-crash', orderStatus: 'pending',
+    });
+    recordPendingOrder(db, { decisionId, clientOrderId: 'orphan-cid', marketTicker: 'T', side: 'yes', requestedContracts: 5, positionBeforeContracts: 0 });
+
+    const kalshiClient = {
+      getOrders: async () => ({ orders: [{ client_order_id: 'orphan-cid', ticker: 'T' }] }),
+      getPositions: async () => ({ market_positions: [{ ticker: 'T', position: 5 }] }),
+    } as any;
+
+    await reconcilePendingOrders(db, kalshiClient);
+
+    const resolved = db.prepare('SELECT would_trade, contracts FROM decisions WHERE item_id = ?').get('orphan-1') as {
+      would_trade: number; contracts: number;
+    };
+    expect(resolved.would_trade).toBe(1);
+    expect(resolved.contracts).toBe(5);
   });
 });

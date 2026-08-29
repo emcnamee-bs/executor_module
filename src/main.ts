@@ -8,6 +8,9 @@ import { loadKeyphrases, DEFAULT_KEYPHRASES_PATH } from './keyphrases/list.js';
 import { openLedger } from './decide/ledger.js';
 import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
+import { KalshiClient } from './execute/kalshiClient.js';
+import { reconcilePendingOrders } from './execute/order.js';
+import { startReconciliationTimer } from './execute/reconcileOpenPositions.js';
 import Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
 import path from 'node:path';
@@ -24,6 +27,15 @@ const DEFAULT_LEDGER_PATH = path.resolve(
 
 /** How much of an unparseable payload the error line carries before it is cut off. */
 const RAW_PREVIEW_LIMIT = 500;
+
+/** How often the periodic account-reconciliation pass runs, in milliseconds. */
+const RECONCILE_OPEN_POSITIONS_INTERVAL_MS = 10 * 60 * 1000;
+
+function mustGetEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} must be set (see .envrc)`);
+  return value;
+}
 
 /**
  * Renders a failed payload for a ONE-LINE log entry: newlines and other control
@@ -68,6 +80,7 @@ export interface OnItemDeps {
   anthropicClient: Anthropic;
   db: Database.Database;
   fetchLadder: typeof fetchActiveLadder;
+  kalshiClient: KalshiClient;
 }
 
 /**
@@ -116,6 +129,20 @@ export async function main(): Promise<void> {
   const anthropicClient = new Anthropic();
   const db = openLedger(DEFAULT_LEDGER_PATH);
 
+  const kalshiClient = new KalshiClient(
+    { apiKeyId: mustGetEnv('KALSHI_API_KEY_ID'), privateKeyPath: mustGetEnv('KALSHI_PRIVATE_KEY_PATH') },
+    { db }
+  );
+
+  console.log('[startup] reconciling any orphaned pending orders...');
+  await reconcilePendingOrders(db, kalshiClient);
+  console.log('[startup] reconciliation complete');
+
+  const reconciliationTimer = startReconciliationTimer(
+    { db, client: kalshiClient },
+    RECONCILE_OPEN_POSITIONS_INTERVAL_MS
+  );
+
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
@@ -124,10 +151,11 @@ export async function main(): Promise<void> {
     client,
     { streamKey: STREAM_KEY, groupName: GROUP_NAME, consumerName: CONSUMER_NAME },
     compiledPhrases,
-    makeOnItem({ anthropicClient, db, fetchLadder: fetchActiveLadder }),
+    makeOnItem({ anthropicClient, db, fetchLadder: fetchActiveLadder, kalshiClient }),
     controller.signal
   );
 
+  reconciliationTimer.stop();
   await client.quit();
   db.close();
 }
