@@ -462,6 +462,9 @@ describe('reconcileOpenPositions', () => {
 
     await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
     expect(alertSpy).toHaveBeenCalledTimes(1);
+    // The recovery command must be runnable exactly as pasted: clear-market-block.ts
+    // exits 1 without a ticker argument, and npm needs `--` to forward one.
+    expect(alertSpy.mock.calls[0][0]).toContain('npm run clear-block -- ALERT-A');
 
     // Second pass: still diverged, but already blocked -- must not alert again.
     await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
