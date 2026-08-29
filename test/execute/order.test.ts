@@ -683,9 +683,9 @@ describe('reconcilePendingOrders', () => {
     // processed regardless of isTradingHalted state. So once the threshold-th
     // failure trips the breaker, each ADDITIONAL failing order in the SAME pass
     // still reaches checkFailedOrdersSignal with a count that is itself >= threshold
-    // (re-crossing the condition individually) -- the before/after isTradingHalted
-    // guard around that call is the ONLY thing standing between that and a second
-    // (and third...) sendAlert call.
+    // (re-crossing the condition individually) -- tripBreaker's own per-signal
+    // `alreadyOpen` check (ledger.ts) is the ONLY thing standing between that and
+    // a second (and third...) sendAlert call.
     const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
     for (let i = 0; i < CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD + 2; i++) {
       pendingSetup({ clientOrderId: `cid-alert-extra-${i}` });

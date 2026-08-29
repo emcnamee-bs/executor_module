@@ -1,6 +1,7 @@
 // src/decide/ledger.ts
 import Database from 'better-sqlite3';
 import type { Rung } from './rung.js';
+import { sendAlert } from '../alert.js';
 
 export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
 export const MAX_TOTAL_EXPOSURE_CENTS = 4000;
@@ -485,6 +486,17 @@ export function tripBreaker(db: Database.Database, signal: CircuitBreakerSignal,
   if (alreadyOpen) return;
   db.prepare(`INSERT INTO circuit_breaker_trips (signal, reason) VALUES (?, ?)`).run(signal, reason);
   console.error(`[CIRCUIT-BREAKER-TRIPPED] signal=${signal} reason=${reason}`);
+  // Fire-and-forget, never awaited (matches every other sendAlert call site).
+  // This is the ONE place a breaker trip is genuinely new for THIS signal --
+  // `alreadyOpen` above is a per-signal check, not the global `isTradingHalted`
+  // a caller would otherwise have to sample before/after. Alerting here (not at
+  // each caller) is what makes kalshi-errors alert at all (no caller ever did)
+  // and fixes a real bug: under the old caller-side pattern, an already-open
+  // DIFFERENT signal made the global isTradingHalted already true, silently
+  // suppressing a genuinely new trip on this one.
+  sendAlert(
+    `[CIRCUIT-BREAKER-TRIPPED] signal=${signal} reason=${reason} -- run npm run clear-breaker after investigating.`
+  );
 }
 
 /**

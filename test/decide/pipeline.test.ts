@@ -252,7 +252,7 @@ describe('runDecisionPipeline', () => {
     expect(isTradingHalted(db)).toBe(true);
   });
 
-  it('alerts exactly once when the failed-orders breaker trips; a further already-tripped failure never even reaches the alerting guard', async () => {
+  it('alerts exactly once when the failed-orders breaker trips; a further already-tripped failure never even reaches checkFailedOrdersSignal again', async () => {
     const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
     vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
       clientOrderId: 'rejected-mock-client-order-id',
@@ -273,30 +273,27 @@ describe('runDecisionPipeline', () => {
     }
     expect(alertSpy).toHaveBeenCalledTimes(1); // tripped on the LAST of the threshold failures
 
-    // IMPORTANT, and the reason this test is worded the way it is: the next call
-    // does NOT exercise the new before/after `isTradingHalted` guard around
-    // `checkFailedOrdersSignal` a second time. That guard sits after the
-    // PRE-EXISTING, unrelated top-of-function gate
-    // `if (manualHalt || isTradingHalted(db)) { ...; return; }`, which already
-    // requires `isTradingHalted(db)` to be false to reach this far -- and the ONLY
-    // thing on this path that can flip it to true is `checkFailedOrdersSignal`
-    // itself, captured in `wasHaltedBeforeCheck` immediately before that same call.
-    // So by construction, every time execution reaches the new guard,
-    // `wasHaltedBeforeCheck` is false: the guard can never observe true->true at
-    // THIS call site, and cannot be exercised a second time via
-    // `runDecisionPipeline`. A second qualifying failure while already tripped is
-    // instead intercepted by that EARLIER, unrelated gate before it ever gets near
-    // `checkFailedOrdersSignal` or `sendAlert` -- proven directly below (a skip row
-    // with the kill-switch/breaker reason, and no synopsize call), rather than
-    // merely asserted by omission the way the previous version of this test did.
+    // The next call does not produce a second alert -- but the dedup that
+    // guarantees this now lives entirely in `tripBreaker` (ledger.ts)'s own
+    // per-signal `alreadyOpen` check, not in any before/after snapshot at this
+    // call site (a caller-side guard used to exist here and was removed: it
+    // caused a real bug, since a DIFFERENT already-open signal made the global
+    // `isTradingHalted` true before a genuinely new trip on THIS signal, and
+    // silently swallowed the alert for it -- see ledger.test.ts's
+    // 'alerts on a genuinely new trip for ANY signal...' test for that fix,
+    // proven directly against `tripBreaker`).
+    //
+    // Separately, and unrelated to alerting at all: this second call is also
+    // intercepted by the PRE-EXISTING top-of-function gate
+    // `if (manualHalt || isTradingHalted(db)) { ...; return; }`, so it never
+    // even reaches `checkFailedOrdersSignal` a second time -- proven directly
+    // below (a skip row with the breaker reason, and no synopsize call).
     vi.mocked(synopsisModule.synopsize).mockClear();
     const oneMore = baseItem({ item_id: 'item-alert-extra', dedup_id: 'dedup-alert-extra', story_key: 'story-alert-extra' });
     await runDecisionPipeline(oneMore, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
 
     expect(onlyRowFor(db, oneMore.item_id).reason).toBe('circuit breaker tripped');
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
-    // No new alert -- guaranteed by the top-of-function gate above, not by the new
-    // guard's own dedup (see the note above).
     expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
