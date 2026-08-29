@@ -434,10 +434,16 @@ direnv exec . npm run clear-breaker
 This clears every currently-open trip, not just one — if more than one signal
 tripped, clearing is a statement that the whole situation is resolved, not just one
 signal among several. **Clearing the breaker does not fix whatever tripped it.** If
-the root cause is still live (Kalshi is still erroring, a market is still genuinely
-diverged from a cause the reconciler keeps re-detecting as a new block), the breaker
-can trip again within minutes of clearing — treat a second trip shortly after a
-clear as evidence the cause was not actually resolved, not as a flapping breaker.
+the root cause is still live (Kalshi is still erroring, or a market blocked by
+slice 5's reconciliation is still genuinely diverged), the breaker can trip again
+shortly after clearing — treat a second trip shortly after a clear as evidence the
+cause was not actually resolved, not as a flapping breaker. Note specifically for
+divergences: a still-blocked market from BEFORE the clear does not by itself
+re-trip the signal (only a genuinely new block does), but it still counts toward
+the 60-minute window, so any single new divergence elsewhere completes the
+threshold sooner than the trip reason's raw count might suggest — read
+`market_blocks.blocked_at` alongside `circuit_breaker_trips.reason`, not the
+reason string alone.
 
 **Reading a `kalshi-errors` trip: 5 errors is often fewer than 5 incidents.**
 `placeOrder` retries a transient failure up to 3 times, and each attempt logs its
