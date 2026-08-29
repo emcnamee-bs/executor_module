@@ -945,4 +945,17 @@ describe('openLedger migration of a pre-slice-5 decisions table', () => {
     const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
     expect(columns.filter((c) => c.name === 'settled_at')).toHaveLength(1);
   });
+
+  it('the schema CHECK on realized_pnl_cents is genuinely enforced on a migrated table, not just at the application layer', () => {
+    // legacy-item-1 is would_trade=1 but was inserted before settled_at existed, so it
+    // migrates in as settled_at IS NULL -- not both would_trade=1 and settled. A direct
+    // UPDATE attempting to set realized_pnl_cents here must fail the CHECK, proving the
+    // migrated ALTER TABLE carries the same DB-level constraint as a freshly-created table.
+    const { id } = db.prepare("SELECT id FROM decisions WHERE item_id = 'legacy-item-1'").get() as {
+      id: number;
+    };
+    expect(() =>
+      db.prepare('UPDATE decisions SET realized_pnl_cents = 100 WHERE id = ?').run(id)
+    ).toThrow(/CHECK/);
+  });
 });

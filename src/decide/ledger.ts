@@ -205,17 +205,20 @@ function migrateDecisionsSettledAt(db: Database.Database): void {
  * correct for every pre-existing row, none of which has been settled through the
  * P&L-aware markDecisionSettled yet.
  *
- * Note this ALTER TABLE cannot carry the new cross-column CHECK constraint (SQLite
- * disallows a CHECK on an added column that references other columns) -- a migrated
- * table therefore enforces that invariant only at the application layer
- * (markDecisionSettled is the sole writer), same trade-off already accepted for the
- * settled_at column above.
+ * This ALTER TABLE also carries the same cross-column CHECK constraint as `SCHEMA`'s
+ * freshly-created table. That is safe here specifically because the new column backfills
+ * as NULL for every pre-existing row, and `realized_pnl_cents IS NULL OR (would_trade = 1
+ * AND settled_at IS NOT NULL)` is trivially satisfied by NULL regardless of what
+ * would_trade or settled_at already hold on those rows -- so a migrated table ends up
+ * with the exact same DB-level enforcement as a freshly-created one, not a weaker,
+ * application-layer-only version of it.
  */
 function migrateDecisionsRealizedPnlCents(db: Database.Database): void {
   const columns = db.prepare(`PRAGMA table_info(decisions)`).all() as Array<{ name: string }>;
   const hasRealizedPnlCents = columns.some((column) => column.name === 'realized_pnl_cents');
   if (!hasRealizedPnlCents) {
-    db.exec(`ALTER TABLE decisions ADD COLUMN realized_pnl_cents INTEGER`);
+    db.exec(`ALTER TABLE decisions ADD COLUMN realized_pnl_cents INTEGER
+      CHECK (realized_pnl_cents IS NULL OR (would_trade = 1 AND settled_at IS NOT NULL))`);
   }
 }
 
