@@ -3,12 +3,14 @@ import type Database from 'better-sqlite3';
 import type { KalshiClient } from './kalshiClient.js';
 import { positionForTicker } from './kalshiClient.js';
 import { fetchMarketStatus as realFetchMarketStatus } from '../decide/kalshi.js';
+import { sendAlert } from '../alert.js';
 import {
   findOpenUnsettledDecisions,
   findPendingOrders,
   markDecisionSettled,
   blockMarket,
   isMarketBlocked,
+  isTradingHalted,
   checkDivergencesSignal,
   type OpenUnsettledDecision,
 } from '../decide/ledger.js';
@@ -184,7 +186,19 @@ export async function reconcileOpenPositions(deps: ReconcileOpenPositionsDeps): 
           `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} decisionIds=${rows.map((r) => r.id).join(',')} ${reason}`
         );
         if (!wasAlreadyBlocked) {
+          sendAlert(
+            `[RECONCILE-DIVERGENCE] market_ticker=${marketTicker} ${reason}. ` +
+              `Run npm run clear-block after investigating.`
+          );
+          const wasHaltedBeforeCheck = isTradingHalted(db);
           checkDivergencesSignal(db);
+          if (!wasHaltedBeforeCheck && isTradingHalted(db)) {
+            sendAlert(
+              '[CIRCUIT-BREAKER-TRIPPED] signal=divergences (multiple distinct markets ' +
+                'diverged recently). Check circuit_breaker_trips.reason and run ' +
+                'npm run clear-breaker after investigating.'
+            );
+          }
         }
       }
     } catch (err) {
