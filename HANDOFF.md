@@ -406,6 +406,35 @@ about the code, never about the exchange (§4, lesson 2).
 6. **Start with the kill switch reachable.** Know how to set `EXECUTOR_TRADING_HALTED=true`
    and restart before the first live item arrives, not after.
 
+### 5a.2a Automatic circuit breakers (added in slice 6)
+
+Three independent automatic triggers halt ALL new order placement, the same global
+effect as `EXECUTOR_TRADING_HALTED`, when recent history crosses a fixed threshold:
+
+- **Failed/ambiguous orders**: 3 orders resolving to `rejected`/`unknown`/`error`
+  within 30 minutes.
+- **Reconciliation divergences**: 2 distinct markets blocked by slice 5's
+  reconciliation within 60 minutes.
+- **Kalshi API errors**: 5 errors from any Kalshi API call (order placement,
+  position/status reads, market data) within 15 minutes.
+
+A trip is visible in the `circuit_breaker_trips` table and logged loudly as
+`[CIRCUIT-BREAKER-TRIPPED]`. It halts only NEW decisions (matching this system's
+entry-only scope) — nothing already in flight is affected, and slice 5's per-market
+`market_blocks` mechanism is completely independent of this.
+
+**Recovery is manual only** — there is no auto-expiry. Investigate the real cause
+(check `circuit_breaker_trips.reason`, and the underlying `orders`/`market_blocks`/
+`kalshi_errors` rows it references) before clearing. To clear:
+
+```
+direnv exec . npm run clear-breaker
+```
+
+This clears every currently-open trip, not just one — if more than one signal
+tripped, clearing is a statement that the whole situation is resolved, not just one
+signal among several.
+
 ### 5a.3 Operational notes
 
 - **Startup reconciliation runs before the Redis consumer starts.**
