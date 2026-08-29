@@ -326,6 +326,9 @@ export function totalExposureCents(db: Database.Database, eventTicker: string): 
  * MAX_TOTAL_EXPOSURE_CENTS, which only caps how much is ever at risk.
  */
 export function recentTradeCount(db: Database.Database, windowMinutes: number): number {
+  if (!Number.isInteger(windowMinutes) || windowMinutes <= 0) {
+    throw new Error(`recentTradeCount: windowMinutes must be a positive integer, got ${windowMinutes}`);
+  }
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM decisions

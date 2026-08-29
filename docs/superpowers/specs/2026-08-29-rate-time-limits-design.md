@@ -37,20 +37,41 @@ can react.
    sign anything is broken; it is the system correctly pacing itself. The
    decision resolves as `would_trade: false` with a clear reason, exactly
    like every other skip already recorded in this pipeline (no edge, exposure
-   cap, market blocked). No manual clear script, no global halt — a burst of
-   genuinely good signals simply spreads out over time rather than being
-   treated as an anomaly requiring human intervention before ANY further
-   trading resumes.
+   cap, market blocked). No manual clear script, no global halt — but a burst
+   of genuinely good signals is NOT queued or deferred either: every signal
+   past the first real trade in a window is declined outright, as a
+   permanent resolved skip row, and is never replayed. If the underlying
+   story keeps producing genuinely NEW signals after the window rolls past,
+   those trade normally — but nothing here spreads out or catches up on what
+   was already declined.
 
 3. **Single check, not the exposure cap's dual before/after pattern.** The
-   exposure cap is checked twice (once at sizing time, once again
-   immediately before the live order call) specifically because two
-   *concurrent* decisions could otherwise both pass the first check before
-   either commits — a real race. This system processes exactly one Redis
-   stream entry at a time, sequentially (confirmed by this codebase's own
-   consumer-loop design); there is no concurrent second decision that could
-   slip past a single rate-limit check between here and the live call. One
-   check is sufficient, and adds no risk a second recheck would close.
+   exposure cap's second check (immediately before the live order call) is
+   redundancy against a wiring/caller bug — `order.ts`'s own comment
+   describes it as "redundant with evaluateSizing's own check moments
+   earlier," matching this project's established defense-in-depth pattern —
+   not a guard against two concurrent decisions racing past the first check.
+   The race that actually matters for the exposure cap is closed at the DB
+   layer, by the `enforce_total_exposure_on_resolve` trigger, which SQLite
+   evaluates inside the write regardless of who raced to get there.
+
+   This system processes exactly one Redis stream entry at a time,
+   sequentially, awaiting the full pipeline — including any model calls —
+   before accepting the next entry (confirmed by this codebase's own
+   consumer-loop design), so within one process no second decision can ever
+   be in flight to slip past a single rate-limit check between here and the
+   live call. One check is sufficient IN THAT PROCESS, and adds no risk a
+   second recheck would close.
+
+   This reasoning rests on an unstated premise worth naming explicitly: it
+   holds only for a single consumer process sharing this ledger.
+   `EXECMOD_CONSUMER_NAME` exists precisely because a second consumer is at
+   least contemplated, and unlike the exposure cap, this limit has no
+   DB-level trigger closing a cross-process race — two processes reading the
+   same ledger could each see count 0 and each place a real trade in the
+   same window. Not a defect in today's single-instance deployment, but a
+   premise to revisit before ever running two consumers against one
+   `decisions.db`.
 
 4. **Checked EARLY, before any model call — not colocated with sizing.**
    Unlike `hasOpenPosition` (which needs the active ladder's `eventTicker`
@@ -70,9 +91,13 @@ can react.
    trades ever reaching full exposure for one event — this limit's real job
    is slowing the *pace* of getting there, not adding a second, redundant
    count cap. At 1-per-15-minutes, a burst of 3-4 correlated signals firing
-   within a couple of minutes of each other now takes at least 45 minutes to
-   fully deploy the exposure budget instead of happening almost instantly,
-   without blocking a single well-spaced legitimate trade. Scoped globally
+   within a couple of minutes of each other trades only its first signal;
+   the rest are declined outright as soon as they're seen, not deferred —
+   whatever fraction of the exposure budget they would have spent is simply
+   never deployed unless the underlying story keeps producing genuinely NEW
+   signals after the window rolls past. A real burst therefore deploys AT
+   MOST 1 trade per 15 minutes of the exposure budget, not "the same signals
+   eventually all trade 45 minutes apart." Scoped globally
    (across all events/markets), not per-event like the exposure cap: pacing
    is a behavioral question ("is the system firing off trades too fast right
    now?") independent of which event a trade happens to be on, and this

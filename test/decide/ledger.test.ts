@@ -896,6 +896,13 @@ describe('ledger', () => {
       expect(recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES)).toBe(0);
     });
 
+    it('throws on a non-positive or non-integer windowMinutes instead of silently returning 0', () => {
+      expect(() => recentTradeCount(db, 0)).toThrow();
+      expect(() => recentTradeCount(db, -5)).toThrow();
+      expect(() => recentTradeCount(db, 1.5)).toThrow();
+      expect(() => recentTradeCount(db, NaN)).toThrow();
+    });
+
     it('MAX_TRADES_PER_WINDOW and RATE_LIMIT_WINDOW_MINUTES are exactly 1 and 15', () => {
       expect(MAX_TRADES_PER_WINDOW).toBe(1);
       expect(RATE_LIMIT_WINDOW_MINUTES).toBe(15);
