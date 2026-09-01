@@ -347,28 +347,29 @@ about the code, never about the exchange (§4, lesson 2).
    against the live API — a signing bug is otherwise indistinguishable from a
    credentials bug at 3am, and neither is reachable from a test that injects its own
    `fetch`.
-2. **Confirm the `client_order_id` query filter really works.** `scripts/smoke.ts` calls
-   `getOrders({ client_order_id: <a made-up uuid> })` and prints the raw response.
-   *Why this is here:* the response FIELDS this branch reads
-   (`orders[].client_order_id`, `.ticker`) are confirmed from real production code in
-   `Fast99Follower`/`kalshi-spine`, but the **query parameter is not** — neither sibling
-   repo has ever called `getOrders` with that filter. Expect an empty `orders` list. If
-   Kalshi instead returns unrelated orders, it is ignoring the filter; reconciliation
-   still only counts an exact `client_order_id` match so it degrades to a broader scan
-   rather than a false positive, but you should know that before relying on it.
-3. **Confirm positions read back SIGNED, as `position` (not only `position_fp`).** In the
-   same smoke output, check that any NO holding shows as a **negative** `position`. All
-   fill detection is a signed position diff (a NO fill moves `position` down); if the live
-   API ever returned an unsigned magnitude instead, every NO fill would be recorded as
-   zero contracts and zero exposure. This is exactly the defect the final whole-branch
-   review caught in code — verify the premise it now rests on. Separately: `kalshi-spine`
-   and `Fast99Follower`'s own `normalize.js` both fall back to a fixed-point `position_fp`
-   field when `position` is absent — this branch deliberately does NOT implement that
-   fallback (no confirmed evidence it's what a live response actually sends), and instead
-   throws loudly if a matching position entry's `position` field is missing or
-   non-numeric. Confirm the live response really does carry a numeric `position` field
-   directly; if it doesn't, `positionForTicker` needs the `position_fp` fallback added
-   before this is safe to run unattended.
+2. **Confirmed live 2026-09-01 (mini-mac smoke test): the `client_order_id` query
+   filter is IGNORED.** `scripts/smoke.ts` calls `getOrders({ client_order_id: <a
+   made-up uuid> })` — the response returned the account's full, unfiltered order
+   history rather than an empty list. The response FIELDS this branch reads
+   (`orders[].client_order_id`, `.ticker`) are still confirmed correct from real
+   production code in `Fast99Follower`/`kalshi-spine`; only the query parameter
+   itself doesn't do anything server-side. Not a blocker: reconciliation only ever
+   counts an exact `client_order_id` match within whatever list comes back, so this
+   degrades to a broader in-memory scan rather than a false positive — just don't
+   assume the server did any filtering for you.
+3. **Confirmed live 2026-09-01 (mini-mac deployment smoke test): the real API sends
+   ONLY `position_fp`, never a bare `position` field, on every real position entry.**
+   `positionForTicker` now falls back to `position_fp` (parsed the same way
+   `kalshi-spine`'s/`Fast99Follower`'s own `normalize.js` already does: `Number(v)`,
+   no scaling), preferring `position` when present for forward-compatibility. Before
+   this fix, any account with an existing `KXAPRPOTUS` position would have thrown on
+   every position check after the first real fill — dry-run mode never caught this
+   because it never exercises a ticker with an existing entry. Still confirm any NO
+   holding shows as **negative**, whichever field it arrives on — fill detection is a
+   signed position diff, and an unsigned magnitude would record every NO fill as zero
+   contracts and zero exposure. Separately, `positionForTicker` still throws loudly if
+   a matching position entry has neither a numeric `position` nor a parseable
+   `position_fp` — a malformed response is never silently treated as a zero position.
 4. **Place one real, small, deliberate order on EACH side — one YES and one NO — with
    `KALSHI_DRY_RUN` unset.** Then inspect `data/decisions.db` by hand and confirm:
    - the `orders` row has the right `side`, and `filled_contracts` matches what actually

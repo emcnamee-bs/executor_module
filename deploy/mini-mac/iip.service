@@ -1,0 +1,70 @@
+[Unit]
+# A second, independent instance of Internet_Info_Plug's news daemon, run here on
+# mini-mac solely to feed executor_module's own local Redis. This is NOT the ai1
+# instance relocated or bridged -- it is a fresh, unmodified clone of that repo,
+# started fresh with its own archive and its own 28-day silence-detection baseline.
+# ai1 keeps running its own separate instance for its own separate observation run;
+# the two never share state, a network path, or a Redis instance.
+#
+# This unit file lives in executor_module's repo, not Internet_Info_Plug's -- keeping
+# that repo a pure, untouched clone (this project's standing rule: read-only upstream
+# dependency, never modified to build this one).
+#
+# A systemd USER unit, installed under ~/.config/systemd/user/, matching iip's own
+# ai1 deployment pattern for the same reason: the daemon owns only its own files and
+# needs no elevated capability to run.
+Description=Internet Info Plug -- news ingestion daemon (mini-mac instance, feeds executor_module)
+Documentation=file:%h/Internet_Info_Plug/HANDOFF.md
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+# Same restart-storm circuit breaker as ai1's own unit: 30 restarts in an hour trips
+# the unit into `failed` and keeps it visibly failed, rather than looping quietly.
+StartLimitIntervalSec=3600
+StartLimitBurst=30
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Internet_Info_Plug
+
+# REDIS_URL (with its embedded password -- mini-mac's Redis has requirepass set)
+# lives ONLY in %h/Internet_Info_Plug/.env -- .env.* is already gitignored in that
+# repo -- and is never written to any tracked file. systemd expands ${REDIS_URL}
+# into ExecStart's argv from this EnvironmentFile; iip's own --redis-url CLI flag
+# and its default are unchanged, so this needed no code change in that repo.
+EnvironmentFile=%h/Internet_Info_Plug/.env
+
+# --log-level INFO, stated explicitly rather than left to the default, matching
+# ai1's own unit: DEBUG is FORBIDDEN here, Telethon logs authentication material
+# at that level.
+ExecStart=%h/Internet_Info_Plug/.venv/bin/python -m iip run --log-level INFO --redis-url ${REDIS_URL}
+
+# A verified backup before every start, including every automatic restart -- same
+# rationale as ai1's own unit: cheap, and the archive is never more than one crash
+# old. `-` prefix: a failed backup must not stop the daemon from running.
+ExecStartPre=-%h/Internet_Info_Plug/.venv/bin/python %h/Internet_Info_Plug/deploy/backup_archive.py
+
+Restart=always
+RestartSec=10
+
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iip-mini-mac
+
+# Hardening, matching ai1's own unit -- the daemon reads config, writes its archive,
+# and makes outbound HTTP requests; it has no reason to touch anything else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Internet_Info_Plug/data %h/Internet_Info_Plug/logs
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target

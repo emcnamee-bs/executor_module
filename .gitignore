@@ -17,3 +17,4 @@ node_modules/
 
 # Runtime state — generated, not source. See task-3 brief.
 data/decisions.db*
+.claude/settings.local.json

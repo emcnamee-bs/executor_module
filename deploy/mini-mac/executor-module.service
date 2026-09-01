@@ -1,0 +1,63 @@
+[Unit]
+# The live executor: news scan -> keyphrase match -> Haiku synopsis -> Sonnet verify
+# -> Sonnet decide -> real order execution against Kalshi, for market KXAPRPOTUS.
+# Consumes the local `iip:items` Redis stream fed by this box's own iip.service
+# instance (deploy/mini-mac/iip.service) -- both run on mini-mac, nothing here talks
+# to any other host.
+#
+# A systemd USER unit, matching iip.service's own reasoning: the process owns only
+# its own files and needs no elevated capability to run.
+Description=executor_module -- Kalshi KXAPRPOTUS trading pipeline
+Documentation=file:%h/executor_module/HANDOFF.md
+After=network-online.target redis-server.service iip.service
+Wants=network-online.target
+
+# Same restart-storm circuit breaker as iip.service: 30 restarts in an hour trips the
+# unit into `failed` and keeps it visibly failed rather than looping quietly on a
+# real-money system.
+StartLimitIntervalSec=3600
+StartLimitBurst=30
+
+[Service]
+Type=simple
+WorkingDirectory=%h/executor_module
+
+# Every secret this process needs (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH,
+# ANTHROPIC_API_KEY, SLACK_WEBHOOK_URL, REDIS_URL, KALSHI_DRY_RUN) lives ONLY in
+# %h/executor_module/.env -- .env* is already gitignored in this repo -- and is
+# never written to this tracked unit file. main.ts itself fails loudly at startup
+# naming any required variable that's absent (HANDOFF.md Sec 5a.1), so a missing
+# .env fails the same way a missing variable already does, not silently.
+EnvironmentFile=%h/executor_module/.env
+
+ExecStart=%h/executor_module/node_modules/.bin/tsx %h/executor_module/src/main.ts
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=executor-module
+
+# Hardening, matching iip.service's own pattern -- this process reads its own repo,
+# writes its own SQLite ledger, and makes outbound HTTPS calls (Anthropic, Kalshi,
+# Redis over localhost, Slack); it has no reason to touch anything else.
+#
+# MemoryDenyWriteExecute is deliberately OMITTED here, unlike iip.service: verified
+# empirically (2026-09-01) that Node's V8 JIT needs W^X page transitions this
+# directive's seccomp filter kills outright -- the process core-dumped on every
+# start (signal=TRAP) until this was removed. iip.service is a pure Python process
+# and doesn't hit this; a JIT'd runtime does.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/executor_module/data %h/executor_module/logs
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
