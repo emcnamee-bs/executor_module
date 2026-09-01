@@ -3,7 +3,7 @@ import { generateKeyPairSync, verify as cryptoVerify, constants as cryptoConstan
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { KalshiClient, positionForTicker, KalshiRequestError } from '../../src/execute/kalshiClient.js';
+import { KalshiClient, positionForTicker, KalshiRequestError, type MarketPosition } from '../../src/execute/kalshiClient.js';
 import { openLedger, isTradingHalted, CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD } from '../../src/decide/ledger.js';
 import * as alertModule from '../../src/alert.js';
 
@@ -168,7 +168,7 @@ describe('positionForTicker', () => {
 
   // --- I6: a malformed entry is not a zero position ----------------------------
 
-  it('throws rather than fabricating a 0 when a MATCHING entry has a non-numeric position', () => {
+  it('throws rather than fabricating a 0 when a MATCHING entry has a non-numeric position and no position_fp fallback', () => {
     // Distinct from "no entry for this ticker", which legitimately means zero. A
     // fabricated zero here feeds straight into fill detection and the exposure
     // ledger -- exactly the "says something it never checked" failure mode.
@@ -176,8 +176,36 @@ describe('positionForTicker', () => {
     expect(() => positionForTicker(resp, 'A')).toThrow(/non-numeric position for A/);
   });
 
-  it('throws when a matching entry\'s position is missing entirely from the response shape', () => {
+  it('throws when a matching entry has neither position nor position_fp', () => {
     const resp = { market_positions: [{ ticker: 'A' } as unknown as { ticker: string; position: number }] };
+    expect(() => positionForTicker(resp, 'A')).toThrow(/non-numeric position for A/);
+  });
+
+  // --- I9: confirmed live -- the real API sends ONLY position_fp, never position ---
+
+  it('falls back to position_fp, preserving sign, when position is absent', () => {
+    // Confirmed against the live Kalshi API on 2026-09-01 (mini-mac deployment
+    // smoke test): every real position entry in a real account carried only
+    // position_fp, never a bare `position` field -- the exact scenario this
+    // codebase's own comment anticipated but had never verified.
+    const resp = { market_positions: [{ ticker: 'A', position_fp: '142.12' } as unknown as MarketPosition] };
+    expect(positionForTicker(resp, 'A')).toBeCloseTo(142.12);
+  });
+
+  it('falls back to position_fp for a NO holding, preserving the negative sign', () => {
+    const resp = { market_positions: [{ ticker: 'A', position_fp: '-70.92' } as unknown as MarketPosition] };
+    expect(positionForTicker(resp, 'A')).toBeCloseTo(-70.92);
+  });
+
+  it('prefers position over position_fp when both are present', () => {
+    const resp = {
+      market_positions: [{ ticker: 'A', position: 5, position_fp: '999.99' } as unknown as MarketPosition],
+    };
+    expect(positionForTicker(resp, 'A')).toBe(5);
+  });
+
+  it('throws rather than fabricating a 0 when position_fp is present but not a numeric string', () => {
+    const resp = { market_positions: [{ ticker: 'A', position_fp: 'not-a-number' } as unknown as MarketPosition] };
     expect(() => positionForTicker(resp, 'A')).toThrow(/non-numeric position for A/);
   });
 });
