@@ -50,7 +50,18 @@ export interface GetOrdersResponse {
 
 export interface MarketPosition {
   ticker: string;
-  position: number;
+  /**
+   * Confirmed live on 2026-09-01 (mini-mac deployment smoke test): the real
+   * Kalshi API sends ONLY `position_fp` on every real account position entry --
+   * never this field. Kept as an optional fallback source for a future/other
+   * account or endpoint version that might still send it.
+   */
+  position?: number;
+  /** Fixed-point decimal string form of `position`, e.g. "142.12" or "-70.92".
+   * Confirmed against kalshi-spine's and Fast99Follower's identical
+   * normalize.js as the field the live API actually sends. Signed the same way
+   * as `position` (positive = YES, negative = NO). */
+  position_fp?: string;
 }
 
 export interface GetPositionsResponse {
@@ -266,7 +277,7 @@ export class KalshiClient {
 }
 
 /**
- * Kalshi's `position` is SIGNED: positive = a YES holding, negative = a NO holding
+ * Kalshi's position is SIGNED: positive = a YES holding, negative = a NO holding
  * (confirmed against kalshi-spine's and Fast99Follower's identical
  * `normalize.js`: `count = Math.abs(pos); side = pos > 0 ? 'yes' : 'no'`). The sign
  * is preserved here verbatim -- `signedFillDelta` in order.ts is the single place
@@ -274,19 +285,29 @@ export class KalshiClient {
  *
  * No entry for the ticker legitimately means zero (this codebase's established
  * "absence means zero" convention, matching src/decide/kalshi.ts's 0.0000-price
- * handling). But an entry that EXISTS with a non-numeric `position` is a malformed
- * response, not a zero position: fabricating a zero there would feed straight into
- * fill detection and the exposure ledger. Fail loudly instead. No fallback field
- * (e.g. `position_fp`) is guessed at -- this codebase deliberately does not build on
- * unverified field names.
+ * handling). But an entry that EXISTS with neither a numeric `position` nor a
+ * parseable `position_fp` is a malformed response, not a zero position:
+ * fabricating a zero there would feed straight into fill detection and the
+ * exposure ledger. Fail loudly instead.
+ *
+ * `position_fp` is not a guess: confirmed live on 2026-09-01 against a real
+ * account (mini-mac deployment smoke test) that the real API sends ONLY this
+ * field, never a bare `position` -- matching kalshi-spine's and Fast99Follower's
+ * own normalize.js, which already fall back to it the same way (`fp(v) =>
+ * Number(v)`, no scaling). `position` is checked first and preferred when
+ * present, in case some other account or endpoint version still sends it.
  */
 export function positionForTicker(resp: GetPositionsResponse, ticker: string): number {
   const entry = resp.market_positions.find((p) => p.ticker === ticker);
   if (entry === undefined) return 0;
-  if (!Number.isFinite(entry.position)) {
-    throw new Error(
-      `Kalshi returned a non-numeric position for ${ticker}: ${JSON.stringify(entry)}`
-    );
+  if (Number.isFinite(entry.position)) {
+    return entry.position as number;
   }
-  return entry.position;
+  const fromFp = Number(entry.position_fp);
+  if (entry.position_fp !== undefined && Number.isFinite(fromFp)) {
+    return fromFp;
+  }
+  throw new Error(
+    `Kalshi returned a non-numeric position for ${ticker}: ${JSON.stringify(entry)}`
+  );
 }
