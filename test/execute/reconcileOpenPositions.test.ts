@@ -129,7 +129,7 @@ describe('reconcileOpenPositions', () => {
   });
 
   it('computes a WIN payout for a NO-side decision when result matches side', async () => {
-    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 30 });
+    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 3 });
     const client = mockClient({});
 
     await reconcileOpenPositions({
@@ -139,11 +139,11 @@ describe('reconcileOpenPositions', () => {
 
     const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
       { realized_pnl_cents: number | null };
-    expect(row.realized_pnl_cents).toBe(700); // payout 10*100=1000, cost 10*30=300, pnl=700
+    expect(row.realized_pnl_cents).toBe(970); // payout 10*100=1000, cost 10*3=30, pnl=970
   });
 
   it('computes a LOSS for a NO-side decision when result does not match side', async () => {
-    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 30 });
+    const id = recordOpenDecision(db, { side: 'no', contracts: 10, entryPriceCents: 3 });
     const client = mockClient({});
 
     await reconcileOpenPositions({
@@ -153,12 +153,12 @@ describe('reconcileOpenPositions', () => {
 
     const row = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(id) as
       { realized_pnl_cents: number | null };
-    expect(row.realized_pnl_cents).toBe(-300); // payout 0, cost 10*30=300, pnl=-300
+    expect(row.realized_pnl_cents).toBe(-30); // payout 0, cost 10*3=30, pnl=-30
   });
 
   it('computes each row in a multi-row-per-ticker group independently, not a shared or averaged value', async () => {
     const idA = recordOpenDecision(db, { marketTicker: 'L', side: 'yes', contracts: 10, entryPriceCents: 12 });
-    const idB = recordOpenDecision(db, { marketTicker: 'L', side: 'no', contracts: 5, entryPriceCents: 40 });
+    const idB = recordOpenDecision(db, { marketTicker: 'L', side: 'no', contracts: 5, entryPriceCents: 8 });
     const client = mockClient({});
 
     await reconcileOpenPositions({
@@ -169,7 +169,7 @@ describe('reconcileOpenPositions', () => {
     const rowA = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(idA) as { realized_pnl_cents: number | null };
     const rowB = db.prepare('SELECT realized_pnl_cents FROM decisions WHERE id = ?').get(idB) as { realized_pnl_cents: number | null };
     expect(rowA.realized_pnl_cents).toBe(880); // YES side, result=yes: win. payout 1000, cost 120, pnl=880
-    expect(rowB.realized_pnl_cents).toBe(-200); // NO side, result=yes: loss. payout 0, cost 5*40=200, pnl=-200
+    expect(rowB.realized_pnl_cents).toBe(-40); // NO side, result=yes: loss. payout 0, cost 5*8=40, pnl=-40
   });
 
   it('throws and leaves the row unsettled when a finalized market has an unrecognized result value, then settles normally once corrected', async () => {
@@ -178,7 +178,7 @@ describe('reconcileOpenPositions', () => {
     // has to hold at the real call site, not merely be inferred from a different
     // isolation test for a different failure mode. If the throw escaped its group,
     // this decision would go unsettled too.
-    const healthyId = recordOpenDecision(db, { marketTicker: 'HEALTHY', side: 'no', contracts: 5, entryPriceCents: 30 });
+    const healthyId = recordOpenDecision(db, { marketTicker: 'HEALTHY', side: 'no', contracts: 5, entryPriceCents: 6 });
     const client = mockClient({});
 
     // First pass: a malformed result. Must not settle, must not crash the whole
@@ -195,11 +195,11 @@ describe('reconcileOpenPositions', () => {
     expect(stillOpen.settled_at).toBeNull();
     expect(stillOpen.realized_pnl_cents).toBeNull();
     // The healthy ticker settled normally IN THAT SAME PASS, with its own correct
-    // P&L: NO side, result=no -- payout 5*100=500, cost 5*30=150, pnl=350.
+    // P&L: NO side, result=no -- payout 5*100=500, cost 5*6=30, pnl=470.
     const healthy = db.prepare('SELECT settled_at, realized_pnl_cents FROM decisions WHERE id = ?').get(healthyId) as
       { settled_at: string | null; realized_pnl_cents: number | null };
     expect(healthy.settled_at).not.toBeNull();
-    expect(healthy.realized_pnl_cents).toBe(350);
+    expect(healthy.realized_pnl_cents).toBe(470);
     // Only the anomalous ticker is left open.
     expect(findOpenUnsettledDecisions(db).map((row) => row.id)).toEqual([id]);
 
@@ -323,7 +323,7 @@ describe('reconcileOpenPositions', () => {
   });
 
   it('detects a genuine NO-side divergence using the signed expected count (negative), not an unsigned magnitude', async () => {
-    recordOpenDecision(db, { marketTicker: 'C', side: 'no', contracts: 40 });
+    recordOpenDecision(db, { marketTicker: 'C', side: 'no', contracts: 40, entryPriceCents: 1 });
     // Real position is +5 (a YES holding somehow), but a NO position of -40 was
     // expected -- proves the comparison is signed, not Math.abs-equivalent.
     const client = mockClient({ C: 5 });
@@ -339,7 +339,7 @@ describe('reconcileOpenPositions', () => {
   });
 
   it('a matching NO-side position (negative, correct magnitude) is not a divergence', async () => {
-    recordOpenDecision(db, { marketTicker: 'D', side: 'no', contracts: 40 });
+    recordOpenDecision(db, { marketTicker: 'D', side: 'no', contracts: 40, entryPriceCents: 1 });
     const client = mockClient({ D: -40 });
 
     await reconcileOpenPositions({ db, client, fetchMarketStatus: mockFetchMarketStatus({}) });
@@ -359,7 +359,7 @@ describe('reconcileOpenPositions', () => {
 
   it('isolates a per-row failure: one row failing fetchMarketStatus does not stop the others in the same pass', async () => {
     recordOpenDecision(db, { marketTicker: 'F', side: 'yes', contracts: 10 });
-    recordOpenDecision(db, { marketTicker: 'G', side: 'yes', contracts: 20 });
+    recordOpenDecision(db, { marketTicker: 'G', side: 'yes', contracts: 20, entryPriceCents: 1 });
     const client = mockClient({ F: 10, G: 0 }); // G is a genuine divergence
     const flaky = async (ticker: string) => {
       if (ticker === 'F') throw new Error('Kalshi 500 for F');

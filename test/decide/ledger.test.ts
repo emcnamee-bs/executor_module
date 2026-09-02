@@ -128,10 +128,10 @@ describe('ledger', () => {
     expect(() => recordDecision(db, tradeRecord())).not.toThrow();
   });
 
-  it('rejects a would-trade decision over the $10 per-trade cap at the database layer', () => {
-    // 1001 contracts at 1c: internally consistent, so the construction-time notional
+  it('rejects a would-trade decision over the $1.25 per-trade cap at the database layer', () => {
+    // 126 contracts at 1c: internally consistent, so the construction-time notional
     // check passes it through and the DB CHECK is what rejects it.
-    expect(() => recordDecision(db, tradeRecordOfNotional(1001))).toThrow(
+    expect(() => recordDecision(db, tradeRecordOfNotional(126))).toThrow(
       /per-trade|constraint|CHECK/i
     );
   });
@@ -168,18 +168,18 @@ describe('ledger', () => {
   });
 
   it('sums total exposure across would-trade rows only', () => {
-    recordDecision(db, tradeRecordOfNotional(500, { storyKey: 's-a' }));
-    recordDecision(db, tradeRecordOfNotional(300, { storyKey: 's-b' }));
+    recordDecision(db, tradeRecordOfNotional(70, { storyKey: 's-a' }));
+    recordDecision(db, tradeRecordOfNotional(30, { storyKey: 's-b' }));
     recordDecision(db, skipRecord({ storyKey: 's-c', eventTicker: EVENT }));
-    expect(totalExposureCents(db, EVENT)).toBe(800);
+    expect(totalExposureCents(db, EVENT)).toBe(100);
   });
 
-  it('rejects a would-trade insert that would push total exposure over the $40 cap', () => {
-    recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-x' }));
-    recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-y' }));
-    recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-z' }));
-    recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-w' }));
-    // total is now exactly 4000 (the cap) -- one more cent of would-trade notional must reject
+  it('rejects a would-trade insert that would push total exposure over the $5 cap', () => {
+    recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-x' }));
+    recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-y' }));
+    recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-z' }));
+    recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-w' }));
+    // total is now exactly 500 (the cap) -- one more cent of would-trade notional must reject
     expect(() => recordDecision(db, tradeRecordOfNotional(1, { storyKey: 's-over' }))).toThrow(
       /total exposure cap exceeded/
     );
@@ -188,35 +188,35 @@ describe('ledger', () => {
   // --- I5: exposure is scoped to one event, not summed for all time -------------
 
   it('scopes the exposure sum to the given event_ticker', () => {
-    recordDecision(db, tradeRecordOfNotional(700, { eventTicker: 'KXAPRPOTUS-26AUG21' }));
-    recordDecision(db, tradeRecordOfNotional(200, { eventTicker: EVENT }));
-    expect(totalExposureCents(db, 'KXAPRPOTUS-26AUG21')).toBe(700);
-    expect(totalExposureCents(db, EVENT)).toBe(200);
+    recordDecision(db, tradeRecordOfNotional(100, { eventTicker: 'KXAPRPOTUS-26AUG21' }));
+    recordDecision(db, tradeRecordOfNotional(50, { eventTicker: EVENT }));
+    expect(totalExposureCents(db, 'KXAPRPOTUS-26AUG21')).toBe(100);
+    expect(totalExposureCents(db, EVENT)).toBe(50);
     expect(totalExposureCents(db, 'KXAPRPOTUS-26SEP04')).toBe(0);
   });
 
-  it('lets two different events each hold $35 of exposure without sharing one global pool', () => {
+  it('lets two different events each hold $4 of exposure without sharing one global pool', () => {
     // The bug this closes: with an all-time sum, a resolved week's positions kept
     // consuming the next week's cap, so the engine went permanently silent after
-    // roughly 20 lifetime trades. $35 on event A plus $35 on event B is $70 all-time
+    // roughly 20 lifetime trades. $4 on event A plus $4 on event B is $8 all-time
     // and must still be allowed -- they are separate markets with separate caps.
     for (let i = 0; i < 4; i++) {
-      recordDecision(db, tradeRecordOfNotional(875, { eventTicker: 'EVENT-A' }));
+      recordDecision(db, tradeRecordOfNotional(100, { eventTicker: 'EVENT-A' }));
     }
     for (let i = 0; i < 4; i++) {
-      recordDecision(db, tradeRecordOfNotional(875, { eventTicker: 'EVENT-B' }));
+      recordDecision(db, tradeRecordOfNotional(100, { eventTicker: 'EVENT-B' }));
     }
-    expect(totalExposureCents(db, 'EVENT-A')).toBe(3500);
-    expect(totalExposureCents(db, 'EVENT-B')).toBe(3500);
+    expect(totalExposureCents(db, 'EVENT-A')).toBe(400);
+    expect(totalExposureCents(db, 'EVENT-B')).toBe(400);
   });
 
-  it('still enforces the shared $40 ceiling between rows on the SAME event_ticker', () => {
+  it('still enforces the shared $5 ceiling between rows on the SAME event_ticker', () => {
     for (let i = 0; i < 4; i++) {
-      recordDecision(db, tradeRecordOfNotional(1000, { eventTicker: 'EVENT-A' }));
+      recordDecision(db, tradeRecordOfNotional(125, { eventTicker: 'EVENT-A' }));
     }
     // A different event is unaffected...
     expect(() =>
-      recordDecision(db, tradeRecordOfNotional(1000, { eventTicker: 'EVENT-B' }))
+      recordDecision(db, tradeRecordOfNotional(125, { eventTicker: 'EVENT-B' }))
     ).not.toThrow();
     // ...but EVENT-A is full.
     expect(() =>
@@ -246,7 +246,7 @@ describe('ledger', () => {
 
   it('accepts a would-trade record whose notional is exactly contracts x entryPriceCents', () => {
     expect(() =>
-      recordDecision(db, tradeRecord({ contracts: 20, entryPriceCents: 45, notionalCents: 900 }))
+      recordDecision(db, tradeRecord({ contracts: 20, entryPriceCents: 5, notionalCents: 100 }))
     ).not.toThrow();
   });
 
@@ -334,18 +334,18 @@ describe('ledger', () => {
 
     // --- enforce_total_exposure_on_resolve: the UPDATE-path mirror of the cap ---
 
-    it('rejects a resolveDecision that would push total exposure over the $40 cap on the UPDATE path, not just INSERT', () => {
+    it('rejects a resolveDecision that would push total exposure over the $5 cap on the UPDATE path, not just INSERT', () => {
       // A real trade's only INSERT is recordPendingDecision, which always forces
       // would_trade=0 -- so the INSERT-side enforce_total_exposure trigger's WHEN
       // (would_trade = 1) is never true for it. Only resolveDecision's later UPDATE
       // ever sets would_trade=1, so this is the entire live-trade cap-enforcement
-      // path this project relies on. Fill EVENT to the $40 cap via three already
+      // path this project relies on. Fill EVENT to the $5 cap via three already
       // would_trade=1 rows...
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-p', eventTicker: EVENT }));
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-q', eventTicker: EVENT }));
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-r', eventTicker: EVENT }));
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-s', eventTicker: EVENT }));
-      expect(totalExposureCents(db, EVENT)).toBe(4000);
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-p', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-q', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-r', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-s', eventTicker: EVENT }));
+      expect(totalExposureCents(db, EVENT)).toBe(500);
 
       // ...then resolve a pending row (currently would_trade=0, contributing nothing)
       // to a real fill that would push the event over the cap. Without the
@@ -370,10 +370,10 @@ describe('ledger', () => {
     });
 
     it('allows a resolveDecision to would_trade=1 when it does not breach the cap, excluding the row being updated from its own sum', () => {
-      // Three rows at $10 each = $30, leaving exactly $10 of headroom.
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-t', eventTicker: EVENT }));
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-u', eventTicker: EVENT }));
-      recordDecision(db, tradeRecordOfNotional(1000, { storyKey: 's-v', eventTicker: EVENT }));
+      // Three rows at $1.25 each = $3.75, leaving exactly $1.25 of headroom.
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-t', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-u', eventTicker: EVENT }));
+      recordDecision(db, tradeRecordOfNotional(125, { storyKey: 's-v', eventTicker: EVENT }));
 
       const decisionId = recordPendingDecision(
         db,
@@ -383,10 +383,10 @@ describe('ledger', () => {
         resolveDecision(
           db,
           decisionId,
-          tradeRecordOfNotional(1000, { storyKey: 's-fits', eventTicker: EVENT, wouldTrade: true, orderStatus: 'resolved' })
+          tradeRecordOfNotional(125, { storyKey: 's-fits', eventTicker: EVENT, wouldTrade: true, orderStatus: 'resolved' })
         )
       ).not.toThrow();
-      expect(totalExposureCents(db, EVENT)).toBe(4000);
+      expect(totalExposureCents(db, EVENT)).toBe(500);
     });
 
     it('recordPendingOrder writes a pending orders row referencing its decision, and findPendingOrders finds it', () => {
@@ -578,11 +578,11 @@ describe('ledger', () => {
 
     it('findOpenUnsettledDecisions now returns entryPriceCents', () => {
       const id = recordPendingDecision(db, tradeRecord({ orderStatus: 'pending' }));
-      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved', entryPriceCents: 37, notionalCents: 370 }));
+      resolveDecision(db, id, tradeRecord({ wouldTrade: true, orderStatus: 'resolved', entryPriceCents: 9, notionalCents: 90 }));
 
       const open = findOpenUnsettledDecisions(db);
       expect(open).toHaveLength(1);
-      expect(open[0].entryPriceCents).toBe(37);
+      expect(open[0].entryPriceCents).toBe(9);
     });
 
     it('excludes a would-trade row with a NULL side, which would otherwise be summed with the wrong sign', () => {
