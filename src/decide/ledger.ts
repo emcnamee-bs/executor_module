@@ -3,8 +3,8 @@ import Database from 'better-sqlite3';
 import type { Rung } from './rung.js';
 import { sendAlert } from '../alert.js';
 
-export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
-export const MAX_TOTAL_EXPOSURE_CENTS = 4000;
+export const MAX_NOTIONAL_CENTS_PER_TRADE = 125;
+export const MAX_TOTAL_EXPOSURE_CENTS = 500;
 export const MAX_TRADES_PER_WINDOW = 1;
 export const RATE_LIMIT_WINDOW_MINUTES = 15;
 

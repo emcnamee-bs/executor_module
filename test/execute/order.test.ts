@@ -28,8 +28,8 @@ function tradeRecord(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     direction: 'up',
     magnitudePts: 0.3,
     contracts: 10,
-    entryPriceCents: 10,
-    notionalCents: 100,
+    entryPriceCents: 1,
+    notionalCents: 10,
     edgeCents: 3,
     wouldTrade: true,
     reason: '10 contracts, 3c edge',
@@ -229,29 +229,27 @@ describe('placeOrder', () => {
 
   const baseInput = (overrides: Partial<Parameters<typeof placeOrder>[0]> = {}) => ({
     itemId: 'item-1', eventTicker: 'KXAPRPOTUS-26AUG28', marketTicker: 'KXAPRPOTUS-26AUG28-40.6',
-    side: 'yes' as const, contracts: 83, entryPriceCents: 12, notionalCents: 996,
+    side: 'yes' as const, contracts: 83, entryPriceCents: 1, notionalCents: 83,
     positionBeforeContracts: 0, ...overrides,
   });
 
-  it('declines at execution (no Kalshi call at all, not even a position read) when the final exposure recheck would breach the $40 cap', async () => {
+  it('declines at execution (no Kalshi call at all, not even a position read) when the final exposure recheck would breach the $5 cap', async () => {
     let createOrderCalled = false;
     let getPositionsCalled = false;
     const client = mockClient({
       createOrder: async () => { createOrderCalled = true; return { order: { order_id: 'x', status: 'executed' } }; },
       getPositions: async () => { getPositionsCalled = true; return { market_positions: [] }; },
     });
-    // Insert existing resolved would-trade rows that already consume $39.50 of the
-    // same event's cap. Split across four rows (1000+1000+1000+950 cents) because
-    // MAX_NOTIONAL_CENTS_PER_TRADE (1000c) caps any single would-trade row's
-    // notional_cents -- the brief's own single-row 10 x 395 example would violate
-    // both that per-trade cap AND the entry_price_cents < 100 CHECK directly
-    // against the Task 2 schema; verified by running it.
-    for (const notionalCents of [1000, 1000, 1000, 950]) {
+    // Insert existing resolved would-trade rows that already consume $4.95 of the
+    // same event's cap. Split across four rows (125+125+125+120 cents) because
+    // MAX_NOTIONAL_CENTS_PER_TRADE (125c) caps any single would-trade row's
+    // notional_cents.
+    for (const notionalCents of [125, 125, 125, 120]) {
       const decisionId = recordPendingDecision(db, tradeRecord({ eventTicker: 'KXAPRPOTUS-26AUG28', notionalCents, contracts: notionalCents, entryPriceCents: 1 }));
       resolveDecision(db, decisionId, tradeRecord({ eventTicker: 'KXAPRPOTUS-26AUG28', notionalCents, contracts: notionalCents, entryPriceCents: 1, wouldTrade: true, orderStatus: 'resolved' }));
     }
 
-    const result = await placeOrder(baseInput({ notionalCents: 996 }), { client, db });
+    const result = await placeOrder(baseInput({ notionalCents: 10 }), { client, db });
 
     expect(createOrderCalled).toBe(false);
     expect(getPositionsCalled).toBe(false);
@@ -319,7 +317,7 @@ describe('placeOrder', () => {
     expect(getPositionsCalls).toBe(1); // only the "after" snapshot -- "before" comes from the input, not a fresh read
     expect(result.status).toBe('filled');
     expect(result.filledContracts).toBe(83);
-    expect(result.avgFillPriceCents).toBe(12); // the limit price -- never worse
+    expect(result.avgFillPriceCents).toBe(1); // the limit price -- never worse
     expect(result.kalshiOrderId).toBe('kalshi-1');
     // I3: Kalshi's own word for the order is captured, not discarded -- the only
     // persisted evidence of what the exchange itself said about this order.
@@ -347,7 +345,7 @@ describe('placeOrder', () => {
 
     expect(result.status).toBe('filled');
     expect(result.filledContracts).toBe(83);
-    expect(result.avgFillPriceCents).toBe(12);
+    expect(result.avgFillPriceCents).toBe(1);
   });
 
   it('places a partial NO-side fill from a flat position', async () => {
@@ -566,7 +564,7 @@ describe('placeOrder', () => {
       const result = await placeOrder(baseInput(), { client, db });
       expect(result.status).toBe('filled');
       expect(result.filledContracts).toBe(83);
-      expect(result.avgFillPriceCents).toBe(12);
+      expect(result.avgFillPriceCents).toBe(1);
       expect(getPositionsCalls).toBe(0);
       // I5: the simulated fill is flagged, so the caller can record it as a skip
       // rather than a phantom real position in the production ledger.
@@ -823,13 +821,13 @@ describe('reconcilePendingOrders', () => {
     // If resolveOrder committed a terminal status on its own while resolveDecision
     // failed, findPendingOrders (which scans ONLY status='pending') would never see
     // this row again -- a real filled position permanently reported as zero
-    // exposure. Forced here by filling the event's $40 cap so the decision-side
+    // exposure. Forced here by filling the event's $5 cap so the decision-side
     // UPDATE trips enforce_total_exposure_on_resolve.
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { decisionId, orderId } = pendingSetup({ requestedContracts: 83 });
     for (const storyKey of ['s-a', 's-b', 's-c', 's-d']) {
-      const filler = recordPendingDecision(db, tradeRecord({ storyKey, contracts: 1000, entryPriceCents: 1, notionalCents: 1000 }));
-      resolveDecision(db, filler, tradeRecord({ storyKey, contracts: 1000, entryPriceCents: 1, notionalCents: 1000, wouldTrade: true, orderStatus: 'resolved' }));
+      const filler = recordPendingDecision(db, tradeRecord({ storyKey, contracts: 125, entryPriceCents: 1, notionalCents: 125 }));
+      resolveDecision(db, filler, tradeRecord({ storyKey, contracts: 125, entryPriceCents: 1, notionalCents: 125, wouldTrade: true, orderStatus: 'resolved' }));
     }
 
     const client = mockClient({
@@ -902,7 +900,7 @@ describe('reconcileOrphanedPendingDecisions', () => {
       requestedContracts: 40, positionBeforeContracts: 0,
     });
     resolveOrder(db, orderId, {
-      filledContracts: 40, avgFillPriceCents: 12, status: 'filled',
+      filledContracts: 40, avgFillPriceCents: 3, status: 'filled',
       kalshiOrderId: 'kalshi-orphan', kalshiOrderStatus: 'executed', errorDetail: null,
     });
 
@@ -913,8 +911,8 @@ describe('reconcileOrphanedPendingDecisions', () => {
     };
     expect(row.would_trade).toBe(1);
     expect(row.contracts).toBe(40);
-    expect(row.entry_price_cents).toBe(12);
-    expect(row.notional_cents).toBe(480);
+    expect(row.entry_price_cents).toBe(3);
+    expect(row.notional_cents).toBe(120);
     expect(row.order_status).toBe('resolved');
     expect(row.reason).toMatch(/already-terminal order row \(filled\)/);
   });

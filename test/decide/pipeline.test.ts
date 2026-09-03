@@ -72,8 +72,8 @@ function stubLadder(): ActiveLadder {
         capStrike: 40.2,
         strikeType: 'between',
         status: 'active',
-        yesAskCents: 20,
-        yesBidCents: 18,
+        yesAskCents: 10,
+        yesBidCents: 8,
         yesAskSizeContracts: 500,
         yesBidSizeContracts: 500,
       },
@@ -83,8 +83,8 @@ function stubLadder(): ActiveLadder {
         capStrike: 40.6,
         strikeType: 'between',
         status: 'active',
-        yesAskCents: 60,
-        yesBidCents: 58,
+        yesAskCents: 92,
+        yesBidCents: 90,
         yesAskSizeContracts: 500,
         yesBidSizeContracts: 500,
       },
@@ -468,7 +468,7 @@ describe('runDecisionPipeline', () => {
     vi.spyOn(orderModule, 'placeOrder').mockResolvedValue({
       clientOrderId: 'cid-x', kalshiOrderId: 'kalshi-x', kalshiOrderStatus: 'executed',
       filledContracts: 40, // a partial fill: sizing wanted more
-      avgFillPriceCents: 12, status: 'partial', dryRun: false, errorDetail: null,
+      avgFillPriceCents: 3, status: 'partial', dryRun: false, errorDetail: null,
     });
 
     const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
@@ -480,8 +480,8 @@ describe('runDecisionPipeline', () => {
     // The row reflects the ACTUAL fill (40), not whatever evaluateSizing originally sized.
     expect(decisionRow.would_trade).toBe(1);
     expect(decisionRow.contracts).toBe(40);
-    expect(decisionRow.entry_price_cents).toBe(12);
-    expect(decisionRow.notional_cents).toBe(480);
+    expect(decisionRow.entry_price_cents).toBe(3);
+    expect(decisionRow.notional_cents).toBe(120);
     expect(decisionRow.order_status).toBe('resolved');
 
     const orderRow = db.prepare('SELECT status, filled_contracts, kalshi_order_id FROM orders').get() as {
@@ -639,7 +639,7 @@ describe('runDecisionPipeline', () => {
     };
     expect(recoveredDecision.would_trade).toBe(1);
     expect(recoveredDecision.contracts).toBe(2);
-    expect(recoveredDecision.notional_cents).toBe(84); // 2 x 42c
+    expect(recoveredDecision.notional_cents).toBe(20); // 2 x 10c
     expect(recoveredDecision.order_status).toBe('resolved');
   });
 
@@ -680,10 +680,10 @@ describe('runDecisionPipeline', () => {
     expect(decisionRow.side).toBe('no');
     expect(decisionRow.would_trade).toBe(1);
     expect(decisionRow.contracts).toBe(2);
-    expect(decisionRow.entry_price_cents).toBe(42);
-    expect(decisionRow.notional_cents).toBe(84);
+    expect(decisionRow.entry_price_cents).toBe(10);
+    expect(decisionRow.notional_cents).toBe(20);
     expect(decisionRow.order_status).toBe('resolved');
-    expect(totalExposureCents(db, EVENT)).toBe(84);
+    expect(totalExposureCents(db, EVENT)).toBe(20);
   });
 
   // --- I5: a DRY_RUN must never write a real position into the ledger ----------

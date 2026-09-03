@@ -1,6 +1,9 @@
 // src/decide/sizing.ts
 import type { BandMarket } from './kalshi.js';
 import { RUNG_STAKES, type Rung } from './rung.js';
+import { MAX_NOTIONAL_CENTS_PER_TRADE, MAX_TOTAL_EXPOSURE_CENTS } from './ledger.js';
+
+export { MAX_NOTIONAL_CENTS_PER_TRADE };
 
 const SETTLEMENT_CENTS = 100;
 const MAX_SPREAD_CENTS = 5;
@@ -8,8 +11,6 @@ const MIN_DEPTH_CONTRACTS = 1;
 const MIN_PRICE_CENTS = 10;
 const MAX_PRICE_CENTS = 90;
 const MIN_EDGE_CENTS = 0.5;
-export const MAX_NOTIONAL_CENTS_PER_TRADE = 1000;
-const MAX_TOTAL_EXPOSURE_CENTS = 4000;
 const DEFAULT_BAND_WIDTH_PTS = 0.2;
 /**
  * Kalshi's own bid-ask spread means the mid-price-implied probabilities across a

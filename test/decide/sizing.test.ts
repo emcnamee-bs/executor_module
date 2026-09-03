@@ -99,7 +99,7 @@ function curveSpanPts(bands: BandMarket[]): number {
 function baseInput(overrides: Partial<SizingInput> = {}): SizingInput {
   return {
     bands: baseLadder(),
-    rung: 'reported' as Rung,
+    rung: 'confirmed' as Rung,
     direction: 'up',
     magnitudePts: 0.3,
     currentTotalExposureCents: 0,
@@ -246,11 +246,11 @@ describe('contractsWithinCaps', () => {
   it('holds the per-trade cap even when handed a Kelly fraction above 1.0', () => {
     // The second, independent ceiling. `kelly = 2.0` is exactly what the poisoned
     // curve produced before the fair-value clamp existed: scaling by kelly * stake
-    // alone gave 40 contracts at 50c = 2000c, twice the cap. The cap must not depend
+    // alone gave 10 contracts at 25c = 250c, twice the cap. The cap must not depend
     // on some other function keeping kelly <= 1.
-    const contracts = caps({ askCents: 50, kelly: 2.0, stake: 1 });
-    expect(contracts).toBe(20); // floor(1000 / 50)
-    expect(contracts * 50).toBe(MAX_NOTIONAL_CENTS_PER_TRADE);
+    const contracts = caps({ askCents: 25, kelly: 2.0, stake: 1 });
+    expect(contracts).toBe(5); // floor(125 / 25)
+    expect(contracts * 25).toBe(MAX_NOTIONAL_CENTS_PER_TRADE);
   });
 
   it('holds the per-trade cap for every ask price and any Kelly/stake product', () => {
@@ -265,15 +265,15 @@ describe('contractsWithinCaps', () => {
   });
 
   it('lets depth bind when depth is the smallest constraint', () => {
-    expect(caps({ askCents: 50, kelly: 1, stake: 1, depthContracts: 3 })).toBe(3);
+    expect(caps({ askCents: 25, kelly: 1, stake: 1, depthContracts: 3 })).toBe(3);
   });
 
   it('lets remaining exposure bind when it is the smallest constraint', () => {
-    expect(caps({ askCents: 50, remainingExposureCents: 250 })).toBe(5);
+    expect(caps({ askCents: 25, remainingExposureCents: 75 })).toBe(3);
   });
 
   it('scales down with the rung stake', () => {
-    expect(caps({ askCents: 50, kelly: 1, stake: 0.25 })).toBe(5); // floor(20 * 1 * 0.25)
+    expect(caps({ askCents: 5, kelly: 1, stake: 0.25 })).toBe(6); // floor(25 * 1 * 0.25)
   });
 
   it('returns zero for a non-positive ask rather than dividing by zero', () => {
@@ -395,14 +395,14 @@ describe('evaluateSizing', () => {
     expect(result.reason).toMatch(/range/i);
   });
 
-  it('sizes to the exact contract count the $10 ceiling allows when the ceiling binds', () => {
+  it('sizes to the exact contract count the $1.25 ceiling allows when the ceiling binds', () => {
     // C-anchor is untradeable on price (ask 100 / no-side ask 0) but anchors the
     // curve at probability 1.0. C-cheap therefore interpolates a fair value of 100c
     // against a 12c ask: Kelly is exactly (100-12)/(100-12) = 1.0 and stake is 1.0,
-    // so neither Kelly, nor depth (10000), nor remaining exposure (333 contracts)
+    // so neither Kelly, nor depth (10000), nor remaining exposure (41 contracts)
     // binds -- only the per-trade ceiling does.
-    //   byCeiling = floor(1000 / 12) = 83   -> 83 * 12 = 996c, just under the cap
-    //   84 contracts would be 1008c, over it
+    //   byCeiling = floor(125 / 12) = 10   -> 10 * 12 = 120c, just under the cap
+    //   11 contracts would be 132c, over it
     //
     // Strikes/magnitude changed by the curve-span fix: a Kelly of exactly 1.0 needs a
     // fair value of exactly 100c, which is only reachable when the shifted target
@@ -432,12 +432,12 @@ describe('evaluateSizing', () => {
     expect(result.side).toBe('yes');
     expect(result.entryPriceCents).toBe(12);
     expect(result.edgeCents).toBe(88);
-    expect(result.contracts).toBe(83);
-    expect(result.notionalCents).toBe(996);
+    expect(result.contracts).toBe(10);
+    expect(result.notionalCents).toBe(120);
     expect(result.notionalCents).toBeLessThanOrEqual(MAX_NOTIONAL_CENTS_PER_TRADE);
   });
 
-  it('holds the $10 per-trade cap even when an out-of-range quote poisons the fair-value curve', () => {
+  it('holds the $1.25 per-trade cap even when an out-of-range quote poisons the fair-value curve', () => {
     // Reviewer's reproduction: one band carries an impossible 104c quote (nothing
     // upstream bounds Kalshi prices to [0,100]). That band is itself untradeable on
     // price -- both its yes side (104c) and its no side (100-104 = -4c) fail the
@@ -476,22 +476,22 @@ describe('evaluateSizing', () => {
     expect(result.side).toBe('yes');
     expect(result.entryPriceCents).toBe(12);
     expect(result.edgeCents).toBe(88);
-    expect(result.contracts).toBe(83);
-    expect(result.notionalCents).toBe(996);
+    expect(result.contracts).toBe(10);
+    expect(result.notionalCents).toBe(120);
     expect(result.notionalCents).toBeLessThanOrEqual(MAX_NOTIONAL_CENTS_PER_TRADE);
   });
 
-  it('declines when the trade would push total exposure over the $40 cap', () => {
-    const result = evaluateSizing(baseInput({ currentTotalExposureCents: 4000 }));
+  it('declines when the trade would push total exposure over the $5 cap', () => {
+    const result = evaluateSizing(baseInput({ currentTotalExposureCents: 500 }));
     expect(result.wouldTrade).toBe(false);
     expect(result.reason).toMatch(/exposure/i);
   });
 
-  it('allows a trade that exactly reaches, but does not exceed, the $40 cap', () => {
-    const result = evaluateSizing(baseInput({ currentTotalExposureCents: 3990 }));
+  it('allows a trade that exactly reaches, but does not exceed, the $5 cap', () => {
+    const result = evaluateSizing(baseInput({ currentTotalExposureCents: 490 }));
     // Either it trades within the remaining $0.10, or it declines because no
     // band's clamped size fits in that remaining room -- both are valid, but
-    // it must never report a notional that would push the total over 4000.
+    // it must never report a notional that would push the total over 500.
     expect(result.notionalCents).toBeLessThanOrEqual(10);
   });
 
