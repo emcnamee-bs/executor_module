@@ -135,7 +135,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     }
 
     const synopsis = await synopsize(ollamaClient, item.headline, item.snippet);
-    const verification = await verifySynopsis(ollamaClient, item.headline, item.snippet, synopsis);
+    const verification = await verifySynopsis(anthropicClient, item.headline, item.snippet, synopsis);
     if (!verification.supported) {
       recordDecision(
         db,

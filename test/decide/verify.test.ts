@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { createOllamaClient } from '../../src/decide/ollamaClient.js';
+import Anthropic from '@anthropic-ai/sdk';
 import { verifySynopsis, validateVerifyOutput } from '../../src/decide/verify.js';
 
-describe('verifySynopsis (real local Qwen call)', () => {
+describe('verifySynopsis (real Sonnet call)', () => {
   it('supports a faithful synopsis of the source text', async () => {
-    const client = createOllamaClient();
+    const client = new Anthropic();
     const result = await verifySynopsis(
       client,
       'BLS reports unemployment rate fell to 3.9% in July',
@@ -14,10 +14,10 @@ describe('verifySynopsis (real local Qwen call)', () => {
 
     expect(result.supported).toBe(true);
     expect(typeof result.note).toBe('string');
-  }, 30000);
+  }, 20000);
 
   it('rejects a synopsis that fabricates a claim the source does not make', async () => {
-    const client = createOllamaClient();
+    const client = new Anthropic();
     const result = await verifySynopsis(
       client,
       'BLS reports unemployment rate fell to 3.9% in July',
@@ -26,7 +26,7 @@ describe('verifySynopsis (real local Qwen call)', () => {
     );
 
     expect(result.supported).toBe(false);
-  }, 30000);
+  }, 20000);
 });
 
 describe('validateVerifyOutput', () => {

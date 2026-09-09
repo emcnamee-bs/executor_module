@@ -318,7 +318,7 @@ and the real exchange, which the test suite deliberately never has.
 | `KALSHI_PRIVATE_KEY_PATH` | **Yes** | Path to the RSA private key PEM used for RSA-PSS request signing (canonically `~/.kalshi-spine/kalshi_key.pem`, mode 600). The file itself is never committed, logged, or printed. |
 | `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. |
 | `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
-| `ANTHROPIC_API_KEY` | **Yes** | The Haiku synopsis / Sonnet verify / Sonnet decide calls. |
+| `ANTHROPIC_API_KEY` | **Yes** | The Sonnet verify / Sonnet decide calls (§5a.4). `synopsize` runs on a local Ollama-served model instead -- see §5a.4. |
 | `SLACK_WEBHOOK_URL` | No | Slack incoming-webhook URL that powers the three alert events (§5a.2b). If unset, `sendAlert` logs a warning and no-ops — every event still happens and is still recorded in the ledger, but no human is paged. Bearer-equivalent secret: never hardcoded, never defaulted, never logged (§2). |
 
 **What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
@@ -590,6 +590,35 @@ exposure cap, nor `reconcileOpenPositions` can see until it resolves to
   `realized_pnl_cents`' ALTER carries the same cross-column CHECK as a freshly-created
   table, so a migrated database gets identical DB-level enforcement. Every other column
   drift still needs a manual migration.
+
+### 5a.4 Local model for synopsis (added in this slice)
+
+`synopsize` runs against a local Qwen model (`qwen2.5:3b-instruct-q4_K_M`) served
+by Ollama (`http://127.0.0.1:11434` by default, configurable via
+`OLLAMA_BASE_URL`) instead of a hosted API call. This is a new hard runtime
+dependency: Ollama must be installed and have that model already pulled on any
+host running this service, or every synopsis call fails at runtime (see the
+`executor-module.service` `ExecStartPre` readiness probe, deploy/mini-mac,
+which blocks the main process from starting until Ollama's own API answers).
+
+`verifySynopsis` and `decideTrade` remain on the real Anthropic API, unchanged
+from before this slice. Repeated Ollama call failures (from `synopsize`, or any
+future local-model call routed through `ollamaClient.ts`) trip a dedicated
+`ollama-errors` circuit breaker signal (mirroring `kalshi-errors` exactly —
+same threshold/window shape, same `tripBreaker`/`recordOllamaError` pattern),
+alerting to Slack the same way every other breaker signal does (§5a.2b).
+
+This slice was deliberately narrowed from an original plan that also moved
+`verifySynopsis` onto a local model. A final review found the local 7B model's
+(`qwen2.5:7b-instruct-q4_K_M`) faithfulness checking demonstrably unreliable on
+subtle distortions — it returned `supported: true` on synopses containing
+material distortions it could not detect, with confabulated notes explaining
+why. Naming that plainly here, in the same style as this file's own
+"confirmed live" findings elsewhere (e.g. §5a.2's `client_order_id`/
+`position_fp` findings): the local model is not a safe substitute for Sonnet on
+the verification step, full stop, and `verifySynopsis` was reverted to the
+real Anthropic API rather than shipped with a known-unreliable local check
+sitting on the path to a real order.
 
 ---
 

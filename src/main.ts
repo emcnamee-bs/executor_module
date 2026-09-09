@@ -134,8 +134,8 @@ export async function main(): Promise<void> {
   await client.connect();
 
   const anthropicClient = new Anthropic();
-  const ollamaClient = createOllamaClient();
   const db = openLedger(DEFAULT_LEDGER_PATH);
+  const ollamaClient = createOllamaClient(undefined, db);
   // Isolated like every other auxiliary/observability write in this codebase
   // (checkFailedOrdersSignal, checkDivergencesSignal, recordKalshiError): a
   // diagnostic marker failing to write must never stop the whole system from

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import http from 'node:http';
 import { createOllamaClient } from '../../src/decide/ollamaClient.js';
 
 describe('createOllamaClient (real local Ollama call)', () => {
@@ -42,4 +43,21 @@ describe('createOllamaClient (real local Ollama call)', () => {
     const client = createOllamaClient('http://127.0.0.1:1');
     await expect(client.chat('qwen2.5:3b-instruct-q4_K_M', 'hello')).rejects.toThrow();
   }, 10000);
+
+  it('throws naming Ollama and the model when the response body is not JSON', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<html>not json</html>');
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const client = createOllamaClient(`http://127.0.0.1:${port}`);
+      await expect(client.chat('qwen2.5:3b-instruct-q4_K_M', 'hello')).rejects.toThrow(
+        /non-JSON response body for model qwen2.5:3b-instruct-q4_K_M/
+      );
+    } finally {
+      server.close();
+    }
+  });
 });
