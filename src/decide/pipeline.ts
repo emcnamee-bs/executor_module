@@ -1,6 +1,7 @@
 // src/decide/pipeline.ts
 import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
+import type { OllamaClient } from './ollamaClient.js';
 import type { Item } from '../item.js';
 import { computeRung, type Rung } from './rung.js';
 import { fetchActiveLadder, type ActiveLadder } from './kalshi.js';
@@ -31,6 +32,7 @@ const KALSHI_SERIES_TICKER = 'KXAPRPOTUS';
 
 export interface PipelineDeps {
   anthropicClient: Anthropic;
+  ollamaClient: OllamaClient;
   db: Database.Database;
   fetchLadder: typeof fetchActiveLadder;
   kalshiClient: KalshiClient;
@@ -70,7 +72,7 @@ function skipRecord(
 }
 
 export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promise<void> {
-  const { anthropicClient, db, fetchLadder, kalshiClient } = deps;
+  const { anthropicClient, ollamaClient, db, fetchLadder, kalshiClient } = deps;
 
   // Redis delivery is at-least-once: a crash or restart mid-item re-delivers the
   // unacked entry. An item that already has a ledger row was fully processed by an
@@ -132,8 +134,8 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       return;
     }
 
-    const synopsis = await synopsize(anthropicClient, item.headline, item.snippet);
-    const verification = await verifySynopsis(anthropicClient, item.headline, item.snippet, synopsis);
+    const synopsis = await synopsize(ollamaClient, item.headline, item.snippet);
+    const verification = await verifySynopsis(ollamaClient, item.headline, item.snippet, synopsis);
     if (!verification.supported) {
       recordDecision(
         db,

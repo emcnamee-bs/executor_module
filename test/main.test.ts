@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
+import { createOllamaClient } from '../src/decide/ollamaClient.js';
 import { createRedisClient } from '../src/redis/client.js';
 import { runOnce, makeOnItem, type ItemOutcome } from '../src/main.js';
 import { compilePhrases } from '../src/keyphrases/match.js';
@@ -497,6 +498,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const onItem = makeOnItem({
       anthropicClient: new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' }),
+      ollamaClient: createOllamaClient(),
       db,
       fetchLadder,
       kalshiClient: stubKalshiClient(),
@@ -549,6 +551,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const onItem = makeOnItem({
       anthropicClient: new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' }),
+      ollamaClient: createOllamaClient(),
       db,
       fetchLadder,
       kalshiClient: stubKalshiClient(),

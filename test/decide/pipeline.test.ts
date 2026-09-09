@@ -6,6 +6,7 @@ import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import { runDecisionPipeline } from '../../src/decide/pipeline.js';
+import { createOllamaClient, type OllamaClient } from '../../src/decide/ollamaClient.js';
 import { openLedger, hasOpenPosition, totalExposureCents, tripBreaker, isTradingHalted, CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD } from '../../src/decide/ledger.js';
 import * as ledgerModule from '../../src/decide/ledger.js';
 import { computeRung } from '../../src/decide/rung.js';
@@ -157,11 +158,13 @@ describe('runDecisionPipeline', () => {
   let dir: string;
   let db: Database.Database;
   let client: Anthropic;
+  let ollamaClient: OllamaClient;
 
   beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'pipeline-test-'));
     db = openLedger(path.join(dir, 'test.db'));
     client = new Anthropic({ apiKey: 'sk-ant-unused-in-these-tests' });
+    ollamaClient = createOllamaClient();
     delete process.env.EXECUTOR_TRADING_HALTED;
     vi.spyOn(synopsisModule, 'synopsize').mockResolvedValue('The unemployment rate fell to 3.9%.');
     vi.spyOn(verifyModule, 'verifySynopsis').mockResolvedValue({ supported: true, note: 'faithful' });
@@ -200,7 +203,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
@@ -221,7 +224,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
@@ -246,7 +249,7 @@ describe('runDecisionPipeline', () => {
       const item = baseItem({
         item_id: `item-rejected-${i}`, dedup_id: `dedup-rejected-${i}`, story_key: `story-rejected-${i}`,
       });
-      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+      await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
     }
 
     expect(isTradingHalted(db)).toBe(true);
@@ -269,7 +272,7 @@ describe('runDecisionPipeline', () => {
       const item = baseItem({
         item_id: `item-alert-${i}`, dedup_id: `dedup-alert-${i}`, story_key: `story-alert-${i}`,
       });
-      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+      await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
     }
     expect(alertSpy).toHaveBeenCalledTimes(1); // tripped on the LAST of the threshold failures
 
@@ -290,7 +293,7 @@ describe('runDecisionPipeline', () => {
     // below (a skip row with the breaker reason, and no synopsize call).
     vi.mocked(synopsisModule.synopsize).mockClear();
     const oneMore = baseItem({ item_id: 'item-alert-extra', dedup_id: 'dedup-alert-extra', story_key: 'story-alert-extra' });
-    await runDecisionPipeline(oneMore, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(oneMore, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
 
     expect(onlyRowFor(db, oneMore.item_id).reason).toBe('circuit breaker tripped');
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
@@ -302,7 +305,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(decideModule.decideTrade).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
@@ -317,7 +320,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem({ trust_tier: 3, story_key: null });
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(synopsisModule.synopsize).not.toHaveBeenCalled();
     expect(verifyModule.verifySynopsis).not.toHaveBeenCalled();
@@ -330,7 +333,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     // First run: real would-trade path.
     const first = baseItem();
-    await runDecisionPipeline(first, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(first, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
     // Backdate the first fill well outside the 15-minute rate-limit window, so
     // the second call below is intercepted by hasOpenPosition -- the code path
@@ -339,7 +342,7 @@ describe('runDecisionPipeline', () => {
     db.prepare("UPDATE decisions SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') WHERE item_id = ?").run(first.item_id);
 
     vi.mocked(decideModule.decideTrade).mockClear();
-    await runDecisionPipeline(baseItem({ item_id: 'item-2' }), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(baseItem({ item_id: 'item-2' }), { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(decideModule.decideTrade).not.toHaveBeenCalled();
   });
 
@@ -352,7 +355,7 @@ describe('runDecisionPipeline', () => {
     });
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
 
-    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(baseItem(), { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(false);
   });
@@ -360,7 +363,7 @@ describe('runDecisionPipeline', () => {
   it('records a would-trade decision and increases total exposure when everything clears', async () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
 
-    await runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(baseItem(), { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(true);
     expect(totalExposureCents(db, EVENT)).toBeGreaterThan(0);
@@ -378,7 +381,7 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(null);
 
     await expect(
-      runDecisionPipeline(baseItem(), { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
+      runDecisionPipeline(baseItem(), { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(false);
   });
@@ -393,7 +396,7 @@ describe('runDecisionPipeline', () => {
     const item = baseItem();
 
     await expect(
-      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
+      runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
 
     const row = onlyRowFor(db, item.item_id);
@@ -414,7 +417,7 @@ describe('runDecisionPipeline', () => {
     const item = baseItem();
 
     await expect(
-      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
+      runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
 
     const row = onlyRowFor(db, item.item_id);
@@ -427,7 +430,7 @@ describe('runDecisionPipeline', () => {
     const item = baseItem();
 
     await expect(
-      runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() })
+      runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() })
     ).resolves.toBeUndefined();
     expect(onlyRowFor(db, item.item_id).reason).toContain('a bare string rejection');
   });
@@ -438,12 +441,12 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
     expect(onlyRowFor(db, item.item_id).would_trade).toBe(1);
 
     vi.mocked(synopsisModule.synopsize).mockClear();
     // Exactly what Redis does after a crash before the ACK: the same entry again.
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     // Still exactly one row -- not double-counted against the exposure cap...
     expect(rowsFor(db, item.item_id)).toHaveLength(1);
@@ -456,8 +459,8 @@ describe('runDecisionPipeline', () => {
     const fetchLadder = vi.fn().mockResolvedValue(null);
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
-    await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, kalshiClient: stubKalshiClient() });
 
     expect(rowsFor(db, item.item_id)).toHaveLength(1);
   });
@@ -471,7 +474,7 @@ describe('runDecisionPipeline', () => {
       avgFillPriceCents: 3, status: 'partial', dryRun: false, errorDetail: null,
     });
 
-    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    const deps = { anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
     await runDecisionPipeline(baseItem(), deps);
 
     const decisionRow = db.prepare('SELECT would_trade, contracts, entry_price_cents, notional_cents, order_status FROM decisions').get() as {
@@ -498,7 +501,7 @@ describe('runDecisionPipeline', () => {
       avgFillPriceCents: null, status: 'unfilled', dryRun: false, errorDetail: null,
     });
 
-    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    const deps = { anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
     await runDecisionPipeline(baseItem(), deps);
 
     const decisionRow = db.prepare('SELECT would_trade, contracts FROM decisions').get() as { would_trade: number; contracts: number };
@@ -516,7 +519,7 @@ describe('runDecisionPipeline', () => {
       throw new Error('simulated crash mid-placeOrder');
     });
 
-    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    const deps = { anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
     await runDecisionPipeline(baseItem(), deps); // the pipeline's own try/catch (I3) turns this into a durable skip row
 
     expect(placeOrderCallCount).toBe(1);
@@ -534,7 +537,7 @@ describe('runDecisionPipeline', () => {
       throw new Error('simulated crash mid-placeOrder');
     });
 
-    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    const deps = { anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
     await runDecisionPipeline(baseItem(), deps);
 
     const pendingOrderRow = db
@@ -598,7 +601,7 @@ describe('runDecisionPipeline', () => {
       throw new Error('simulated post-fill resolveDecision failure');
     });
 
-    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    const deps = { anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
     await runDecisionPipeline(baseItem(), deps);
 
     // NOT left half-applied: the orders row shows its pre-transaction state.
@@ -657,7 +660,7 @@ describe('runDecisionPipeline', () => {
 
     const kalshiClient = sequencedKalshiClient([0, -2]);
     await runDecisionPipeline(baseItem(), {
-      anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient,
+      anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient,
     });
 
     // The side actually reached the orders row -- the root cause of C1 was that it
@@ -698,7 +701,7 @@ describe('runDecisionPipeline', () => {
       filledContracts: 2, avgFillPriceCents: 42, status: 'filled', dryRun: true, errorDetail: null,
     });
 
-    const deps = { anthropicClient: client, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
+    const deps = { anthropicClient: client, ollamaClient, db, fetchLadder: async () => stubLadder(), kalshiClient: stubKalshiClient() };
     await runDecisionPipeline(baseItem(), deps);
 
     const decisionRow = db.prepare('SELECT would_trade, contracts, entry_price_cents, notional_cents, order_status, reason FROM decisions').get() as {
@@ -728,14 +731,14 @@ describe('runDecisionPipeline', () => {
 
   it('declines a second item within the rate-limit window, without spending a single model call on it', async () => {
     const first = baseItem({ item_id: 'item-rate-1', dedup_id: 'dedup-rate-1', story_key: 'story-rate-1' });
-    await runDecisionPipeline(first, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(first, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
     // Confirm the fixture actually produced a real fill -- if it didn't, this
     // test would trivially "pass" for the wrong reason.
     expect(onlyRowFor(db, first.item_id).would_trade).toBe(1);
 
     vi.mocked(synopsisModule.synopsize).mockClear();
     const second = baseItem({ item_id: 'item-rate-2', dedup_id: 'dedup-rate-2', story_key: 'story-rate-2' });
-    await runDecisionPipeline(second, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(second, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
 
     const row = onlyRowFor(db, second.item_id);
     expect(row.would_trade).toBe(0);
@@ -745,13 +748,13 @@ describe('runDecisionPipeline', () => {
 
   it('trades normally when the prior real fill is OUTSIDE the rate-limit window', async () => {
     const first = baseItem({ item_id: 'item-rate-old-1', dedup_id: 'dedup-rate-old-1', story_key: 'story-rate-old-1' });
-    await runDecisionPipeline(first, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(first, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
     expect(onlyRowFor(db, first.item_id).would_trade).toBe(1);
     // Backdate the first fill well outside the 15-minute window.
     db.prepare("UPDATE decisions SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') WHERE item_id = ?").run(first.item_id);
 
     const second = baseItem({ item_id: 'item-rate-old-2', dedup_id: 'dedup-rate-old-2', story_key: 'story-rate-old-2' });
-    await runDecisionPipeline(second, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(second, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
 
     expect(onlyRowFor(db, second.item_id).would_trade).toBe(1);
   });
@@ -762,7 +765,7 @@ describe('runDecisionPipeline', () => {
     });
     for (let i = 0; i < 3; i++) {
       const item = baseItem({ item_id: `item-noedge-${i}`, dedup_id: `dedup-noedge-${i}`, story_key: `story-noedge-${i}` });
-      await runDecisionPipeline(item, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+      await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
       expect(onlyRowFor(db, item.item_id).would_trade).toBe(0);
     }
     // Re-apply the SAME default mock this file's beforeEach sets (do NOT use
@@ -774,7 +777,7 @@ describe('runDecisionPipeline', () => {
     });
 
     const tradeable = baseItem({ item_id: 'item-noedge-then-trade', dedup_id: 'dedup-noedge-then-trade', story_key: 'story-noedge-then-trade' });
-    await runDecisionPipeline(tradeable, { anthropicClient: client, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(tradeable, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), kalshiClient: stubKalshiClient() });
 
     expect(onlyRowFor(db, tradeable.item_id).would_trade).toBe(1);
   });

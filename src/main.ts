@@ -13,6 +13,7 @@ import {
 import { sendAlert } from './alert.js';
 import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
+import { createOllamaClient, type OllamaClient } from './decide/ollamaClient.js';
 import { KalshiClient } from './execute/kalshiClient.js';
 import { reconcilePendingOrders } from './execute/order.js';
 import { startReconciliationTimer } from './execute/reconcileOpenPositions.js';
@@ -83,6 +84,7 @@ export async function runOnce(
 
 export interface OnItemDeps {
   anthropicClient: Anthropic;
+  ollamaClient: OllamaClient;
   db: Database.Database;
   fetchLadder: typeof fetchActiveLadder;
   kalshiClient: KalshiClient;
@@ -132,6 +134,7 @@ export async function main(): Promise<void> {
   await client.connect();
 
   const anthropicClient = new Anthropic();
+  const ollamaClient = createOllamaClient();
   const db = openLedger(DEFAULT_LEDGER_PATH);
   // Isolated like every other auxiliary/observability write in this codebase
   // (checkFailedOrdersSignal, checkDivergencesSignal, recordKalshiError): a
@@ -181,7 +184,7 @@ export async function main(): Promise<void> {
     client,
     { streamKey: STREAM_KEY, groupName: GROUP_NAME, consumerName: CONSUMER_NAME },
     compiledPhrases,
-    makeOnItem({ anthropicClient, db, fetchLadder: fetchActiveLadder, kalshiClient }),
+    makeOnItem({ anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient }),
     controller.signal
   );
 
