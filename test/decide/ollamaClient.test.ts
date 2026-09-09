@@ -1,6 +1,15 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { createOllamaClient } from '../../src/decide/ollamaClient.js';
+import {
+  openLedger,
+  isTradingHalted,
+  CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD,
+} from '../../src/decide/ledger.js';
+import * as alertModule from '../../src/alert.js';
 
 describe('createOllamaClient (real local Ollama call)', () => {
   it('returns the model\'s text content for a plain prompt', async () => {
@@ -60,4 +69,36 @@ describe('createOllamaClient (real local Ollama call)', () => {
       server.close();
     }
   });
+});
+
+describe('createOllamaClient error logging', () => {
+  let dbDir: string;
+  let db: ReturnType<typeof openLedger>;
+
+  beforeEach(() => {
+    dbDir = mkdtempSync(path.join(tmpdir(), 'ollama-client-errors-test-'));
+    db = openLedger(path.join(dbDir, 'test.db'));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dbDir, { recursive: true, force: true });
+  });
+
+  it('without a db, an error still throws normally and nothing is logged', async () => {
+    const client = createOllamaClient('http://127.0.0.1:1');
+    await expect(client.chat('qwen2.5:3b-instruct-q4_K_M', 'hello')).rejects.toThrow();
+  }, 10000);
+
+  it('trips the ollama-errors circuit breaker after enough real failures, driving the real call site, and alerts', async () => {
+    const alertSpy = vi.spyOn(alertModule, 'sendAlert').mockResolvedValue(undefined);
+    const client = createOllamaClient('http://127.0.0.1:1', db);
+
+    for (let i = 0; i < CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD; i++) {
+      await expect(client.chat('qwen2.5:3b-instruct-q4_K_M', 'hello')).rejects.toThrow();
+    }
+    expect(isTradingHalted(db)).toBe(true);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toContain('ollama-errors');
+  }, 20000);
 });

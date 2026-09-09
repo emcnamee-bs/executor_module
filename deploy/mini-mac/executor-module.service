@@ -1,6 +1,8 @@
 [Unit]
-# The live executor: news scan -> keyphrase match -> Haiku synopsis -> Sonnet verify
-# -> Sonnet decide -> real order execution against Kalshi, for market KXAPRPOTUS.
+# The live executor: news scan -> keyphrase match -> local-model synopsis -> Sonnet
+# verify -> Sonnet decide -> real order execution against Kalshi, for market
+# KXAPRPOTUS. Synopsis runs on a local Ollama-served Qwen model (HANDOFF.md Sec
+# 5a.4); verify and decide stay on the real Anthropic API.
 # Consumes the local `iip:items` Redis stream fed by this box's own iip.service
 # instance (deploy/mini-mac/iip.service) -- both run on mini-mac, nothing here talks
 # to any other host.

@@ -257,19 +257,27 @@ function migrateCircuitBreakerTripsSignal(db: Database.Database): void {
     .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'circuit_breaker_trips'`)
     .get() as { sql: string } | undefined;
   if (!row || row.sql.includes('ollama-errors')) return;
-  db.exec(`
-    CREATE TABLE circuit_breaker_trips_new (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors','ollama-errors')),
-      reason TEXT NOT NULL,
-      tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      cleared_at TEXT
-    );
-    INSERT INTO circuit_breaker_trips_new (id, signal, reason, tripped_at, cleared_at)
-      SELECT id, signal, reason, tripped_at, cleared_at FROM circuit_breaker_trips;
-    DROP TABLE circuit_breaker_trips;
-    ALTER TABLE circuit_breaker_trips_new RENAME TO circuit_breaker_trips;
-  `);
+  // Wrapped in a real transaction (not a bare db.exec(), which runs each
+  // statement in its own implicit transaction) -- a crash between CREATE and
+  // RENAME would otherwise leave a stray circuit_breaker_trips_new table that
+  // fails every subsequent openLedger() loudly, forever, until manually
+  // dropped. BEGIN/COMMIT makes the whole rebuild atomic: either it fully
+  // applies, or SQLite rolls it back to the untouched original table.
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE circuit_breaker_trips_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors','ollama-errors')),
+        reason TEXT NOT NULL,
+        tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        cleared_at TEXT
+      );
+      INSERT INTO circuit_breaker_trips_new (id, signal, reason, tripped_at, cleared_at)
+        SELECT id, signal, reason, tripped_at, cleared_at FROM circuit_breaker_trips;
+      DROP TABLE circuit_breaker_trips;
+      ALTER TABLE circuit_breaker_trips_new RENAME TO circuit_breaker_trips;
+    `);
+  })();
 }
 
 export function openLedger(dbPath: string): Database.Database {

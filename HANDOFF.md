@@ -108,7 +108,7 @@ these fields worth knowing about before you build a consumer:
 - `provenance_gaps` — a tuple that may contain `synthetic_headline` (the headline was
   invented by the adapter, not written by a human — matching rules against it is matching
   against nobody's words), `no_article_url`, `title_not_headline`. **Check this before
-  running your keyphrase match or handing the item to Haiku** — a synthetic headline
+  running your keyphrase match or handing the item to the synopsis model** — a synthetic headline
   should probably be treated differently (or skipped) rather than analyzed as if a
   journalist wrote it.
 - `replay: bool` — `True` on items republished by that project's replay/backtest harness.
@@ -320,6 +320,7 @@ and the real exchange, which the test suite deliberately never has.
 | `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
 | `ANTHROPIC_API_KEY` | **Yes** | The Sonnet verify / Sonnet decide calls (§5a.4). `synopsize` runs on a local Ollama-served model instead -- see §5a.4. |
 | `SLACK_WEBHOOK_URL` | No | Slack incoming-webhook URL that powers the three alert events (§5a.2b). If unset, `sendAlert` logs a warning and no-ops — every event still happens and is still recorded in the ledger, but no human is paged. Bearer-equivalent secret: never hardcoded, never defaulted, never logged (§2). |
+| `OLLAMA_BASE_URL` | No | Overrides the local Ollama server URL `synopsize` calls (§5a.4). Defaults to `http://127.0.0.1:11434` — correct for the normal colocated deployment; not a secret, just a deployment override. |
 
 **What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
 issues an HTTP request at all — it returns a synthetic `DRYRUN-<client_order_id>` order
@@ -526,8 +527,10 @@ a rejected order, or any declined decision including one declined by this
 same limit, never counts) within a rolling `RATE_LIMIT_WINDOW_MINUTES` (15)
 window, checked by `recentTradeCount` (`ledger.ts`) and enforced in
 `pipeline.ts` immediately after the kill-switch/circuit-breaker and
-rumor-rung checks — before any Haiku/Sonnet call, so a rate-limited item
-never spends real API cost. Global scope, not per-event: this is a pacing
+rumor-rung checks — before any model call at all (including the local
+synopsis model), so a rate-limited item never spends real API cost on the
+Sonnet verify/decide calls, nor local compute on synopsis. Global scope, not
+per-event: this is a pacing
 question ("is the system trading too fast right now?"), independent of which
 market a decision happens to land on.
 
