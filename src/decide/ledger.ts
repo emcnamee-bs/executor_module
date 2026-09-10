@@ -168,9 +168,16 @@ CREATE TABLE IF NOT EXISTS kalshi_errors (
   error_message TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ollama_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  model TEXT NOT NULL,
+  error_message TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS circuit_breaker_trips (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors')),
+  signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors','ollama-errors')),
   reason TEXT NOT NULL,
   tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   cleared_at TEXT
@@ -232,12 +239,54 @@ function migrateDecisionsRealizedPnlCents(db: Database.Database): void {
   }
 }
 
+/**
+ * `circuit_breaker_trips`'s `signal` CHECK constraint is fixed at table-creation
+ * time and SQLite cannot ALTER a CHECK constraint -- unlike migrateDecisionsSettledAt
+ * and migrateDecisionsRealizedPnlCents above (plain ADD COLUMN), adding a new
+ * allowed signal value to a pre-existing table requires rebuilding it: create a
+ * new table with the wider CHECK, copy every row across unchanged, drop the old
+ * table, rename the new one into place. Detected via the stored CREATE TABLE SQL
+ * text in sqlite_master (mirroring PRAGMA table_info's role in the ADD COLUMN
+ * migrations above, just for a constraint instead of a column) -- idempotent,
+ * a no-op once the table already allows 'ollama-errors'. Every existing row's
+ * id, signal, reason, tripped_at, and cleared_at are preserved exactly; nothing
+ * is re-derived or defaulted.
+ */
+function migrateCircuitBreakerTripsSignal(db: Database.Database): void {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'circuit_breaker_trips'`)
+    .get() as { sql: string } | undefined;
+  if (!row || row.sql.includes('ollama-errors')) return;
+  // Wrapped in a real transaction (not a bare db.exec(), which runs each
+  // statement in its own implicit transaction) -- a crash between CREATE and
+  // RENAME would otherwise leave a stray circuit_breaker_trips_new table that
+  // fails every subsequent openLedger() loudly, forever, until manually
+  // dropped. BEGIN/COMMIT makes the whole rebuild atomic: either it fully
+  // applies, or SQLite rolls it back to the untouched original table.
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE circuit_breaker_trips_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors','ollama-errors')),
+        reason TEXT NOT NULL,
+        tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        cleared_at TEXT
+      );
+      INSERT INTO circuit_breaker_trips_new (id, signal, reason, tripped_at, cleared_at)
+        SELECT id, signal, reason, tripped_at, cleared_at FROM circuit_breaker_trips;
+      DROP TABLE circuit_breaker_trips;
+      ALTER TABLE circuit_breaker_trips_new RENAME TO circuit_breaker_trips;
+    `);
+  })();
+}
+
 export function openLedger(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
   migrateDecisionsSettledAt(db);
   migrateDecisionsRealizedPnlCents(db);
+  migrateCircuitBreakerTripsSignal(db);
   return db;
 }
 
@@ -534,7 +583,7 @@ export function blockMarket(
   ).run({ marketTicker, reason, expectedContracts, realContracts });
 }
 
-export type CircuitBreakerSignal = 'failed-orders' | 'divergences' | 'kalshi-errors';
+export type CircuitBreakerSignal = 'failed-orders' | 'divergences' | 'kalshi-errors' | 'ollama-errors';
 
 export const CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD = 3;
 export const CIRCUIT_BREAKER_FAILED_ORDERS_WINDOW_MINUTES = 30;
@@ -542,6 +591,8 @@ export const CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD = 2;
 export const CIRCUIT_BREAKER_DIVERGENCES_WINDOW_MINUTES = 60;
 export const CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD = 5;
 export const CIRCUIT_BREAKER_KALSHI_ERRORS_WINDOW_MINUTES = 15;
+export const CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD = 5;
+export const CIRCUIT_BREAKER_OLLAMA_ERRORS_WINDOW_MINUTES = 15;
 
 /**
  * True if EITHER the manual kill switch or any automatic circuit breaker is
@@ -620,6 +671,34 @@ export function recordKalshiError(db: Database.Database, callSite: string, error
     }
   } catch (err) {
     console.error('[recordKalshiError] failed to log/evaluate a Kalshi API error (not fatal):', err);
+  }
+}
+
+/**
+ * Logs one Ollama call failure (from any local model call -- synopsize today,
+ * potentially others later) and immediately checks whether the ollama-errors
+ * signal should trip. Mirrors recordKalshiError exactly, including swallowing
+ * its OWN failures: this is called from inside ollamaClient.ts's catch blocks,
+ * which are about to rethrow the real error, and this logging must never
+ * interfere with that rethrow.
+ */
+export function recordOllamaError(db: Database.Database, model: string, errorMessage: string): void {
+  try {
+    db.prepare(`INSERT INTO ollama_errors (model, error_message) VALUES (?, ?)`).run(model, errorMessage);
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM ollama_errors
+         WHERE occurred_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)`
+      )
+      .get(`-${CIRCUIT_BREAKER_OLLAMA_ERRORS_WINDOW_MINUTES} minutes`) as { n: number };
+    if (row.n >= CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD) {
+      tripBreaker(
+        db, 'ollama-errors',
+        `${row.n} Ollama errors within ${CIRCUIT_BREAKER_OLLAMA_ERRORS_WINDOW_MINUTES} minutes (latest: ${model}: ${errorMessage})`
+      );
+    }
+  } catch (err) {
+    console.error('[recordOllamaError] failed to log/evaluate an Ollama error (not fatal):', err);
   }
 }
 

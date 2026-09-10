@@ -23,6 +23,7 @@ import {
   tripBreaker,
   clearAllTrips,
   recordKalshiError,
+  recordOllamaError,
   checkFailedOrdersSignal,
   checkDivergencesSignal,
   recordProcessStarting,
@@ -35,6 +36,7 @@ import {
   CIRCUIT_BREAKER_FAILED_ORDERS_THRESHOLD,
   CIRCUIT_BREAKER_DIVERGENCES_THRESHOLD,
   CIRCUIT_BREAKER_KALSHI_ERRORS_THRESHOLD,
+  CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD,
   type DecisionRecord,
 } from '../../src/decide/ledger.js';
 import BetterSqlite3 from 'better-sqlite3';
@@ -780,6 +782,28 @@ describe('ledger', () => {
       expect(isTradingHalted(db)).toBe(false);
     });
 
+    it('recordOllamaError logs a row and trips ollama-errors at exactly the threshold', () => {
+      for (let i = 0; i < CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD - 1; i++) {
+        recordOllamaError(db, 'qwen2.5:3b-instruct-q4_K_M', `error ${i}`);
+      }
+      expect(isTradingHalted(db)).toBe(false);
+      recordOllamaError(db, 'qwen2.5:3b-instruct-q4_K_M', 'the final straw');
+      expect(isTradingHalted(db)).toBe(true);
+      const trip = db.prepare('SELECT signal FROM circuit_breaker_trips').get() as { signal: string };
+      expect(trip.signal).toBe('ollama-errors');
+    });
+
+    it('an ollama_errors row outside the lookback window does not count toward the threshold', () => {
+      for (let i = 0; i < CIRCUIT_BREAKER_OLLAMA_ERRORS_THRESHOLD; i++) {
+        recordOllamaError(db, 'qwen2.5:3b-instruct-q4_K_M', `error ${i}`);
+      }
+      clearAllTrips(db);
+      // Backdate every logged row well outside the 15-minute window.
+      db.prepare("UPDATE ollama_errors SET occurred_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')").run();
+      recordOllamaError(db, 'qwen2.5:3b-instruct-q4_K_M', 'one fresh error');
+      expect(isTradingHalted(db)).toBe(false);
+    });
+
     it('checkFailedOrdersSignal trips failed-orders at exactly the threshold, counting only rejected/unknown/error', () => {
       let coidSeq = 0;
       const makeOrder = () => {
@@ -838,6 +862,7 @@ describe('ledger', () => {
       expect(() => checkFailedOrdersSignal(brokenDb, 'rejected')).not.toThrow();
       expect(() => checkDivergencesSignal(brokenDb)).not.toThrow();
       expect(() => recordKalshiError(brokenDb, 'getPositions', 'boom')).not.toThrow();
+      expect(() => recordOllamaError(brokenDb, 'qwen2.5:3b-instruct-q4_K_M', 'boom')).not.toThrow();
     });
   });
 
@@ -1190,5 +1215,45 @@ describe('openLedger migration of the REAL production shape (post-slice-5: settl
     db = openLedger(dbPath);
     const columns = db.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>;
     expect(columns.filter((c) => c.name === 'realized_pnl_cents')).toHaveLength(1);
+  });
+});
+
+describe('openLedger migration of circuit_breaker_trips.signal (pre-ollama-errors CHECK)', () => {
+  it('migrateCircuitBreakerTripsSignal widens the signal CHECK for a pre-existing database while preserving every existing row exactly', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'ledger-migration-'));
+    const dbPath = path.join(dir, 'old.db');
+    const raw = new BetterSqlite3(dbPath);
+    raw.exec(`
+      CREATE TABLE circuit_breaker_trips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal TEXT NOT NULL CHECK (signal IN ('failed-orders','divergences','kalshi-errors')),
+        reason TEXT NOT NULL,
+        tripped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        cleared_at TEXT
+      );
+    `);
+    raw.prepare(`INSERT INTO circuit_breaker_trips (signal, reason, cleared_at) VALUES (?, ?, ?)`)
+      .run('kalshi-errors', 'a pre-existing historical trip', '2026-01-01T00:00:00.000Z');
+    raw.close();
+
+    const migrated = openLedger(dbPath);
+    const rows = migrated.prepare(`SELECT * FROM circuit_breaker_trips`).all() as Array<{
+      signal: string; reason: string; cleared_at: string | null;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].signal).toBe('kalshi-errors');
+    expect(rows[0].reason).toBe('a pre-existing historical trip');
+    expect(rows[0].cleared_at).toBe('2026-01-01T00:00:00.000Z');
+
+    // The whole point: a value the OLD CHECK would have rejected now inserts cleanly.
+    expect(() =>
+      migrated.prepare(`INSERT INTO circuit_breaker_trips (signal, reason) VALUES ('ollama-errors', 'test')`).run()
+    ).not.toThrow();
+
+    // Idempotent: running openLedger again against the now-migrated file is a no-op, not an error.
+    expect(() => openLedger(dbPath)).not.toThrow();
+
+    migrated.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

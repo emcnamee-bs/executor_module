@@ -1,32 +1,20 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type { OllamaClient } from './ollamaClient.js';
 
 export async function synopsize(
-  client: Anthropic,
+  client: OllamaClient,
   headline: string,
   snippet: string | null
 ): Promise<string> {
   const sourceText = [headline, snippet].filter((s): s is string => Boolean(s)).join('\n\n');
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 512,
-    messages: [
-      {
-        role: 'user',
-        content: `Summarize what this news item is actually about, in 2-3 plain sentences. Do not speculate beyond what the text says, and do not add commentary about its significance.\n\n${sourceText}`,
-      },
-    ],
-  });
-
-  const textBlock = response.content.find(
-    (b): b is Anthropic.TextBlock => b.type === 'text'
+  const content = await client.chat(
+    'qwen2.5:3b-instruct-q4_K_M',
+    `Summarize what this news item is actually about, in 2-3 plain sentences. Do not speculate beyond what the text says, and do not add commentary about its significance.\n\n${sourceText}`
   );
-  if (!textBlock) {
-    throw new Error('Haiku returned no text content for the synopsis');
-  }
-  const summary = textBlock.text.trim();
+
+  const summary = content.trim();
   if (summary.length === 0) {
-    throw new Error('Haiku returned an empty synopsis');
+    throw new Error('Local model returned an empty synopsis');
   }
   return summary;
 }

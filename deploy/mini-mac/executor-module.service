@@ -1,6 +1,8 @@
 [Unit]
-# The live executor: news scan -> keyphrase match -> Haiku synopsis -> Sonnet verify
-# -> Sonnet decide -> real order execution against Kalshi, for market KXAPRPOTUS.
+# The live executor: news scan -> keyphrase match -> local-model synopsis -> Sonnet
+# verify -> Sonnet decide -> real order execution against Kalshi, for market
+# KXAPRPOTUS. Synopsis runs on a local Ollama-served Qwen model (HANDOFF.md Sec
+# 5a.4); verify and decide stay on the real Anthropic API.
 # Consumes the local `iip:items` Redis stream fed by this box's own iip.service
 # instance (deploy/mini-mac/iip.service) -- both run on mini-mac, nothing here talks
 # to any other host.
@@ -29,6 +31,17 @@ WorkingDirectory=%h/executor_module
 # naming any required variable that's absent (HANDOFF.md Sec 5a.1), so a missing
 # .env fails the same way a missing variable already does, not silently.
 EnvironmentFile=%h/executor_module/.env
+
+# Ollama installs as a system-level unit; this is a user-level unit, so a bare
+# `After=ollama.service` cannot order across that systemd namespace boundary --
+# it would silently resolve to nothing and do nothing. This bounded-retry probe
+# is the real substitute: up to 30 attempts (60s) waiting for Ollama's own API
+# to answer before this service's main process starts. If Ollama never comes
+# up, this ExecStartPre fails, the whole unit fails to start, and the existing
+# Restart=always/RestartSec=10 retries the entire sequence -- including this
+# probe again -- rather than starting the main process against a dependency
+# that was never ready.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && exit 0; sleep 2; done; echo "Ollama not ready after 60s" >&2; exit 1'
 
 ExecStart=%h/executor_module/node_modules/.bin/tsx %h/executor_module/src/main.ts
 
