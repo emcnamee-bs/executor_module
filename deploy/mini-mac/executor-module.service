@@ -32,6 +32,12 @@ WorkingDirectory=%h/executor_module
 # .env fails the same way a missing variable already does, not silently.
 EnvironmentFile=%h/executor_module/.env
 
+# Which trade profile this live unit runs (trades/kxaprpotus/) and where to validate its
+# direct sources. KALSHI_DRY_RUN is deliberately NOT set here: it stays the operator's
+# explicit choice in .env.
+Environment=EXECUTOR_TRADE=kxaprpotus
+Environment=IIP_SOURCES_FILE=%h/Internet_Info_Plug/config/sources.minimac.yaml
+
 # Ollama installs as a system-level unit; this is a user-level unit, so a bare
 # `After=ollama.service` cannot order across that systemd namespace boundary --
 # it would silently resolve to nothing and do nothing. This bounded-retry probe

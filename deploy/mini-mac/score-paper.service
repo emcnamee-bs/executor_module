@@ -1,0 +1,26 @@
+[Unit]
+# Settles finished paper markets: for every per-trade ledger under data/<trade>/, looks
+# up the market result on Kalshi's public endpoints and fills in settled_at/result/
+# pnl_cents on paper_positions. Needs no Anthropic key and places no orders.
+# Triggered daily by score-paper.timer.
+Description=executor_module paper-trade settlement scoring
+Documentation=file:%h/executor_module/HANDOFF.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/executor_module
+EnvironmentFile=%h/executor_module/.env
+# Same as `npm run score-paper` but calls tsx directly (npm would try to write its cache
+# under the read-only home). One ledger per run (scripts/score-paper.ts reads
+# EXECUTOR_LEDGER_PATH); a failure on one ledger must not stop the others, but the unit
+# still ends failed if any failed.
+ExecStart=/bin/sh -c 'rc=0; for d in data/*/decisions.db; do [ -e "$d" ] || continue; EXECUTOR_LEDGER_PATH="$d" %h/executor_module/node_modules/.bin/tsx scripts/score-paper.ts || rc=1; done; exit $rc'
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=score-paper
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/executor_module/data %h/executor_module/logs
