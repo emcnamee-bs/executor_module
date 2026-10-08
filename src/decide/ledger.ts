@@ -721,8 +721,8 @@ export function recordKalshiError(db: Database.Database, callSite: string, error
 }
 
 /**
- * Logs one Ollama call failure (from any local model call -- synopsize today,
- * potentially others later) and immediately checks whether the ollama-errors
+ * Logs one Ollama call failure (from any local model call -- the relevance gate today,
+ * others later) and immediately checks whether the ollama-errors
  * signal should trip. Mirrors recordKalshiError exactly, including swallowing
  * its OWN failures: this is called from inside ollamaClient.ts's catch blocks,
  * which are about to rethrow the real error, and this logging must never

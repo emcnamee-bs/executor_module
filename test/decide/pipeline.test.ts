@@ -213,13 +213,17 @@ describe('runDecisionPipeline', () => {
   });
 
   it('records a skip when the kill switch is set, and makes no model calls', async () => {
+    const fetchSpy = vi.fn(async () => null);
     process.env.EXECUTOR_TRADING_HALTED = 'true';
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: fetchSpy, kalshiClient: stubKalshiClient() });
 
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(gateModule.runGate).not.toHaveBeenCalled();
+    expect(triageModule.triageItem).not.toHaveBeenCalled();
+    expect(decideModule.decideTrade).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
     expect(hasOpenPosition(db, 'story-1', EVENT)).toBe(false);
     // The recorded rung is the item's REAL rung, not a placeholder. This fixture's
@@ -234,13 +238,17 @@ describe('runDecisionPipeline', () => {
   });
 
   it('records a skip with a "circuit breaker tripped" reason when a breaker is tripped, distinct from the manual kill switch, and makes no model calls', async () => {
+    const fetchSpy = vi.fn(async () => null);
     tripBreaker(db, 'failed-orders', 'test trip');
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem();
 
-    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: fetchSpy, kalshiClient: stubKalshiClient() });
 
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(gateModule.runGate).not.toHaveBeenCalled();
+    expect(triageModule.triageItem).not.toHaveBeenCalled();
+    expect(decideModule.decideTrade).not.toHaveBeenCalled();
     expect(fetchLadder).not.toHaveBeenCalled();
     const row = onlyRowFor(db, item.item_id);
     expect(row.reason).toBe('circuit breaker tripped');
@@ -315,13 +323,15 @@ describe('runDecisionPipeline', () => {
   });
 
   it('records a skip when rung is rumor without calling EITHER model step', async () => {
+    const fetchSpy = vi.fn(async () => null);
     // The rung gate depends on nothing the gate or triage produce, so a
     // guaranteed-skip 'rumor' item must not burn a local-model call or a Sonnet call.
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
     const item = baseItem({ trust_tier: 3, story_key: null });
 
-    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: fetchSpy, kalshiClient: stubKalshiClient() });
 
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(gateModule.runGate).not.toHaveBeenCalled();
     expect(triageModule.triageItem).not.toHaveBeenCalled();
     expect(decideModule.decideTrade).not.toHaveBeenCalled();
@@ -734,8 +744,9 @@ describe('runDecisionPipeline', () => {
   // --- Task 2 (rate-time-limits slice 9): 1 real fill per 15-minute window -----
 
   it('declines a second item within the rate-limit window, without spending a single model call on it', async () => {
+    const fetchSpy = vi.fn(async () => null);
     const first = baseItem({ item_id: 'item-rate-1', dedup_id: 'dedup-rate-1', story_key: 'story-rate-1' });
-    await runDecisionPipeline(first, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(first, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: fetchSpy, kalshiClient: stubKalshiClient() });
     // Confirm the fixture actually produced a real fill -- if it didn't, this
     // test would trivially "pass" for the wrong reason.
     expect(onlyRowFor(db, first.item_id).would_trade).toBe(1);
@@ -743,12 +754,14 @@ describe('runDecisionPipeline', () => {
     vi.mocked(gateModule.runGate).mockClear();
     vi.mocked(triageModule.triageItem).mockClear();
     vi.mocked(decideModule.decideTrade).mockClear();
+    fetchSpy.mockClear();
     const second = baseItem({ item_id: 'item-rate-2', dedup_id: 'dedup-rate-2', story_key: 'story-rate-2' });
-    await runDecisionPipeline(second, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    await runDecisionPipeline(second, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: fetchSpy, kalshiClient: stubKalshiClient() });
 
     const row = onlyRowFor(db, second.item_id);
     expect(row.would_trade).toBe(0);
     expect(row.reason).toBe('rate limit: 1 trade(s) per 15 minutes already reached');
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(gateModule.runGate).not.toHaveBeenCalled();
     expect(triageModule.triageItem).not.toHaveBeenCalled();
     expect(decideModule.decideTrade).not.toHaveBeenCalled();
@@ -871,6 +884,71 @@ describe('runDecisionPipeline', () => {
     expect(orderModule.placeOrder).not.toHaveBeenCalled();
   });
 
+  it('falls back to the headline+snippet when a fetched page yields no text (JS-rendered page)', async () => {
+    const empty = async () => ({ title: '', description: '', text: '', truncated: false });
+    await runDecisionPipeline(baseItem({ item_id: 'empty-page', url: 'https://example.com/a' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: empty as any, kalshiClient: stubKalshiClient() });
+    const gateInput = (gateModule.runGate as any).mock.calls[0][1];
+    const triageArgs = (triageModule.triageItem as any).mock.calls[0][2];
+    const decideCtx = (decideModule.decideTrade as any).mock.calls[0][2];
+    for (const a of [gateInput, triageArgs, decideCtx]) {
+      expect(a.excerptSource).toBe('snippet');
+      expect(a.excerptText ?? a.articleText).toContain('The unemployment rate declined to 3.9% in July.');
+    }
+  });
+
+  it('fetches the article with exactly (item.url, { maxChars: 2000 }), never raw_url, once', async () => {
+    const fetchSpy = vi.fn(async () => ({ title: 'T', description: '', text: 'Page body about jobs.', truncated: false }));
+    const item = baseItem({ item_id: 'fetch-args', url: 'https://example.com/a', raw_url: 'https://example.com/raw' });
+    await runDecisionPipeline(item, { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: fetchSpy as any, kalshiClient: stubKalshiClient() });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0]).toEqual(['https://example.com/a', { maxChars: 2000 }]);
+    expect((triageModule.triageItem as any).mock.calls[0][2].excerptSource).toBe('page');
+  });
+
+  it('passes the gate reason through to triage on the non-direct path', async () => {
+    await runDecisionPipeline(baseItem({ item_id: 'gate-reason' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    expect((triageModule.triageItem as any).mock.calls[0][2].gateReason).toBe('jobs data can move approval');
+  });
+
+  it('LIVE total-exposure cap: with existing exposure at the cap, a would-trade item is declined and placeOrder is never called', async () => {
+    // Per-trade notional is capped at 125c, so four rows fill the 500c total cap.
+    for (let i = 0; i < 4; i++) {
+      ledgerModule.recordDecision(db, {
+        itemId: `seed-exposure-${i}`, storyKey: `seed-story-${i}`, eventTicker: EVENT, marketTicker: 'KXAPRPOTUS-26AUG28-40.6', side: 'yes',
+        rung: 'reported', direction: 'up', magnitudePts: 0.3, contracts: 5, entryPriceCents: 25, notionalCents: 125,
+        edgeCents: 3, wouldTrade: true, reason: 'seed', orderStatus: 'resolved',
+      });
+    }
+    // Move the seeds outside the rate-limit window so only the exposure cap can decline.
+    db.prepare("UPDATE decisions SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') WHERE item_id LIKE 'seed-exposure-%'").run();
+    expect(totalExposureCents(db, EVENT)).toBe(500);
+    await runDecisionPipeline(baseItem({ item_id: 'over-cap' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    const row = onlyRowFor(db, 'over-cap');
+    expect(row.would_trade).toBe(0);
+    expect(row.reason).toMatch(/total exposure cap reached/);
+    expect(orderModule.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it.each(['false', '1', 'TRUE'])('KALSHI_DRY_RUN=%s is not paper: a non-band profile refuses and a band profile writes no paper row', async (v) => {
+    process.env.KALSHI_DRY_RUN = v;
+    try {
+      const th = { ...TEST_PROFILE, profile: { ...TEST_PROFILE.profile, marketStructure: 'threshold' as const } };
+      await runDecisionPipeline(baseItem({ item_id: 'nonpaper-th' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: th, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+      expect(onlyRowFor(db, 'nonpaper-th').reason).toMatch(/paper-only/);
+      await runDecisionPipeline(baseItem({ item_id: 'nonpaper-band' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+      expect((db.prepare('SELECT COUNT(*) AS n FROM paper_positions').get() as any).n).toBe(0);
+    } finally {
+      delete process.env.KALSHI_DRY_RUN;
+    }
+  });
+
+  it('LIVE mode (dry-run unset): a band trade writes a real decision and NO paper row', async () => {
+    delete process.env.KALSHI_DRY_RUN;
+    await runDecisionPipeline(baseItem({ item_id: 'live-band' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    expect(onlyRowFor(db, 'live-band').would_trade).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM paper_positions').get() as any).n).toBe(0);
+  });
+
   describe('paper mode (KALSHI_DRY_RUN=true)', () => {
     beforeEach(() => { process.env.KALSHI_DRY_RUN = 'true'; });
     afterEach(() => { delete process.env.KALSHI_DRY_RUN; });
@@ -931,12 +1009,6 @@ describe('runDecisionPipeline', () => {
       expect(paperRows()).toHaveLength(0);
     });
 
-    it('is idempotent on redelivery: the same item never writes a second paper row', async () => {
-      await run(TEST_PROFILE, stubLadder(), 'paper-dup');
-      await run(TEST_PROFILE, stubLadder(), 'paper-dup');
-      expect(paperRows()).toHaveLength(1);
-    });
-
     it('survives a crash between the paper row and the decision row: re-running the item neither throws nor duplicates the paper row', async () => {
       await run(TEST_PROFILE, stubLadder(), 'paper-crash');
       db.prepare('DELETE FROM orders').run();
@@ -945,6 +1017,33 @@ describe('runDecisionPipeline', () => {
       expect(paperRows()).toHaveLength(1);
       expect(rowsFor(db, 'paper-crash')).toHaveLength(1);
       expect(onlyRowFor(db, 'paper-crash').reason).not.toMatch(/pipeline error/);
+    });
+    it('capture: a should_trade=false veto writes no paper row', async () => {
+      vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({ direction: 'up', magnitudePts: 0.1, shouldTrade: false, reasoning: 'too indirect' });
+      const cap = { ...TEST_PROFILE, profile: { ...TEST_PROFILE.profile, marketStructure: 'capture' as const } };
+      await run(cap, stubLadder(), 'capture-veto');
+      expect(paperRows()).toHaveLength(0);
+    });
+
+    it('binary: declines with a clear reason unless the event has exactly one market', async () => {
+      const bin = { ...TEST_PROFILE, profile: { ...TEST_PROFILE.profile, marketStructure: 'binary' as const } };
+      await run(bin, stubLadder(), 'binary-multi'); // 3 markets
+      expect(paperRows()).toHaveLength(0);
+      expect(orderModule.placeOrder).not.toHaveBeenCalled();
+      expect(onlyRowFor(db, 'binary-multi').reason).toMatch(/exactly one market/);
+    });
+
+    it('band: the paper row records the side the sizing chose (NO for the default up call, YES for a down call)', async () => {
+      vi.spyOn(orderModule, 'placeOrder').mockImplementation(async (input) => ({
+        clientOrderId: 'dry-cid', kalshiOrderId: 'DRYRUN-1', kalshiOrderStatus: 'executed',
+        filledContracts: input.contracts, avgFillPriceCents: input.entryPriceCents, status: 'filled', dryRun: true, errorDetail: null,
+      })); // dry-run fills are recorded as skips, so the second item is not rate-limited
+      await run(TEST_PROFILE, stubLadder(), 'paper-no'); // default decision: up 0.3 -> NO on the 40.6 band
+      vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({ direction: 'down', magnitudePts: 0.3, shouldTrade: true, reasoning: 'x' });
+      await run(TEST_PROFILE, stubLadder(), 'paper-yes'); // down 0.3 -> YES on the 40.2 band
+      const byItem = (id: string) => paperRows().find((r) => r.item_id === id);
+      expect(byItem('paper-no')).toMatchObject({ side: 'no', direction: 'up', market_ticker: 'KXAPRPOTUS-26AUG28-40.6' });
+      expect(byItem('paper-yes')).toMatchObject({ side: 'yes', direction: 'down', market_ticker: 'KXAPRPOTUS-26AUG28-40.2' });
     });
   });
 });

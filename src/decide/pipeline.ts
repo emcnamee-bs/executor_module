@@ -134,7 +134,10 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     // One fetch, capped at the per-source ceiling. Gate and triage see the first 800
     // characters of it (capped again inside their wrappers); the decision sees all of
     // it. A direct source IS the resolution data, so its own snippet is the article.
-    const fetched = isDirect ? null : await deps.fetchArticle(item.url, { maxChars: MAX_SOURCE_CHARS });
+    const fetchedRaw = isDirect ? null : await deps.fetchArticle(item.url, { maxChars: MAX_SOURCE_CHARS });
+    // A page that fetched but yielded no text (e.g. JS-rendered) is no article at all:
+    // fall back to the headline+snippet rather than feed the models an empty 'page'.
+    const fetched = fetchedRaw !== null && articleToText(fetchedRaw).trim() !== '' ? fetchedRaw : null;
     const article = fetched ?? snippetArticle(item.headline, item.snippet, MAX_SOURCE_CHARS);
     const excerptSource: 'page' | 'snippet' = fetched ? 'page' : 'snippet';
     const articleText = articleToText(article);
@@ -240,14 +243,16 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     }
 
     if (structure === 'binary') {
-      const market = ladder.bands[0];
+      // A binary event has exactly one market; anything else is a mis-pinned series, so
+      // decline rather than guess which market to buy.
+      const market = ladder.bands.length === 1 ? ladder.bands[0] : undefined;
       const binary = market
         ? evaluateBinarySizing({ market, direction: decision.direction, rung })
         : null;
       if (binary === null || !binary.wouldTrade) {
         recordDecision(
           db,
-          skipRecord(item, binary === null ? 'binary market has no open market' : binary.reason, {
+          skipRecord(item, binary === null ? `binary event must have exactly one market, found ${ladder.bands.length}` : binary.reason, {
             rung, eventTicker: ladder.eventTicker, direction: decision.direction, magnitudePts: decision.magnitudePts, orderStatus: 'resolved',
           })
         );
