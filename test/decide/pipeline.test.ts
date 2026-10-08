@@ -814,10 +814,12 @@ describe('runDecisionPipeline', () => {
   });
 
   it('passes the PROFILE series ticker to fetchLadder (not a hard-coded one)', async () => {
+    // A series different from the fixture's default, so a hard-coded KXAPRPOTUS cannot pass.
+    const gas = { ...TEST_PROFILE, profile: { ...TEST_PROFILE.profile, seriesTicker: 'KXAAAGASW' } };
     const fetchLadder = vi.fn().mockResolvedValue(null);
-    await runDecisionPipeline(baseItem({ item_id: 'ticker' }), { anthropicClient: client, ollamaClient, db, fetchLadder, profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
-    expect(fetchLadder).toHaveBeenCalledWith('KXAPRPOTUS', db);
-    expect(onlyRowFor(db, 'ticker').reason).toBe('no active KXAPRPOTUS event found');
+    await runDecisionPipeline(baseItem({ item_id: 'ticker' }), { anthropicClient: client, ollamaClient, db, fetchLadder, profile: gas, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    expect(fetchLadder).toHaveBeenCalledWith('KXAAAGASW', db);
+    expect(onlyRowFor(db, 'ticker').reason).toBe('no active KXAAAGASW event found');
   });
 
   it('bypasses the keyphrase-independent gate for a direct source and gives triage the snippet article', async () => {
