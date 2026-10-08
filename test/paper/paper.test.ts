@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { openLedger } from '../../src/decide/ledger.js';
-import { recordPaperPosition, hasPaperPosition, type PaperPositionRecord } from '../../src/paper/paper.js';
+import { recordPaperPosition, hasPaperPosition, PAPER_CAPS, paperExposureCents, type PaperPositionRecord } from '../../src/paper/paper.js';
 
 function rec(overrides: Partial<PaperPositionRecord> = {}): PaperPositionRecord {
   return {
@@ -89,5 +89,37 @@ describe('paper_positions', () => {
   it('enforces one paper position per item_id (UNIQUE)', () => {
     recordPaperPosition(db, rec({ itemId: 'dup' }));
     expect(() => recordPaperPosition(db, rec({ itemId: 'dup' }))).toThrow(/UNIQUE constraint failed/);
+  });
+});
+
+describe('paper caps and exposure', () => {
+  let dir: string;
+  let db: Database.Database;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'paper-caps-test-'));
+    db = openLedger(path.join(dir, 'test.db'));
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('has a $10 per-trade and $50 total research bankroll, distinct from the live caps', () => {
+    expect(PAPER_CAPS).toEqual({ perTradeCents: 1000, totalExposureCents: 5000 });
+  });
+
+  it('sums contracts x entry price over this event only, ignoring capture rows', () => {
+    const row = (itemId: string, event: string, side: 'yes' | 'no' | null, contracts: number, price: number | null) =>
+      recordPaperPosition(db, {
+        trade: 't', itemId, structure: side ? 'threshold' : 'capture', eventTicker: event, marketTicker: side ? `${event}-M` : null, side, contracts,
+        entryPriceCents: price, direction: 'up', magnitude: 0.1, edgeCents: 5, reasoning: 'r', ladderJson: '{}',
+      });
+    row('a', 'EV-1', 'yes', 3, 31);
+    row('b', 'EV-1', 'no', 2, 40);
+    row('c', 'EV-2', 'yes', 9, 50);
+    row('d', 'EV-1', null, 0, null);
+    expect(paperExposureCents(db, 'EV-1')).toBe(3 * 31 + 2 * 40);
+    expect(paperExposureCents(db, 'EV-2')).toBe(450);
+    expect(paperExposureCents(db, 'EV-3')).toBe(0);
   });
 });

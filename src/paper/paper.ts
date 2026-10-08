@@ -40,3 +40,21 @@ export function recordPaperPosition(db: Database.Database, rec: PaperPositionRec
 export function hasPaperPosition(db: Database.Database, itemId: string): boolean {
   return db.prepare(`SELECT 1 FROM paper_positions WHERE item_id = ?`).get(itemId) !== undefined;
 }
+
+/**
+ * A research bankroll for paper positions, deliberately larger than the live caps
+ * ($1.25 per trade, $5 total): at the live size a typical edge sizes to zero contracts
+ * and a paper run would record nothing. Applies ONLY to `paper_positions`; the live caps
+ * keep governing the simulated-order path and the real `decisions` table.
+ */
+export const PAPER_CAPS = { perTradeCents: 1000, totalExposureCents: 5000 } as const;
+
+export function paperExposureCents(db: Database.Database, eventTicker: string): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(contracts * entry_price_cents), 0) AS total
+         FROM paper_positions WHERE event_ticker = ? AND side IS NOT NULL`
+    )
+    .get(eventTicker) as { total: number };
+  return row.total;
+}

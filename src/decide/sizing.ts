@@ -39,6 +39,11 @@ export interface SizingInput {
    * 'threshold': cumulative "above strike" markets placed AT their strike.
    */
   curveKind?: 'band' | 'threshold';
+  /**
+   * Overrides the live caps. Only paper trading passes this (see src/paper/paper.ts):
+   * omitted, every cap is the live ledger constant, so real-money behaviour is unchanged.
+   */
+  caps?: { perTradeCents: number; totalExposureCents: number };
 }
 
 export interface SizingResult {
@@ -291,6 +296,7 @@ export interface ContractCapInput {
   stake: number;
   depthContracts: number;
   remainingExposureCents: number;
+  perTradeCents?: number;
 }
 
 /**
@@ -301,7 +307,7 @@ export interface ContractCapInput {
  */
 export function contractsWithinCaps(input: ContractCapInput): number {
   if (!(input.askCents > 0)) return 0;
-  const byCeiling = Math.floor(MAX_NOTIONAL_CENTS_PER_TRADE / input.askCents);
+  const byCeiling = Math.floor((input.perTradeCents ?? MAX_NOTIONAL_CENTS_PER_TRADE) / input.askCents);
   const byExposureRemaining = Math.floor(input.remainingExposureCents / input.askCents);
   const byKellyStake = Math.floor(byCeiling * input.kelly * input.stake);
   if (!Number.isFinite(byKellyStake)) return 0;
@@ -373,9 +379,10 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     );
   }
 
-  const remainingExposureCents = MAX_TOTAL_EXPOSURE_CENTS - input.currentTotalExposureCents;
+  const totalExposureCap = input.caps?.totalExposureCents ?? MAX_TOTAL_EXPOSURE_CENTS;
+  const remainingExposureCents = totalExposureCap - input.currentTotalExposureCents;
   if (remainingExposureCents <= 0) {
-    return decline(`total exposure cap reached (${input.currentTotalExposureCents}c of ${MAX_TOTAL_EXPOSURE_CENTS}c)`);
+    return decline(`total exposure cap reached (${input.currentTotalExposureCents}c of ${totalExposureCap}c)`);
   }
 
   let best: BandCandidate | null = null;
@@ -427,6 +434,7 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     stake,
     depthContracts: best.depthContracts,
     remainingExposureCents,
+    perTradeCents: input.caps?.perTradeCents,
   });
 
   if (contracts <= 0) {
