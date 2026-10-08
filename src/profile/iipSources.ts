@@ -13,6 +13,9 @@ export function loadIipSourceIds(file: string): string[] {
     const m = /^\s*-\s*id:\s*([A-Za-z0-9_]+)\s*$/.exec(line);
     if (m) ids.push(m[1]);
   }
+  if (ids.length === 0 && text.trim().length > 0) {
+    throw new Error(`IIP sources file has no source ids (expected "- id: <name>" entries): ${file}`);
+  }
   return ids;
 }
 

@@ -1,7 +1,7 @@
 export const MAX_BANK_TOKENS = 600;
 
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 4);
 }
 
 const HEADERS = ['TRADE:', 'SETTLES ON:', 'MOVES THE PRICE:', 'SETTLEMENT-SENSITIVE FACTS:', 'IGNORE:'] as const;
@@ -53,6 +53,13 @@ export function validateBank(text: string): void {
     throw new Error(
       `bank must contain exactly these headers in order: ${HEADERS.join(' ')}; found: ${order.join(' ') || 'none'}`
     );
+  }
+  const firstHeader = Math.min(
+    ...HEADERS.map((h) => text.search(new RegExp(`^${h}`, 'm'))).filter((i) => i >= 0),
+    text.length
+  );
+  if (text.slice(0, firstHeader).trim().length > 0) {
+    throw new Error('bank has text before the first header; only the five headed sections are allowed');
   }
   const by = (h: string): Section => sections.find((s) => s.header === h)!;
   for (const h of ['TRADE:', 'SETTLES ON:']) {

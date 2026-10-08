@@ -27,7 +27,13 @@ const ProfileSchema = z
     marketStructure: z.enum(['band', 'threshold', 'binary', 'capture']),
     magnitudeUnit: z.string().min(1).max(30),
     maxMagnitude: z.number().positive().finite(),
-    ledgerPath: z.string().min(1),
+    ledgerPath: z
+      .string()
+      .regex(
+        /^data\/([a-z0-9-]+\/)?[A-Za-z0-9._-]+\.db$/,
+        'ledgerPath must look like data/<file>.db or data/<trade>/<file>.db (lowercase trade dir, no absolute path)'
+      )
+      .refine((p) => !p.includes('..') && !p.includes('\\'), 'ledgerPath must not contain ".." or a backslash'),
     consumerGroup: z.string().regex(/^[A-Za-z0-9_-]{1,60}$/),
     generatedAt: z.string().min(1),
     generatorModel: z.string().min(1),
@@ -57,6 +63,7 @@ export function loadProfile(name: string, root: string = TRADES_ROOT): LoadedPro
   if (!NAME_RE.test(name)) {
     throw new Error(`invalid trade name ${JSON.stringify(name)}: use lowercase letters, digits and dashes`);
   }
+  // Symlinked profile directories/files are followed: the trades directory is operator-controlled.
   const dir = path.join(root, name);
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
     throw new Error(`trade profile directory not found: ${dir}`);
@@ -92,6 +99,21 @@ export function loadProfile(name: string, root: string = TRADES_ROOT): LoadedPro
     throw new Error(`bank.md is invalid in ${dir}: ${(err as Error).message}`);
   }
   const bankSha = crypto.createHash('sha256').update(bank).digest('hex');
+
+  const rawMeta = readRequired(dir, 'bank.meta.json');
+  let meta: unknown;
+  try {
+    meta = JSON.parse(rawMeta);
+  } catch (err) {
+    throw new Error(`bank.meta.json is invalid JSON in ${dir}: ${(err as Error).message}`);
+  }
+  const metaSha = (meta as { sha256?: unknown } | null)?.sha256;
+  if (typeof metaSha !== 'string' || metaSha !== bankSha) {
+    throw new Error(
+      `bank.meta.json sha256 does not match bank.md in ${dir} ` +
+        `(the bank was edited after it was generated; rebuild the profile or fix the meta file)`
+    );
+  }
 
   return { profile, keyphrases, bank, bankSha, dir };
 }

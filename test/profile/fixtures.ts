@@ -39,7 +39,7 @@ export function profileJson(name: string, over: Record<string, unknown> = {}): R
 export function writeProfile(
   root: string,
   name: string,
-  over: { profile?: Record<string, unknown>; bank?: string; keyphrases?: string[] } = {}
+  over: { profile?: Record<string, unknown>; bank?: string; keyphrases?: string[]; metaSha?: string } = {}
 ): string {
   const dir = path.join(root, name);
   fs.mkdirSync(dir, { recursive: true });
@@ -50,7 +50,7 @@ export function writeProfile(
   fs.writeFileSync(path.join(dir, 'bank.md'), bank);
   fs.writeFileSync(
     path.join(dir, 'bank.meta.json'),
-    JSON.stringify({ sha256: crypto.createHash('sha256').update(bank).digest('hex'), generatedAt: '2026-10-08T00:00:00Z' })
+    JSON.stringify({ sha256: over.metaSha ?? crypto.createHash('sha256').update(bank).digest('hex'), generatedAt: '2026-10-08T00:00:00Z' })
   );
   return dir;
 }

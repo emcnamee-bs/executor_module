@@ -74,6 +74,61 @@ describe('loadProfile', () => {
     expect(() => loadProfile('kxaaagasw', root)).toThrow(/at least 20 keyphrases/);
   });
 
+  it('fails naming bank.meta.json when it is missing', () => {
+    const dir = writeProfile(root, 'kxaaagasw');
+    fs.rmSync(path.join(dir, 'bank.meta.json'));
+    expect(() => loadProfile('kxaaagasw', root)).toThrow(/bank\.meta\.json/);
+  });
+
+  it('fails naming bank.meta.json when it is invalid JSON', () => {
+    const dir = writeProfile(root, 'kxaaagasw');
+    fs.writeFileSync(path.join(dir, 'bank.meta.json'), '{not json');
+    expect(() => loadProfile('kxaaagasw', root)).toThrow(/bank\.meta\.json is invalid JSON/);
+  });
+
+  it('fails when bank.meta.json has no sha256 string', () => {
+    const dir = writeProfile(root, 'kxaaagasw');
+    fs.writeFileSync(path.join(dir, 'bank.meta.json'), JSON.stringify({ sha256: 5 }));
+    expect(() => loadProfile('kxaaagasw', root)).toThrow(/bank\.meta\.json sha256 does not match/);
+  });
+
+  it('fails when bank.md was edited after the meta sha was recorded', () => {
+    const dir = writeProfile(root, 'kxaaagasw');
+    fs.writeFileSync(path.join(dir, 'bank.md'), GOOD_BANK.replace('Crude oil', 'Crude Oil'));
+    expect(() => loadProfile('kxaaagasw', root)).toThrow(/bank\.meta\.json sha256 does not match bank\.md/);
+  });
+
+  it('fails on an explicitly mismatched meta sha', () => {
+    writeProfile(root, 'kxaaagasw', { metaSha: 'a'.repeat(64) });
+    expect(() => loadProfile('kxaaagasw', root)).toThrow(/does not match bank\.md/);
+  });
+
+  it.each([
+    ['data/decisions.db', true],
+    ['data/kxaaagasw/decisions.db', true],
+    ['/etc/x.db', false],
+    ['../x.db', false],
+    ['data/../x.db', false],
+    ['data/a/../../x.db', false],
+    ['data/x.txt', false],
+    ['data/Up Per/x.db', false],
+    ['C:\\x.db', false],
+    ['data/a/b/c.db', false],
+  ])('ledgerPath %j accepted=%s', (ledgerPath, ok) => {
+    writeProfile(root, 'kxaaagasw', { profile: { ledgerPath } });
+    if (ok) expect(() => loadProfile('kxaaagasw', root)).not.toThrow();
+    else expect(() => loadProfile('kxaaagasw', root)).toThrow(/ledgerPath/);
+  });
+
+  it('counts phrases after single-word ones are dropped', () => {
+    const phrases = [
+      ...Array.from({ length: 15 }, (_, i) => `word${i}`),
+      ...Array.from({ length: 15 }, (_, i) => `two words ${i}`),
+    ];
+    writeProfile(root, 'kxaaagasw', { keyphrases: phrases });
+    expect(() => loadProfile('kxaaagasw', root)).toThrow(/at least 20 keyphrases/);
+  });
+
   it('rejects an invalid bank, naming the validator reason', () => {
     writeProfile(root, 'kxaaagasw', { bank: 'just some text' });
     expect(() => loadProfile('kxaaagasw', root)).toThrow(/bank\.md is invalid.*exactly these headers/s);
@@ -101,6 +156,11 @@ describe('iip source ids', () => {
     const p = { name: 'x', directSources: ['aaa_national_average', 'typo_source'] } as any;
     expect(() => assertDirectSourcesKnown(p, loadIipSourceIds(f))).toThrow(/typo_source/);
     expect(() => assertDirectSourcesKnown({ ...p, directSources: ['bls_releases'] }, loadIipSourceIds(f))).not.toThrow();
+  });
+  it('fails when a non-empty sources file yields no ids', () => {
+    const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'iip-')), 'sources.yaml');
+    fs.writeFileSync(f, 'sources:\n  - name: x\n');
+    expect(() => loadIipSourceIds(f)).toThrow(/no source ids/);
   });
   it('fails loudly when the sources file is unreadable', () => {
     expect(() => loadIipSourceIds('/nonexistent/sources.yaml')).toThrow(/IIP sources file/);
