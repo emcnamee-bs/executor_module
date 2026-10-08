@@ -49,6 +49,11 @@ tokens) for later analysis.
    warnings in every prompt.
 7. **Verbose AI logging is a hard requirement** (operator request), stored in the
    ledger database.
+8. **Direct information pipelines are built in `Internet_Info_Plug`** (operator
+   decision, 2026-10-07) so that markets whose resolution data we do not ingest today
+   can be traded properly. See section 11. This deliberately overrides the standing
+   "do not modify `Internet_Info_Plug`" rule in this repo's `CLAUDE.md`, for generic
+   source work only.
 
 Unchanged: rung/trust-tier logic, the kill switch, circuit breakers, the pacing limit,
 sizing, exposure caps, order placement, reconciliation, Slack alerts.
@@ -59,7 +64,7 @@ A profile is a directory, `trades/<name>/`, committed to git:
 
 | File | Contents |
 |---|---|
-| `profile.json` | `name`, `seriesTicker`, `title` (one line), `settlement` (how it resolves, 1-3 sentences, from Kalshi's own rules text), `gateModel`, `gateKeepAlive`, `decideContext` (what Sonnet should estimate), `generatedAt`, `generatorModel` |
+| `profile.json` | `name`, `seriesTicker`, `title` (one line), `settlement` (how it resolves, 1-3 sentences, from Kalshi's own rules text), `gateModel`, `gateKeepAlive`, `decideContext` (what Sonnet should estimate), `directSources` (iip source ids that ARE this market's resolution data; see section 11), `generatedAt`, `generatorModel` |
 | `keyphrases.json` | the keyphrase list (the 330-phrase style list from the generator) |
 | `bank.md` | the knowledge bank, <= ~500 tokens |
 | `bank.meta.json` | sha256 of `bank.md`, token estimate, `generatedAt`, source rules text hash |
@@ -116,8 +121,11 @@ article that never names the commodity.
 
 ## 3. Runtime flow per item
 
-1. Consume stream entry; match against the **profile's** keyphrases (title + first
-   paragraph, as today).
+1. Consume stream entry. If its `source_id` is in the profile's `directSources`, skip
+   the keyphrase match and the Qwen gate (the item is the market's own resolution data,
+   not news about it) and go to step 2 then straight to Sonnet triage using the item's
+   factual snippet as the excerpt (no fetch). Otherwise match against the **profile's**
+   keyphrases (title + first paragraph, as today).
 2. Rung / kill-switch / circuit-breaker / pacing checks, **before any fetch or model
    call**, unchanged. A `rumor` item still stops here.
 3. **Fetch excerpt** (section 4). Failure is non-fatal: fall back to the iip snippet.
@@ -296,6 +304,119 @@ which can lead to a real order. The guards are few, structural and cheap in toke
 - The profile build is tested with a fake Anthropic client; the validator's rejection
   of an oversized or malformed bank is tested to leave existing files untouched.
 
+## 11. Direct information pipelines (`Internet_Info_Plug` work)
+
+### Why
+
+Of the ten candidate paper-trade markets (picked 2026-10-07 from Kalshi's open markets
+closing within a month), four settle on or are driven by information we do not ingest:
+`KXTRUMPACT` (White House presidential actions), `KXAAAGASW` (AAA gas price),
+`KXHORMUZWEEKLY` (IMF PortWatch transit calls) and `KXFEDDECISION` (Federal Reserve).
+Without direct sources the pipeline would only see them through second-hand news.
+
+### Boundary
+
+Authorized by the operator on 2026-10-07 as an explicit exception to this repo's
+`CLAUDE.md`. The two rules that rule protects still hold: (1) **no market-specific
+logic inside `iip/`**: no market ticker, threshold, strike or market keyword, only
+generic sources and one generic adapter, with everything market-specific living in
+trade profiles; (2) **`Internet_Info_Plug/executor/` and its safety guards are not
+touched.** The `ai1` baseline deployment's configuration is not changed (see
+Deployment). The `CLAUDE.md` text in both repos is updated to describe this exception
+once the operator approves the wording.
+
+### Sources (reachability verified from mini-mac, 2026-10-08)
+
+| Source (proposed id) | URL | Adapter | Tier | Serves |
+|---|---|---|---|---|
+| `federal_reserve_monetary` | federalreserve.gov/feeds/press_monetary.xml | existing `feed` (config only) | 1 | Fed decision |
+| `federal_reserve_press` | federalreserve.gov/feeds/press_all.xml | `feed` | 1 | Fed decision |
+| `federal_reserve_speeches` | federalreserve.gov/feeds/speeches_and_testimony.xml | `feed` | 1 | Fed decision |
+| `whitehouse_presidential_actions` | whitehouse.gov/presidential-actions/feed/ (about 570 KB) | `feed` | 1 | presidential-actions count, executive-action markets |
+| `eia_today_in_energy` | eia.gov/rss/todayinenergy.xml | `feed` | 1 | gas, diesel |
+| `nhc_atlantic` | nhc.noaa.gov/index-at.xml | `feed` | 1 | gas (Gulf storms) |
+| `oilprice_main`, `rigzone_latest` | oilprice.com/rss/main, rigzone.com/news/rss/rigzone_latest.aspx | `feed` | 3 | gas, diesel, Hormuz |
+| `npr_news`, `politico_politics`, `thehill_news` | feeds.npr.org/1001/rss.xml, rss.politico.com/politics-news.xml, thehill.com/feed/ | `feed` | 3 | approval, policy, Iran |
+| `ukmto_advisories` | ukmto.org (HTML) | existing `primary` page watcher | 1 | Hormuz |
+| `aaa_national_average` | gasprices.aaa.com ("Today's AAA National Average $x.xxxx" in the page) | **new `series`** | 1 | gas price |
+| `imf_portwatch_hormuz` | PortWatch ArcGIS FeatureServer `Daily_Chokepoints_Data`, filtered to one chokepoint, newest first | **new `series`** | 1 | Hormuz transit calls |
+
+Not usable: CENTCOM news (403 from mini-mac). The PortWatch series lags about four days
+(newest point on 2026-10-04 when queried on 2026-10-08) and currently shows 0-4 transit
+calls per day, so it is a settlement tracker, not a breaking-news feed.
+Tier-3 sources reach a trade only through the existing corroboration rule
+(`rung` is `reported` for tier <= 2 and `rumor` otherwise, unless corroborated by >= 2
+sources); this is existing behaviour, deliberately unchanged.
+
+### The `series` adapter
+
+One new generic adapter in `iip/adapters/series.py`, registered in `registry.py` and
+`__main__.build_adapter`, implementing the existing `Adapter` protocol. Config (all
+generic, no market knowledge): `url`, optional `params`, `extract` (a JSON path **or**
+a regex with one capture group), `label`, `unit`, `emit_on` (`new_point` or
+`change_ge: <delta>`), `rate_limit`, `expected_gap`.
+
+- Each poll fetches, extracts one numeric value and its data date, and emits **one
+  `RawItem` per new data point** (never re-emitting an unchanged value). The item carries
+  the factual statement in `snippet` (value, unit, data date, previous value, delta);
+  the headline is templated and honestly flagged `synthetic_headline`, `source_publish_ts`
+  is the data date, and the URL is the data page.
+- **A failed extraction is an error, never "no change".** If the page or API returns
+  200 but the value cannot be extracted (markup change, schema change, empty result), the
+  adapter reports DEGRADED and emits nothing; it must never emit 0 or reuse the old value.
+  This is iip's governing rule ("a broken source must never be indistinguishable from a
+  quiet one") applied to the new adapter.
+- Thresholds, market tickers and "above/below" logic are not in the adapter or its
+  config; deciding what a value means for a market is the executor profile's job.
+
+### Executor side: `directSources`
+
+A profile lists the iip source ids that are its resolution data (for example
+`KXAAAGASW` lists `aaa_national_average`; `KXHORMUZWEEKLY` lists `imf_portwatch_hormuz`;
+`KXTRUMPACT` lists `whitehouse_presidential_actions`; `KXFEDDECISION` lists the three
+Federal Reserve sources and `bls_releases`). Items from those sources bypass the
+keyphrase match and the Qwen gate and enter at Sonnet triage with the item's own factual
+snippet. All other new sources are *context* sources and flow through the normal
+keyphrase and gate path. The profile validator rejects a `directSources` id that is not
+a configured iip source.
+
+### Deployment
+
+`iip run` takes its config path as an argument. mini-mac runs a dedicated
+sources file (checked into `Internet_Info_Plug/config/`) that contains the existing
+sources plus the new ones; the `ai1` baseline run keeps `config/sources.yaml` exactly as
+it is, so its 28-day observation is unperturbed. Each new source is added with an explicit
+`rate_limit` (iip treats a missing one as unlimited) and a deliberately tolerant
+`expected_gap`, in the `cold` tier, then calibrated from a few days of observed data
+before silence alerts are tightened. The new files reach mini-mac by the same git-bundle
+transfer used for `executor_module`, followed by a service restart.
+
+### Testing (in `Internet_Info_Plug`)
+
+- `series` adapter unit tests with a fake HTTP client: new point emitted once;
+  unchanged value not re-emitted; extraction failure marks DEGRADED and emits nothing;
+  HTTP error and timeout paths; regex and JSON-path extractors; date and unit handling.
+- Config-load tests for each new `feed` source (the existing loader validation
+  catches a missing rate limit or URL), and a test that the mini-mac sources file loads.
+- The existing plug suite and the separate `executor/` suite must pass unchanged, and
+  `git diff` must show nothing under `executor/`.
+- A recorded-fixture test per new feed parses at least one real item from a saved copy
+  of today's response.
+
+### Risks
+
+- **Scraping fragility.** The AAA page and the PortWatch service are not contracts. The
+  DEGRADED rule makes breakage visible; it does not prevent it.
+- **Alerts on mini-mac go nowhere.** `iip`'s alert sink is macOS `osascript`, which fails
+  on Linux (about 2,400 failures logged since Sep 10), so a DEAD source on mini-mac pages
+  nobody today. The plan includes pointing iip alerts at a Linux-safe sink (log plus the
+  executor's existing Slack webhook pattern) as part of this work, because more sources
+  with an unobserved failure channel is the failure class this project exists to avoid.
+- **Volume.** Three broad tier-3 wires add items; tier 3 cannot trade alone and keyphrase
+  matching still bounds model calls.
+- **Terms of use and politeness.** Each source is polled at a deliberately slow rate
+  with the existing per-host rate limiter and the source's own user agent.
+
 ## Benchmark findings (mini-mac, 2026-10-07)
 
 A throwaway harness (`~/gate-bench/` on mini-mac; full per-call logs retained there as
@@ -380,4 +501,7 @@ release, and unloads afterwards to give the RAM back).
 
 Multi-trade routing in one process; per-decision profile-version columns in
 `decisions` (the AI log carries the bank hash and prompt hash instead); automatic
-regeneration schedules; changes to `Internet_Info_Plug`; GPU or remote inference.
+regeneration schedules; GPU or remote inference; deterministic "running total vs
+threshold" arithmetic for numeric markets (a natural follow-up once the direct series
+exist); changes to `Internet_Info_Plug` beyond the generic sources and one adapter in
+section 11.
