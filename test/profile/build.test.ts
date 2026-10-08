@@ -464,4 +464,18 @@ describe('cleanup never masks the build result, and stale dirs are swept', () =>
     expect(snapshot(first.dir)).toEqual(before);
     expect(names(trades())).toEqual(['kxaaagasw']);
   });
+
+  it('with SEVERAL .old dirs and no target it restores none, warns, and leaves every .old dir for a human (M6)', async () => {
+    const first = await buildTradeProfile(opts(), { client: fakeClient().client, fetchImpl: fakeFetch() });
+    const before = snapshot(first.dir);
+    fs.renameSync(first.dir, path.join(trades(), '.old-kxaaagasw-deadbeef'));
+    fs.mkdirSync(path.join(trades(), '.old-kxaaagasw-00000000'));
+    fs.mkdirSync(path.join(trades(), '.build-kxaaagasw-cafef00d'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(buildTradeProfile(opts(), { client: fakeClient({ keyphrases: ['one phrase'] }).client, fetchImpl: fakeFetch() })).rejects.toThrow(/at least 150/);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/2 previous copies .*\.old-kxaaagasw-00000000.*\.old-kxaaagasw-deadbeef.*restore one by hand/);
+    // Neither candidate was picked (the lexicographically first is the EMPTY one) and both survive.
+    expect(names(trades())).toEqual(['.old-kxaaagasw-00000000', '.old-kxaaagasw-deadbeef']);
+    expect(snapshot(path.join(trades(), '.old-kxaaagasw-deadbeef'))).toEqual(before);
+  });
 });

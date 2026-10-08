@@ -160,8 +160,19 @@ function sweepStaleDirs(
   const mine = entries.filter((e) => stale.test(e)).sort();
   const target = path.join(tradesRoot, name);
   let restored = false;
+  let keepOlds = false;
   if (!fs.existsSync(target)) {
-    const candidate = mine.find((e) => e.startsWith('.old-'));
+    const olds = mine.filter((e) => e.startsWith('.old-'));
+    // Restore only when the choice is unambiguous (final review M6): with several
+    // copies the random suffixes say nothing about which is newest or intact.
+    if (olds.length > 1) {
+      keepOlds = true;
+      console.warn(
+        `[build-trade] profile ${name} is missing and ${olds.length} previous copies exist (${olds.join(', ')}); ` +
+          `restoring none and leaving them in ${tradesRoot}: restore one by hand if needed`
+      );
+    }
+    const candidate = olds.length === 1 ? olds[0] : undefined;
     if (candidate) {
       try {
         rename(path.join(tradesRoot, candidate), target);
@@ -175,6 +186,7 @@ function sweepStaleDirs(
   }
   for (const e of mine) {
     if (restored && !fs.existsSync(path.join(tradesRoot, e))) continue;
+    if (keepOlds && e.startsWith('.old-')) continue;
     tryRm(path.join(tradesRoot, e));
   }
 }
