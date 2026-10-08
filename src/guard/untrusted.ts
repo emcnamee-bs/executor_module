@@ -17,6 +17,8 @@ const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u
 const LINE_SEPARATORS = /[\u2028\u2029]/g;
 // Every C0 control character except newline (0x0A), plus DEL and the C1 block (incl. U+0085).
 const CONTROL_CHARS = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g;
+// Runs of whitespace, control characters (C0 incl. newline, DEL, C1) and line separators.
+const FLATTEN_RUNS = /[\s\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g;
 const ANY_ARTICLE_TAG = /<\s{0,16}\/?\s{0,16}article\b/i;
 // Work bounds: the module is the trust boundary and must not rely on callers pre-truncating.
 const MAX_INPUT_CHARS = MAX_SOURCE_CHARS * 4;
@@ -41,6 +43,25 @@ function removeArticleTags(text: string): string {
     current = current.replace(ARTICLE_TAG, ' ');
   } while (current !== previous);
   return current;
+}
+
+/**
+ * Flattens a short model-written note (derived from untrusted text) to ONE line of at
+ * most `maxChars` characters, safe to interpolate into a prompt outside the <article>
+ * wrapper: no newline, control, invisible or bidi character, no article-tag lookalike.
+ * Invisible characters are removed outright (as wrapUntrusted does) so they cannot hide
+ * inside a tag name; whitespace/control runs become a single space. Never throws.
+ */
+export function sanitizeNote(text: string, maxChars: number): string {
+  if (typeof text !== 'string') return '';
+  const requested = typeof maxChars === 'number' && !Number.isNaN(maxChars) ? Math.floor(maxChars) : 0;
+  const cap = Math.max(0, requested);
+  if (cap === 0) return '';
+  const flatten = (t: string): string => t.replace(FLATTEN_RUNS, ' ').trim();
+  let cleaned = flatten(removeArticleTags(flatten(cut(text, cap * 4).replace(INVISIBLE_CHARS, ''))));
+  if (ANY_ARTICLE_TAG.test(cleaned)) cleaned = cleaned.replace(/</g, '\u2039');
+  if (cleaned.length <= cap) return cleaned;
+  return cut(cleaned, cap - 1).trimEnd() + '\u2026';
 }
 
 function cut(text: string, length: number): string {
