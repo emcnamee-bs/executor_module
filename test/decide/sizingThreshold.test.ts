@@ -282,3 +282,53 @@ describe('evaluateBinarySizing', () => {
     expect(closed.reason).toMatch(/not active/);
   });
 });
+
+describe('fix round 1: threshold direction, less markets, strike shape, duplicate strikes', () => {
+  it('up signal never selects a NO trade even when the ladder is slightly non-monotone (A/B probe)', () => {
+    // A: P(>4.30)=.82, B: P(>4.34)=.91 (a .09 rise, inside the tolerance). B's NO is cheap (10c) with +8c edge.
+    const bands = [gt(4.3, 81, 83), gt(4.34, 90, 92)];
+    const curve = buildThresholdCurve(bands);
+    const [, no] = buildCandidatesForThreshold(bands[1], curve, 0.04);
+    expect(no).toMatchObject({ side: 'no', askCents: 10 });
+    expect(no.edgeCents).toBeGreaterThan(0);
+    const up = evaluateSizing(input({ bands, direction: 'up' }));
+    expect(up.side).not.toBe('no');
+  });
+
+  it('down signal never selects a YES trade on a mirrored non-monotone ladder', () => {
+    const bands = [gt(4.3, 8, 10), gt(4.34, 17, 19)];
+    const curve = buildThresholdCurve(bands);
+    const [yes] = buildCandidatesForThreshold(bands[0], curve, -0.04);
+    expect(yes).toMatchObject({ side: 'yes', askCents: 10 });
+    expect(yes.edgeCents).toBeGreaterThan(0);
+    const down = evaluateSizing(input({ bands, direction: 'down' }));
+    expect(down.side).not.toBe('yes');
+  });
+
+  it('a "less" market in the ladder feeds the curve but is never traded; result matches the worked example', () => {
+    const less = market({ ticker: 'L', strikeType: 'less', floorStrike: null, capStrike: 4.26, yesBidCents: 9, yesAskCents: 11 });
+    const bands = [less, ...gasLadder()];
+    expect(thresholdCurveProblem(buildThresholdCurve(bands))).toBeNull();
+    const result = evaluateSizing(input({ bands }));
+    expect(result).toMatchObject({ wouldTrade: true, marketTicker: 'G-4.38', side: 'yes', contracts: 1, entryPriceCents: 31, edgeCents: 27 });
+    expect(result.marketTicker).not.toBe('L');
+  });
+
+  it('only a plain floor-only greater market is a threshold candidate', () => {
+    const curve = buildThresholdCurve(gasLadder());
+    expect(buildCandidatesForThreshold(gt(4.38, 29, 31, { capStrike: 4.5 }), curve, 0.04)).toEqual([]);
+    expect(buildCandidatesForThreshold(gt(4.38, 29, 31, { floorStrike: null, capStrike: 4.5 }), curve, 0.04)).toEqual([]);
+  });
+
+  it('with two markets at one strike keeps the tightest spread, in either input order', () => {
+    const wide = gt(4.3, 70, 80);
+    const tight = gt(4.3, 79, 81);
+    const other = gt(4.34, 57, 59);
+    const expected = [
+      { centerPts: 4.3, probability: 0.8 },
+      { centerPts: 4.34, probability: 0.58 },
+    ];
+    expect(buildThresholdCurve([wide, tight, other])).toEqual(expected);
+    expect(buildThresholdCurve([tight, wide, other])).toEqual(expected);
+  });
+});

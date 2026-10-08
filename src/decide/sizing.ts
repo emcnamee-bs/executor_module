@@ -228,19 +228,24 @@ export function buildCandidatesForBand(
  * the opposite orientation). Bands, custom and strike-less markets are skipped.
  */
 export function buildThresholdCurve(bands: BandMarket[]): CurvePoint[] {
-  const points: CurvePoint[] = [];
+  const points: Array<CurvePoint & { spread: number }> = [];
   for (const b of bands) {
     const p = bandYesProbability(b);
-    if (p === null) continue;
+    if (p === null || b.yesAskCents === null || b.yesBidCents === null) continue;
+    const spread = b.yesAskCents - b.yesBidCents;
     if ((b.strikeType === 'greater' || b.strikeType === 'greater_or_equal') && b.floorStrike !== null) {
-      points.push({ centerPts: b.floorStrike, probability: p });
+      points.push({ centerPts: b.floorStrike, probability: p, spread });
     } else if (b.strikeType === 'less' && b.capStrike !== null) {
-      points.push({ centerPts: b.capStrike, probability: 1 - p });
+      points.push({ centerPts: b.capStrike, probability: 1 - p, spread });
     }
   }
-  points.sort((a, b) => a.centerPts - b.centerPts);
-  // interpolateProbability divides by the gap between neighbouring points: one point per strike.
-  return points.filter((point, i) => i === 0 || point.centerPts !== points[i - 1].centerPts);
+  // Deterministic regardless of input order: by strike, then tightest spread, then lower probability.
+  points.sort((a, b) => a.centerPts - b.centerPts || a.spread - b.spread || a.probability - b.probability);
+  // interpolateProbability divides by the gap between neighbouring points: one point per strike
+  // (the first of each strike group, i.e. the tightest-spread market).
+  return points
+    .filter((point, i) => i === 0 || point.centerPts !== points[i - 1].centerPts)
+    .map(({ centerPts, probability }) => ({ centerPts, probability }));
 }
 
 /** null when the curve can be used; otherwise the reason it cannot. */
@@ -272,8 +277,14 @@ export function buildCandidatesForThreshold(
   signedMagnitude: number
 ): BandCandidate[] {
   if (band.strikeType !== 'greater' && band.strikeType !== 'greater_or_equal') return [];
+  // A plain threshold has a floor and no cap; anything else is not a cumulative "above X" market.
+  if (band.floorStrike === null || band.capStrike !== null) return [];
   return buildCandidatesForBand(band, curve, 0, signedMagnitude);
 }
+function sideForDirection(direction: 'up' | 'down'): 'yes' | 'no' {
+  return direction === 'up' ? 'yes' : 'no';
+}
+
 export interface ContractCapInput {
   askCents: number;
   kelly: number;
@@ -382,7 +393,11 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     const bandCandidates = isThreshold
       ? buildCandidatesForThreshold(band, curve, signedMagnitudePts)
       : buildCandidatesForBand(band, curve, widthPts, signedMagnitudePts);
+    // Threshold mode only: a shifted survival curve can only favour the side the signal implies
+    // (up -> YES, down -> NO); the opposite side's "edge" is quote noise, never a trade.
+    const wantedSide = sideForDirection(input.direction);
     for (const candidate of bandCandidates) {
+      if (isThreshold && candidate.side !== wantedSide) continue;
       const verdict = gateCandidate(candidate);
       if (!verdict.ok) {
         lastGateFailureReason = verdict.reason;
