@@ -86,10 +86,10 @@ describe('live unit executor-module.service', () => {
     expect(environment.EXECUTOR_TRADE).toBeUndefined();
   });
 
-  it('reads its own .env.kxaprpotus after the shared .env (where its halt and dry-run choice live)', () => {
+  it('REQUIRES its own .env.kxaprpotus after the shared .env (no "-": a missing file fails the start)', () => {
     const text = read('executor-module.service');
     const files = [...text.matchAll(/^EnvironmentFile=(.*)$/gm)].map((m) => m[1]);
-    expect(files).toEqual(['%h/executor_module/.env', '-%h/executor_module/.env.kxaprpotus']);
+    expect(files).toEqual(['%h/executor_module/.env', '%h/executor_module/.env.kxaprpotus']);
   });
 
   it('a hostile env file cannot retarget the live unit to another trade', () => {

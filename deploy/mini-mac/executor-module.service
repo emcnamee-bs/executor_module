@@ -35,7 +35,10 @@ EnvironmentFile=%h/executor_module/.env
 # choice) and EXECUTOR_TRADING_HALTED (the live kill switch) -- go in .env.kxaprpotus,
 # read only by this unit. The shared .env is also read by every paper unit, so it must
 # carry neither (a halt there silently halts every paper unit too). HANDOFF.md Sec 5a.5.
-EnvironmentFile=-%h/executor_module/.env.kxaprpotus
+# REQUIRED (no "-" prefix): a missing or misnamed file fails the start instead of
+# silently starting live and unhalted. Lift the halt by DELETING its line, never by
+# writing EXECUTOR_TRADING_HALTED=false.
+EnvironmentFile=%h/executor_module/.env.kxaprpotus
 
 Environment=IIP_SOURCES_FILE=%h/Internet_Info_Plug/config/sources.minimac.yaml
 

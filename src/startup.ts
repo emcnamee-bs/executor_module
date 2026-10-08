@@ -152,5 +152,13 @@ export async function prepareStartup(
       `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted}`
   );
 
+  if (!dryRun && !halted) {
+    // Allowed (this is how the live trade runs), but never quietly.
+    console.warn(
+      `[profile] WARN: LIVE AND NOT HALTED trade=${profile.name}: real orders will be placed. ` +
+        `To halt, set EXECUTOR_TRADING_HALTED=true in .env.kxaprpotus and restart.`
+    );
+  }
+
   return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, lock };
 }

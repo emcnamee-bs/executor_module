@@ -709,8 +709,10 @@ the command line with `/usr/bin/env`, which is applied after every env file:
 
 - `executor-module.service` (real money): `ExecStart=/usr/bin/env EXECUTOR_TRADE=kxaprpotus
   EXECUTOR_LIVE_TRADE=kxaprpotus ...`. It reads `.env`, then its own
-  `.env.kxaprpotus`, and does not pin `KALSHI_DRY_RUN`: the live/dry-run choice is the
-  operator's, made in `.env.kxaprpotus`.
+  `.env.kxaprpotus`, which is **required**: the unit has no `-` prefix on that
+  `EnvironmentFile=`, so a missing or misnamed file fails the start instead of
+  silently starting live and unhalted. It does not pin `KALSHI_DRY_RUN`: the
+  live/dry-run choice is the operator's, made in `.env.kxaprpotus`.
 - `executor-module@<name>.service` (paper): `ExecStart=/usr/bin/env -u EXECUTOR_LIVE_TRADE
   KALSHI_DRY_RUN=true EXECUTOR_TRADE=%i ...`. It reads `.env` and `.env.<name>`, but
   no line in either can make it live, retarget it, or give it `EXECUTOR_LIVE_TRADE`.
@@ -728,6 +730,22 @@ of them. The live trade's halt and dry-run choice go in `.env.kxaprpotus`. Check
 with `grep -E '^(KALSHI_DRY_RUN|EXECUTOR_TRADE|EXECUTOR_LIVE_TRADE|EXECUTOR_TRADING_HALTED)='
 ~/executor_module/.env ~/executor_module/.env.*`, and confirm every unit's
 `[profile]` line shows the `dryRun=` and `halted=` you expect.
+
+**`.env.kxaprpotus` must exist and carry the live unit's switch lines.** While the
+live trade is halted or soaking, it contains `EXECUTOR_TRADING_HALTED=true` and/or
+`KALSHI_DRY_RUN=true`. Both are honoured only as the exact string `true`.
+
+- **Lift the halt (or go live) by DELETING the line, never by writing
+  `=false`.** A `=false` line reads the same as no line, so it is a live switch that
+  looks like a safety setting. Deleting the line makes the change visible in a grep.
+- **Every change to the file is three steps:**
+  1. `grep -E '^(KALSHI_DRY_RUN|EXECUTOR_TRADING_HALTED)=' ~/executor_module/.env.kxaprpotus`
+  2. `systemctl --user restart executor-module`
+  3. `journalctl --user -u executor-module --since '-2 min' --no-pager | grep -E '\[profile\]'`.
+     Confirm `dryRun=` and `halted=` are what you intended.
+- **A live start with no halt also logs `[profile] WARN: LIVE AND NOT HALTED
+  trade=kxaprpotus ...`.** Seeing that line when you did not mean to go live means:
+  halt now.
 
 **Deploy order after merging this branch.** Pull the gate model (§5a.4) and move any
 `EXECUTOR_TRADING_HALTED` / `KALSHI_DRY_RUN` line from `.env` to `.env.kxaprpotus`

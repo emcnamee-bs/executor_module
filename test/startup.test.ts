@@ -99,6 +99,23 @@ describe('prepareStartup (main() startup wiring)', () => {
       expect(line).toMatch(/ halted=true( |$)/);
     });
 
+    it('a live start with no halt logs an unmissable LIVE AND NOT HALTED warning; dry-run or halted starts do not', async () => {
+      writeProfile(trades, 'kxtrumpapprove', { profile: { marketStructure: 'band' } });
+      touchLedger('data/kxtrumpapprove/decisions.db');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warned = () => warn.mock.calls.flat().join('\n');
+      const live = { EXECUTOR_TRADE: 'kxtrumpapprove', EXECUTOR_LIVE_TRADE: 'kxtrumpapprove' };
+
+      started.push(await prepareStartup({ ...live, EXECUTOR_TRADING_HALTED: 'true' } as NodeJS.ProcessEnv, repo, { tradesRoot: trades, fetchImpl: tagsFetch(), log: () => {} }));
+      started.pop()!.lock.release();
+      started.push(await prepareStartup({ ...live, KALSHI_DRY_RUN: 'true' } as NodeJS.ProcessEnv, repo, { tradesRoot: trades, fetchImpl: tagsFetch(), log: () => {} }));
+      started.pop()!.lock.release();
+      expect(warned()).not.toMatch(/LIVE AND NOT HALTED/);
+
+      await start(live);
+      expect(warned()).toMatch(/WARN.*LIVE AND NOT HALTED.*trade=kxtrumpapprove/);
+    });
+
     it('halted=false and dryRun=false on a live start with no kill switch', async () => {
       writeProfile(trades, 'kxtrumpapprove', { profile: { marketStructure: 'band' } });
       touchLedger('data/kxtrumpapprove/decisions.db');
