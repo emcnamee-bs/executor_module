@@ -131,3 +131,16 @@ export function assertLiveAllowed(profile: TradeProfile, env: NodeJS.ProcessEnv 
     );
   }
 }
+
+/**
+ * Resolves a profile's ledger path against the repo root and re-checks containment:
+ * the schema regex already blocks traversal, but a path that reaches the filesystem
+ * is checked again here so no other code path can open a database outside data/.
+ */
+export function resolveLedgerPath(profile: Pick<TradeProfile, 'ledgerPath'>, repoRoot: string): string {
+  const resolved = path.resolve(repoRoot, profile.ledgerPath);
+  if (!resolved.startsWith(path.join(repoRoot, 'data') + path.sep)) {
+    throw new Error('ledgerPath escapes the data directory');
+  }
+  return resolved;
+}
