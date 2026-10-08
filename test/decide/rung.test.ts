@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeRung, RUNG_STAKES } from '../../src/decide/rung.js';
+import { computeRung, computeRungDetailed, RUNG_STAKES } from '../../src/decide/rung.js';
 
 describe('RUNG_STAKES', () => {
   it('has the four expected stake values', () => {
@@ -41,5 +41,43 @@ describe('computeRung', () => {
 
   it('ignores a nonzero corroborations count when story_key is null', () => {
     expect(computeRung({ trustTier: 3, storyKey: null, corroborations: 5 })).toBe('rumor');
+  });
+});
+
+// EXECUTOR_PAPER_LOW_TIER (paper-only data-collection test). The relaxation is an
+// explicit input, never read from the environment here: the pipeline decides whether
+// it may apply (paper process only) and passes it in.
+describe('computeRungDetailed with relaxLowTier', () => {
+  it.each([3, 4])('relaxes a single-source tier %i item from rumor to reported, and says so', (tier) => {
+    expect(computeRungDetailed({ trustTier: tier, storyKey: null, corroborations: 0, relaxLowTier: true })).toEqual({
+      rung: 'reported', lowTierRelaxedFrom: tier,
+    });
+    expect(computeRungDetailed({ trustTier: tier, storyKey: 's', corroborations: 1, relaxLowTier: true })).toEqual({
+      rung: 'reported', lowTierRelaxedFrom: tier,
+    });
+  });
+
+  it('never relaxes tier 5 (unverified): it stays rumor', () => {
+    expect(computeRungDetailed({ trustTier: 5, storyKey: null, corroborations: 0, relaxLowTier: true })).toEqual({
+      rung: 'rumor', lowTierRelaxedFrom: null,
+    });
+  });
+
+  it('without the switch (false or absent) tier 3/4 stay rumor', () => {
+    for (const relaxLowTier of [false, undefined]) {
+      expect(computeRungDetailed({ trustTier: 4, storyKey: null, corroborations: 0, relaxLowTier })).toEqual({
+        rung: 'rumor', lowTierRelaxedFrom: null,
+      });
+      expect(computeRung({ trustTier: 3, storyKey: null, corroborations: 0, relaxLowTier })).toBe('rumor');
+    }
+  });
+
+  it('does not touch rungs that were not rumor (tier 1/2 reported, corroborated)', () => {
+    expect(computeRungDetailed({ trustTier: 1, storyKey: null, corroborations: 0, relaxLowTier: true })).toEqual({
+      rung: 'reported', lowTierRelaxedFrom: null,
+    });
+    expect(computeRungDetailed({ trustTier: 4, storyKey: 's', corroborations: 2, relaxLowTier: true })).toEqual({
+      rung: 'corroborated', lowTierRelaxedFrom: null,
+    });
   });
 });

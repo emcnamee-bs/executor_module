@@ -331,6 +331,7 @@ Two more variables select the trade (§5a.5): `EXECUTOR_TRADE` (**required**, no
 |---|---|---|
 | `EXECUTOR_TRADE` | **Yes** | Name of the trade profile to run (a directory under `trades/`, e.g. `kxaprpotus`). `main()` fails loudly naming it if absent. Both units pin it on their ExecStart line; do not put it in any env file. |
 | `EXECUTOR_LIVE_TRADE` | For a live start | Must equal the profile name for any start with `KALSHI_DRY_RUN` not `true`, and for any profile on the live ledger `data/decisions.db` or group `execmod` (even dry-run). Set ONLY by `executor-module.service` on its ExecStart line; the paper template strips it. Never put it in an env file. For a local `npm run dev` of kxaprpotus, export `EXECUTOR_LIVE_TRADE=kxaprpotus` deliberately. |
+| `EXECUTOR_PAPER_LOW_TIER` | No | Time-boxed **paper-only** test: exactly `true` lets single-source tier 3/4 items through as `reported`. Set only via a paper unit's `low-tier.conf` drop-in; any other value, a non-dry-run start, or the live unit refuses to start (§5a.5). |
 | `IIP_SOURCES_FILE` | Only if the profile has `directSources` | Path to the Internet_Info_Plug sources YAML (mini-mac: `~/Internet_Info_Plug/config/sources.minimac.yaml`). Each `directSources` id is checked against it at startup; an unknown id refuses to start. |
 
 **What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
@@ -778,6 +779,37 @@ FROM paper_positions WHERE settled_at IS NOT NULL AND side IS NOT NULL GROUP BY 
 SELECT created_at, market_ticker, side, entry_price_cents, direction, magnitude, reasoning, ladder_json
 FROM paper_positions ORDER BY id DESC LIMIT 25;
 ```
+
+**Low-tier paper test (`EXECUTOR_PAPER_LOW_TIER`): time-boxed, paper-only.** Normally a
+single-source tier 3/4 item is a `rumor` (stake 0) and is skipped before the gate, so
+paper units record almost nothing. With `EXECUTOR_PAPER_LOW_TIER=true` a paper unit
+treats such an item as `reported` (tier 5 stays `rumor`) so it runs gate, triage and
+decide and writes a paper row. It is a data-collection test, not a trading change:
+switch it off when the test window ends.
+
+- **Enable on one paper unit** with the drop-in, never by editing a unit's ExecStart:
+  `mkdir -p ~/.config/systemd/user/executor-module@<name>.service.d && cp
+  ~/executor_module/deploy/mini-mac/executor-module@.service.d/low-tier.conf.example
+  ~/.config/systemd/user/executor-module@<name>.service.d/low-tier.conf`, then
+  `systemctl --user daemon-reload && systemctl --user restart executor-module@<name>`.
+  Confirm the unit's `[profile]` line shows `lowTier=true dryRun=true`.
+- **Disable** by deleting that `low-tier.conf`, `daemon-reload` and restart. Confirm
+  `lowTier=false`.
+- **Paper-only, enforced in code.** Startup refuses if the value is anything but exactly
+  `true` (unset or empty means off), if `KALSHI_DRY_RUN` is not exactly `true`, if
+  `EXECUTOR_LIVE_TRADE` is set, or if the profile is on the live ledger or group. The
+  pipeline re-checks dry-run and `EXECUTOR_LIVE_TRADE` per item, and a relaxed item
+  stops at its paper row: it never reaches live-cap sizing or `placeOrder` (not even
+  the dry-run simulation), so it writes no `orders` row.
+- **The live unit must never set it.** Do not put it in the shared `.env` (that turns
+  it on for every paper unit and makes the live unit refuse to start) or in
+  `.env.kxaprpotus`. If `executor-module.service` refuses with an
+  `EXECUTOR_PAPER_LOW_TIER` message, remove the line and restart.
+- **Telling the rows apart.** Every decision row a relaxed item writes has a reason
+  starting `[low-tier relaxed: tier N]`, and its `paper_positions.reasoning` carries the
+  same prefix. The decide prompt's rung line reads `reported (low-tier relaxed, paper
+  test)`. No schema change. Example:
+  `SELECT COUNT(*) FROM decisions WHERE reason LIKE '[low-tier relaxed:%';`
 
 ---
 

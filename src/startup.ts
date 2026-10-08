@@ -79,6 +79,35 @@ export function assertLiveLedgerOwnership(
   );
 }
 
+/**
+ * EXECUTOR_PAPER_LOW_TIER: a time-boxed, PAPER-ONLY data-collection test that lets a
+ * single-source tier 3/4 item through the rumor rung as `reported`. It must be
+ * impossible to engage on a live-capable process, so this refuses to start unless:
+ * the value is exactly "true" (or unset/empty, which means off; anything else fails
+ * closed), KALSHI_DRY_RUN is exactly "true", EXECUTOR_LIVE_TRADE is absent (only the
+ * live unit sets it), and the profile is not on the live ledger or consumer group.
+ * The pipeline re-checks dry-run and EXECUTOR_LIVE_TRADE per item (defence in depth).
+ */
+export function resolvePaperLowTier(
+  profile: Pick<TradeProfile, 'name' | 'ledgerPath' | 'consumerGroup'>,
+  env: NodeJS.ProcessEnv
+): boolean {
+  const value = env.EXECUTOR_PAPER_LOW_TIER;
+  if (value === undefined || value === '') return false;
+  const refuse = (why: string) =>
+    new Error(
+      `start refused for trade ${profile.name}: EXECUTOR_PAPER_LOW_TIER is set, but ${why}. It is a paper-only, ` +
+        `time-boxed test, enabled only on a paper unit via its low-tier.conf drop-in (HANDOFF.md Sec 5a.5); the live unit must never set it.`
+    );
+  if (value !== 'true') throw refuse(`its value ${JSON.stringify(value)} is not exactly "true" (unset it to turn it off)`);
+  if (env.KALSHI_DRY_RUN !== 'true') throw refuse('KALSHI_DRY_RUN is not "true" (this would be a live, paper-only-violating process)');
+  if (env.EXECUTOR_LIVE_TRADE !== undefined) throw refuse('EXECUTOR_LIVE_TRADE is set, so this is the live unit');
+  if (profile.ledgerPath.toLowerCase() === LIVE_LEDGER_PATH || profile.consumerGroup === LIVE_CONSUMER_GROUP) {
+    throw refuse(`the profile uses the live ledger ${LIVE_LEDGER_PATH} or live consumer group ${LIVE_CONSUMER_GROUP}`);
+  }
+  return true;
+}
+
 export interface Startup {
   loaded: LoadedProfile;
   ledgerPath: string;
@@ -86,6 +115,8 @@ export interface Startup {
   compiledPhrases: CompiledPhrase[];
   dryRun: boolean;
   halted: boolean;
+  /** EXECUTOR_PAPER_LOW_TIER, resolved and validated by resolvePaperLowTier. */
+  paperLowTier: boolean;
   lock: LedgerLock;
 }
 
@@ -121,6 +152,7 @@ export async function prepareStartup(
   assertLiveAllowed(profile, env);
   assertLiveTradeIdentity(profile, env);
   assertLiveLedgerOwnership(profile, env);
+  const paperLowTier = resolvePaperLowTier(profile, env);
   const ledgerPath = resolveLedgerPath(profile, repoRoot);
   // Refuses a LIVE start on a ledger file that does not exist (mis-pinned profile guard).
   assertLedgerStartAllowed(ledgerPath, env, deps.exists ?? fs.existsSync);
@@ -149,7 +181,7 @@ export async function prepareStartup(
       `structure=${profile.marketStructure} gateModel=${profile.gateModel} ` +
       `ledger=${ledgerPath} group=${profile.consumerGroup} ` +
       `bankSha=${loaded.bankSha.slice(0, 12)} keyphrases=${loaded.keyphrases.length} ` +
-      `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted}`
+      `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted} lowTier=${paperLowTier}`
   );
 
   if (!dryRun && !halted) {
@@ -160,5 +192,5 @@ export async function prepareStartup(
     );
   }
 
-  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, lock };
+  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, lock };
 }

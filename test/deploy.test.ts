@@ -152,3 +152,75 @@ describe('the real startup path with the units\' effective env', () => {
     await expect(prepareStartup(env, repo, { fetchImpl: tags, log: () => {} })).rejects.toThrow(/live ledger.*live unit/);
   });
 });
+
+// EXECUTOR_PAPER_LOW_TIER: enabled per paper unit by a systemd drop-in, never by editing
+// a unit's ExecStart. Whatever route the variable takes into the LIVE unit's environment
+// (the shared .env, .env.kxaprpotus, or a drop-in copied to the wrong unit), the live
+// unit must refuse to start rather than relax.
+describe('EXECUTOR_PAPER_LOW_TIER deployment', () => {
+  const DROPIN = 'executor-module@.service.d/low-tier.conf.example';
+  const dropIn = () => parseUnit(read(DROPIN));
+  const withDropIn = (unit: Unit): Unit => ({ ...unit, environment: { ...unit.environment, ...dropIn().environment } });
+  const tags = (async () =>
+    new Response(JSON.stringify({ models: [{ name: 'qwen2.5:7b-instruct-q4_K_M' }] }), { status: 200 })) as unknown as typeof fetch;
+  let repo: string;
+  let trades: string;
+  const releases: Array<() => void> = [];
+
+  beforeEach(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-lowtier-'));
+    trades = path.join(repo, 'trades');
+    writeProfile(trades, 'kxtrumpapprove', { profile: { marketStructure: 'band' } });
+    writeProfile(trades, 'kxaprpotus', { profile: { marketStructure: 'band', ledgerPath: 'data/decisions.db', consumerGroup: 'execmod' } });
+    fs.mkdirSync(path.join(repo, 'data/kxtrumpapprove'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'data/kxtrumpapprove/decisions.db'), '');
+    fs.writeFileSync(path.join(repo, 'data/decisions.db'), '');
+  });
+  afterEach(() => {
+    while (releases.length) releases.pop()!();
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+  const startWith = async (vars: NodeJS.ProcessEnv) => {
+    const s = await prepareStartup(vars, repo, { tradesRoot: trades, fetchImpl: tags, log: () => {} });
+    releases.push(() => s.lock.release());
+    return s;
+  };
+
+  it('the example drop-in is exactly a [Service] section setting EXECUTOR_PAPER_LOW_TIER=true', () => {
+    const lines = read(DROPIN).split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#'));
+    expect(lines).toEqual(['[Service]', 'Environment=EXECUTOR_PAPER_LOW_TIER=true']);
+  });
+
+  it('neither unit file sets or mentions EXECUTOR_PAPER_LOW_TIER (it is never baked into a unit)', () => {
+    expect(read('executor-module.service')).not.toMatch(/EXECUTOR_PAPER_LOW_TIER/);
+    expect(read('executor-module@.service')).not.toMatch(/EXECUTOR_PAPER_LOW_TIER/);
+  });
+
+  it('a paper unit with the drop-in starts dry-run with paperLowTier=true', async () => {
+    const vars = effectiveEnv(withDropIn(parseUnit(read('executor-module@.service'), 'kxtrumpapprove')), {});
+    const s = await startWith(vars);
+    expect(s.dryRun).toBe(true);
+    expect(s.paperLowTier).toBe(true);
+  });
+
+  it('a paper unit without the drop-in starts with paperLowTier=false', async () => {
+    const s = await startWith(effectiveEnv(parseUnit(read('executor-module@.service'), 'kxtrumpapprove'), {}));
+    expect(s.paperLowTier).toBe(false);
+  });
+
+  it.each([
+    ['dry-run soak', { KALSHI_DRY_RUN: 'true' }],
+    ['halted', { EXECUTOR_TRADING_HALTED: 'true' }],
+    ['live', {}],
+  ])('the LIVE unit refuses to start (%s) when a hostile shared .env carries EXECUTOR_PAPER_LOW_TIER=true', async (_l, own) => {
+    const live = parseUnit(read('executor-module.service'));
+    await expect(startWith(effectiveEnv(live, { ...own, EXECUTOR_PAPER_LOW_TIER: 'true' }))).rejects.toThrow(/EXECUTOR_PAPER_LOW_TIER/);
+    // Control: the same live environment without the variable starts.
+    await expect(startWith(effectiveEnv(live, { ...own }))).resolves.toBeTruthy();
+  });
+
+  it('the LIVE unit refuses to start if the paper drop-in is copied onto it by mistake', async () => {
+    const live = withDropIn(parseUnit(read('executor-module.service')));
+    await expect(startWith(effectiveEnv(live, { KALSHI_DRY_RUN: 'true' }))).rejects.toThrow(/EXECUTOR_PAPER_LOW_TIER/);
+  });
+});
