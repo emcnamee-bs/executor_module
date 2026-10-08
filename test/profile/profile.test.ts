@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadProfile, assertLiveAllowed } from '../../src/profile/profile.js';
+import { loadProfile, assertLiveAllowed, resolveLedgerPath } from '../../src/profile/profile.js';
 import { loadIipSourceIds, assertDirectSourcesKnown } from '../../src/profile/iipSources.js';
 import { writeProfile, GOOD_BANK } from './fixtures.js';
 
@@ -164,5 +164,19 @@ describe('iip source ids', () => {
   });
   it('fails loudly when the sources file is unreadable', () => {
     expect(() => loadIipSourceIds('/nonexistent/sources.yaml')).toThrow(/IIP sources file/);
+  });
+});
+
+describe('resolveLedgerPath', () => {
+  const repo = path.resolve('/tmp/some-repo');
+  const withPath = (ledgerPath: string) => ({ ledgerPath });
+
+  it('accepts data/decisions.db and data/<trade>/decisions.db', () => {
+    expect(resolveLedgerPath(withPath('data/decisions.db'), repo)).toBe(path.join(repo, 'data', 'decisions.db'));
+    expect(resolveLedgerPath(withPath('data/x/decisions.db'), repo)).toBe(path.join(repo, 'data', 'x', 'decisions.db'));
+  });
+
+  it.each(['../x.db', 'data/../../x.db', '/etc/x.db'])('rejects a ledgerPath of %s that escapes data/', (p) => {
+    expect(() => resolveLedgerPath(withPath(p), repo)).toThrow('ledgerPath escapes the data directory');
   });
 });
