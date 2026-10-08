@@ -125,12 +125,18 @@ export async function decideTrade(
     schema: DECIDE_SCHEMA,
     excerptSource: ctx.excerptSource,
     tripwireHit: ctx.tripwireHit,
+    // The audit verdict comes from the SAME validator the caller applies below, so a
+    // decision that will be rejected (e.g. an out-of-range magnitude) is never recorded
+    // as `trade:up` (final review M1).
     summarize: (p) => {
-      const o = p as { should_trade?: unknown; direction?: unknown; reasoning?: unknown };
-      return {
-        verdict: o.should_trade === true ? `trade:${String(o.direction)}` : 'no-trade',
-        reasoning: typeof o.reasoning === 'string' ? o.reasoning : null,
-      };
+      const o = p as { reasoning?: unknown } | null;
+      const reasoning = typeof o?.reasoning === 'string' ? o.reasoning : null;
+      try {
+        const r = validateDecideOutput(p, ctx.loaded.profile.maxMagnitude);
+        return { verdict: r.shouldTrade ? `trade:${r.direction}` : 'no-trade', reasoning };
+      } catch (err) {
+        return { verdict: `invalid:${(err as Error).message.slice(0, 200)}`, reasoning };
+      }
     },
   });
 

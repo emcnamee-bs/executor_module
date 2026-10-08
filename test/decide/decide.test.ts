@@ -74,6 +74,24 @@ describe('decideTrade (fake client, offline)', () => {
       await expect(decideTrade(client, db, ctx(loaded))).rejects.toThrow(/out-of-range magnitude_pts \(above the 0\.5 sanity ceiling\)/);
     }));
 
+  it('the audit row of a REJECTED decision never reads as a trade: verdict is invalid:<reason> (M1)', () =>
+    withProfile(async (loaded, db) => {
+      const { client } = fake({ ...okResponse, parsed_output: { ...okResponse.parsed_output, magnitude_pts: 0.9 } });
+      await expect(decideTrade(client, db, ctx(loaded))).rejects.toThrow(/out-of-range/);
+      const row = db.prepare('SELECT stage, verdict, reasoning FROM ai_calls').get() as any;
+      expect(row.stage).toBe('decide');
+      expect(row.verdict).toMatch(/^invalid:.*out-of-range magnitude_pts \(above the 0\.5 sanity ceiling\)/);
+      expect(row.verdict).not.toMatch(/trade:/);
+      expect(row.reasoning).toBe('barge delays tighten Midwest supply');
+    }));
+
+  it('a valid veto is audited as no-trade', () =>
+    withProfile(async (loaded, db) => {
+      const { client } = fake({ ...okResponse, parsed_output: { ...okResponse.parsed_output, should_trade: false } });
+      await decideTrade(client, db, ctx(loaded));
+      expect((db.prepare('SELECT verdict FROM ai_calls').get() as any).verdict).toBe('no-trade');
+    }));
+
   it('fails loudly naming max_tokens when the response was cut off', () =>
     withProfile(async (loaded, db) => {
       const { client } = fake({ stop_reason: 'max_tokens', parsed_output: null, content: [], usage: {} });
