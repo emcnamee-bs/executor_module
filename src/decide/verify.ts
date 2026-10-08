@@ -39,7 +39,7 @@ export async function verifySynopsis(
 
   const response = await client.messages.parse({
     model: 'claude-sonnet-5',
-    max_tokens: 512,
+    max_tokens: 1024,
     messages: [
       {
         role: 'user',
@@ -55,6 +55,9 @@ export async function verifySynopsis(
     } as any,
   });
 
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error('Sonnet verify response was truncated at max_tokens');
+  }
   if (!response.parsed_output) {
     throw new Error('Sonnet did not return parseable structured output for verification');
   }
