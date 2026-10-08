@@ -1046,4 +1046,107 @@ describe('runDecisionPipeline', () => {
       expect(byItem('paper-yes')).toMatchObject({ side: 'yes', direction: 'down', market_ticker: 'KXAPRPOTUS-26AUG28-40.2' });
     });
   });
+  // EXECUTOR_PAPER_LOW_TIER: startup resolves the switch into deps.paperLowTier, and the
+  // pipeline re-checks KALSHI_DRY_RUN (and the absence of EXECUTOR_LIVE_TRADE) itself, so
+  // a live-capable process can never relax even if startup were bypassed. These drive the
+  // real call site (runDecisionPipeline), not computeRung in isolation.
+  describe('EXECUTOR_PAPER_LOW_TIER relaxation (deps.paperLowTier)', () => {
+    const lowItem = (id: string, tier = 4) => baseItem({ item_id: id, dedup_id: `d-${id}`, story_key: null, trust_tier: tier });
+    const deps = (paperLowTier: boolean | undefined): PipelineDeps => ({
+      anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()),
+      profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient(), paperLowTier,
+    });
+    const ordersCount = () => (db.prepare('SELECT COUNT(*) AS n FROM orders').get() as any).n;
+    const paperRows = () => db.prepare('SELECT * FROM paper_positions').all() as any[];
+    const expectRumorSkipNoWork = (id: string) => {
+      const row = onlyRowFor(db, id);
+      expect(row.rung).toBe('rumor');
+      expect(row.reason).toBe('rumor rung, stake 0');
+      expect(gateModule.runGate).not.toHaveBeenCalled();
+      expect(decideModule.decideTrade).not.toHaveBeenCalled();
+      expect(orderModule.placeOrder).not.toHaveBeenCalled();
+      expect(ordersCount()).toBe(0);
+    };
+    afterEach(() => {
+      delete process.env.KALSHI_DRY_RUN;
+      delete process.env.EXECUTOR_LIVE_TRADE;
+    });
+
+    it.each([undefined, '', 'false', 'TRUE', '1'])(
+      'switch on but KALSHI_DRY_RUN=%j (live-capable): a tier-4 item is still skipped as rumor before any model call, no order',
+      async (d) => {
+        if (d === undefined) delete process.env.KALSHI_DRY_RUN;
+        else process.env.KALSHI_DRY_RUN = d;
+        await runDecisionPipeline(lowItem('live-t4'), deps(true));
+        expectRumorSkipNoWork('live-t4');
+      }
+    );
+
+    it('switch on and dry-run, but EXECUTOR_LIVE_TRADE present (the live unit): still rumor', async () => {
+      process.env.KALSHI_DRY_RUN = 'true';
+      process.env.EXECUTOR_LIVE_TRADE = 'kxaprpotus';
+      await runDecisionPipeline(lowItem('livetrade-t4'), deps(true));
+      expectRumorSkipNoWork('livetrade-t4');
+    });
+
+    it.each([false, undefined])('switch off (%s) on a paper process: a tier-4 item stays rumor', async (v) => {
+      process.env.KALSHI_DRY_RUN = 'true';
+      await runDecisionPipeline(lowItem('off-t4'), deps(v));
+      expectRumorSkipNoWork('off-t4');
+    });
+
+    it('tier 5 (unverified) stays rumor even with the switch on in paper', async () => {
+      process.env.KALSHI_DRY_RUN = 'true';
+      await runDecisionPipeline(lowItem('paper-t5', 5), deps(true));
+      expectRumorSkipNoWork('paper-t5');
+    });
+
+    it.each([3, 4])(
+      'switch on + dry-run on a BAND profile: a tier-%i item reaches the gate, is recorded "reported" and tagged, writes a paper row only, and never reaches the order path (orders empty)',
+      async (tier) => {
+        process.env.KALSHI_DRY_RUN = 'true';
+        const id = `paper-t${tier}`;
+        await runDecisionPipeline(lowItem(id, tier), deps(true));
+        expect(gateModule.runGate).toHaveBeenCalledTimes(1);
+        const ctx = (decideModule.decideTrade as any).mock.calls[0][2];
+        expect(ctx.rung).toBe('reported');
+        expect(ctx.lowTierRelaxed).toBe(true);
+        const row = onlyRowFor(db, id);
+        expect(row.rung).toBe('reported');
+        expect(row.would_trade).toBe(0);
+        expect(row.reason.startsWith(`[low-tier relaxed: tier ${tier}] `)).toBe(true);
+        expect(row.reason).toMatch(/\[PAPER /);
+        expect(paperRows()).toHaveLength(1);
+        expect(paperRows()[0].reasoning.startsWith(`[low-tier relaxed: tier ${tier}] `)).toBe(true);
+        expect(orderModule.placeOrder).not.toHaveBeenCalled();
+        expect(ordersCount()).toBe(0);
+        expect(totalExposureCents(db, EVENT)).toBe(0);
+      }
+    );
+
+    it('a relaxed item the gate rejects is still tagged, so analysis can tell it apart', async () => {
+      process.env.KALSHI_DRY_RUN = 'true';
+      vi.spyOn(gateModule, 'runGate').mockResolvedValue({ relevant: false, reason: 'off topic' });
+      await runDecisionPipeline(lowItem('gate-no-t4'), deps(true));
+      expect(onlyRowFor(db, 'gate-no-t4').reason).toBe('[low-tier relaxed: tier 4] gate: not relevant: off topic');
+    });
+
+    it('a relaxed item whose paper sizing declines is tagged and still never orders', async () => {
+      process.env.KALSHI_DRY_RUN = 'true';
+      vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({ direction: 'up', magnitudePts: 0, shouldTrade: true, reasoning: 'no move' });
+      await runDecisionPipeline(lowItem('nosize-t4'), deps(true));
+      const row = onlyRowFor(db, 'nosize-t4');
+      expect(row.reason.startsWith('[low-tier relaxed: tier 4] ')).toBe(true);
+      expect(paperRows()).toHaveLength(0);
+      expect(orderModule.placeOrder).not.toHaveBeenCalled();
+      expect(ordersCount()).toBe(0);
+    });
+
+    it('a tier-1 item with the switch on is untouched: no tag, lowTierRelaxed=false, normal paper path', async () => {
+      process.env.KALSHI_DRY_RUN = 'true';
+      await runDecisionPipeline(baseItem({ item_id: 'paper-t1' }), deps(true));
+      expect((decideModule.decideTrade as any).mock.calls[0][2].lowTierRelaxed).toBe(false);
+      expect(onlyRowFor(db, 'paper-t1').reason).not.toMatch(/low-tier relaxed/);
+    });
+  });
 });

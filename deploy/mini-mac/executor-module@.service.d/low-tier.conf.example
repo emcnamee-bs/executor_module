@@ -1,0 +1,8 @@
+# EXECUTOR_PAPER_LOW_TIER drop-in: a TIME-BOXED, PAPER-ONLY data-collection test.
+# Lets a single-source tier 3/4 item past the rumor rung as "reported" (tier 5 stays rumor).
+# Enable on ONE paper unit by copying this file (without .example) to
+#   ~/.config/systemd/user/executor-module@<name>.service.d/low-tier.conf
+# then: systemctl --user daemon-reload && systemctl --user restart executor-module@<name>
+# NEVER put this on executor-module.service (the live unit): it refuses to start. HANDOFF.md Sec 5a.5.
+[Service]
+Environment=EXECUTOR_PAPER_LOW_TIER=true

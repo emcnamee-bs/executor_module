@@ -7,7 +7,7 @@ import { sendAlert, setAlertTrade } from '../src/alert.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { prepareStartup, type Startup } from '../src/startup.js';
+import { prepareStartup, resolvePaperLowTier, type Startup } from '../src/startup.js';
 import { findMatches } from '../src/keyphrases/match.js';
 import { writeProfile } from './profile/fixtures.js';
 
@@ -280,6 +280,88 @@ describe('prepareStartup (main() startup wiring)', () => {
       expect(fs.existsSync(path.join(repo, 'data/kxaaagasw/decisions.db.lock'))).toBe(false);
     });
   });
+
+  describe('EXECUTOR_PAPER_LOW_TIER (paper-only low-tier relaxation)', () => {
+    const lowTierLine = () => logs.find((l) => l.startsWith('[profile] '))!;
+
+    it('unset or empty: starts with paperLowTier=false and logs lowTier=false', async () => {
+      for (const v of [undefined, '']) {
+        writeProfile(trades, 'kxaaagasw');
+        logs = [];
+        const s = await start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', EXECUTOR_PAPER_LOW_TIER: v });
+        expect(s.paperLowTier).toBe(false);
+        expect(lowTierLine()).toMatch(/ lowTier=false( |$)/);
+        started.pop()!.lock.release();
+      }
+    });
+
+    it('exactly "true" on a dry-run paper start: paperLowTier=true and logs lowTier=true', async () => {
+      writeProfile(trades, 'kxaaagasw');
+      const s = await start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', EXECUTOR_PAPER_LOW_TIER: 'true' });
+      expect(s.paperLowTier).toBe(true);
+      expect(lowTierLine()).toMatch(/ lowTier=true( |$)/);
+    });
+
+    it.each(['false', '1', 'TRUE', 'yes', ' true', 'true '])('any other value (%j) refuses to start (fail closed)', async (v) => {
+      writeProfile(trades, 'kxaaagasw');
+      await expect(start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', EXECUTOR_PAPER_LOW_TIER: v })).rejects.toThrow(
+        /EXECUTOR_PAPER_LOW_TIER/
+      );
+    });
+
+    it('a live (non-dry-run) start with the switch on is refused, even when every live guard is satisfied', async () => {
+      writeProfile(trades, 'kxtrumpapprove', { profile: { marketStructure: 'band' } });
+      touchLedger('data/kxtrumpapprove/decisions.db');
+      const live = { EXECUTOR_TRADE: 'kxtrumpapprove', EXECUTOR_LIVE_TRADE: 'kxtrumpapprove', EXECUTOR_TRADING_HALTED: 'true' };
+      await expect(start({ ...live, EXECUTOR_PAPER_LOW_TIER: 'true' })).rejects.toThrow(/EXECUTOR_PAPER_LOW_TIER.*paper/);
+      // The same settings without the switch start: the switch alone is what refused.
+      await expect(start(live)).resolves.toBeTruthy();
+    });
+
+    it('the live profile (EXECUTOR_LIVE_TRADE set) is refused even while dry-run', async () => {
+      writeProfile(trades, 'kxtrumpapprove', { profile: { marketStructure: 'band' } });
+      const vars = { EXECUTOR_TRADE: 'kxtrumpapprove', EXECUTOR_LIVE_TRADE: 'kxtrumpapprove', KALSHI_DRY_RUN: 'true' };
+      await expect(start({ ...vars, EXECUTOR_PAPER_LOW_TIER: 'true' })).rejects.toThrow(/EXECUTOR_PAPER_LOW_TIER.*live/);
+      await expect(start(vars)).resolves.toBeTruthy();
+    });
+
+    it('a refused low-tier start leaves no lock behind', async () => {
+      writeProfile(trades, 'kxaaagasw');
+      await expect(start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', EXECUTOR_PAPER_LOW_TIER: 'TRUE' })).rejects.toThrow();
+      expect(fs.existsSync(path.join(repo, 'data/kxaaagasw/decisions.db.lock'))).toBe(false);
+    });
+  });
+
+  describe('resolvePaperLowTier (each condition isolated)', () => {
+    const paper = { name: 'kxaaagasw', ledgerPath: 'data/kxaaagasw/decisions.db', consumerGroup: 'execmod-kxaaagasw' };
+    const vars = (o: Record<string, string | undefined>) => o as NodeJS.ProcessEnv;
+    it('requires KALSHI_DRY_RUN exactly "true"', () => {
+      for (const d of [undefined, '', 'false', 'TRUE', '1']) {
+        expect(() => resolvePaperLowTier(paper, vars({ EXECUTOR_PAPER_LOW_TIER: 'true', KALSHI_DRY_RUN: d }))).toThrow(/KALSHI_DRY_RUN/);
+      }
+      expect(resolvePaperLowTier(paper, vars({ EXECUTOR_PAPER_LOW_TIER: 'true', KALSHI_DRY_RUN: 'true' }))).toBe(true);
+    });
+    it('refuses whenever EXECUTOR_LIVE_TRADE is present at all (even empty)', () => {
+      for (const l of ['kxaaagasw', 'other', '']) {
+        expect(() =>
+          resolvePaperLowTier(paper, vars({ EXECUTOR_PAPER_LOW_TIER: 'true', KALSHI_DRY_RUN: 'true', EXECUTOR_LIVE_TRADE: l }))
+        ).toThrow(/EXECUTOR_LIVE_TRADE/);
+      }
+    });
+    it.each([
+      ['ledger', { ledgerPath: 'data/decisions.db' }],
+      ['group', { consumerGroup: 'execmod' }],
+    ])('refuses a profile on the live %s', (_l, over) => {
+      expect(() => resolvePaperLowTier({ ...paper, ...over }, vars({ EXECUTOR_PAPER_LOW_TIER: 'true', KALSHI_DRY_RUN: 'true' }))).toThrow(
+        /live (ledger|consumer group)/
+      );
+    });
+    it('off (unset or empty) never refuses and returns false, whatever else is set', () => {
+      for (const v of [undefined, '']) {
+        expect(resolvePaperLowTier({ ...paper, ledgerPath: 'data/decisions.db' }, vars({ EXECUTOR_PAPER_LOW_TIER: v, EXECUTOR_LIVE_TRADE: 'x' }))).toBe(false);
+      }
+    });
+  });
 });
 
 describe('main() uses prepareStartup', () => {
@@ -289,5 +371,11 @@ describe('main() uses prepareStartup', () => {
     expect(src).toMatch(/runOnce\(\s*client,\s*startup\.consumerOptions,\s*startup\.compiledPhrases,/);
     expect(src).not.toMatch(/loadProfile\(/);
     expect(src).not.toMatch(/startId:/);
+  });
+
+  it('main.ts hands the startup-resolved low-tier switch to the pipeline deps (never re-reads the variable itself)', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/main.ts'), 'utf-8');
+    expect(src).toMatch(/paperLowTier: startup\.paperLowTier/);
+    expect(src).not.toMatch(/EXECUTOR_PAPER_LOW_TIER/);
   });
 });

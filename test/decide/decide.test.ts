@@ -98,6 +98,15 @@ describe('decideTrade (fake client, offline)', () => {
       await expect(decideTrade(client, db, ctx(loaded))).rejects.toThrow(/max_tokens/);
     }));
 
+  it('marks a low-tier-relaxed rung on the rung line (paper test), and leaves it plain otherwise', () =>
+    withProfile(async (loaded, db) => {
+      const { client, calls } = fake(okResponse);
+      await decideTrade(client, db, ctx(loaded, { lowTierRelaxed: true }));
+      await decideTrade(client, db, ctx(loaded, { itemId: 'item-2' }));
+      const lines = calls.map((c) => (c.messages[0].content as string).split('\n')[0]);
+      expect(lines).toEqual(['Evidentiary rung: reported (low-tier relaxed, paper test)', 'Evidentiary rung: reported']);
+    }));
+
   it('wraps and caps the article at 2000 characters and flags a tripwire hit', () =>
     withProfile(async (loaded, db) => {
       const { client, calls } = fake(okResponse);

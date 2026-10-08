@@ -3,7 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
 import type { OllamaClient } from './ollamaClient.js';
 import type { Item } from '../item.js';
-import { computeRung, type Rung } from './rung.js';
+import { computeRungDetailed, type Rung } from './rung.js';
 import { fetchActiveLadder, type ActiveLadder } from './kalshi.js';
 import {
   recordDecision,
@@ -40,6 +40,25 @@ export interface PipelineDeps {
   kalshiClient: KalshiClient;
   profile: LoadedProfile;
   fetchArticle: typeof fetchArticle;
+  /**
+   * EXECUTOR_PAPER_LOW_TIER as resolved by prepareStartup (resolvePaperLowTier). Honoured
+   * only when this process is ALSO dry-run and not the live unit, re-checked per item
+   * below, so a live-capable process can never relax even if startup were bypassed.
+   */
+  paperLowTier?: boolean;
+}
+
+/**
+ * Defence in depth for the paper-only low-tier test: the startup value alone is never
+ * enough. KALSHI_DRY_RUN must be exactly "true" and EXECUTOR_LIVE_TRADE absent, read
+ * here at the call site, every item.
+ */
+function lowTierRelaxationAllowed(deps: Pick<PipelineDeps, 'paperLowTier'>): boolean {
+  return (
+    deps.paperLowTier === true &&
+    process.env.KALSHI_DRY_RUN === 'true' &&
+    process.env.EXECUTOR_LIVE_TRADE === undefined
+  );
 }
 
 /**
@@ -86,11 +105,20 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
 
   // Pure and free (reads only trust_tier, story_key, corroborations), so it runs
   // before any fetch or model call: a guaranteed-skip 'rumor' item costs nothing.
-  const rung = computeRung({
+  const { rung, lowTierRelaxedFrom } = computeRungDetailed({
     trustTier: item.trust_tier,
     storyKey: item.story_key,
     corroborations: item.corroborations,
+    relaxLowTier: lowTierRelaxationAllowed(deps),
   });
+  const lowTierRelaxed = lowTierRelaxedFrom !== null;
+  // Every row a relaxed item writes carries this prefix, so analysis can always tell a
+  // low-tier-test decision from an ordinary one without a schema change.
+  const lowTierTag = (text: string): string =>
+    lowTierRelaxed ? `[low-tier relaxed: tier ${lowTierRelaxedFrom}] ${text}` : text;
+  const record = (rec: DecisionRecord): void => {
+    recordDecision(db, { ...rec, reason: lowTierTag(rec.reason) });
+  };
 
   // Hoisted so the catch below can tell whether the pending decision row was already
   // written before it decides how to record a failure (see the catch block).
@@ -110,20 +138,19 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     const manualHalt = process.env.EXECUTOR_TRADING_HALTED === 'true';
     if (manualHalt || isTradingHalted(db)) {
       const reason = manualHalt ? 'kill switch active' : 'circuit breaker tripped';
-      recordDecision(db, skipRecord(item, reason, { rung, orderStatus: 'resolved' }));
+      record(skipRecord(item, reason, { rung, orderStatus: 'resolved' }));
       return;
     }
 
     if (rung === 'rumor') {
-      recordDecision(db, skipRecord(item, 'rumor rung, stake 0', { rung, orderStatus: 'resolved' }));
+      record(skipRecord(item, 'rumor rung, stake 0', { rung, orderStatus: 'resolved' }));
       return;
     }
 
     // Checked BEFORE any fetch or model call: a rate-limited item must never spend
     // network, local compute or API cost on a decision that will be declined anyway.
     if (recentTradeCount(db, RATE_LIMIT_WINDOW_MINUTES) >= MAX_TRADES_PER_WINDOW) {
-      recordDecision(
-        db,
+      record(
         skipRecord(item, `rate limit: ${MAX_TRADES_PER_WINDOW} trade(s) per ${RATE_LIMIT_WINDOW_MINUTES} minutes already reached`, {
           rung, orderStatus: 'resolved',
         })
@@ -164,11 +191,11 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         // `gate error:` prefix (final review M2) so analysis queries can find it; no
         // pending row exists yet, so a plain skip is correct.
         const message = err instanceof Error ? err.message : String(err);
-        recordDecision(db, skipRecord(item, `gate error: ${message}`, { rung, orderStatus: 'resolved' }));
+        record(skipRecord(item, `gate error: ${message}`, { rung, orderStatus: 'resolved' }));
         return;
       }
       if (!gate.relevant) {
-        recordDecision(db, skipRecord(item, `gate: not relevant: ${gate.reason}`, { rung, orderStatus: 'resolved' }));
+        record(skipRecord(item, `gate: not relevant: ${gate.reason}`, { rung, orderStatus: 'resolved' }));
         return;
       }
       gateReason = gate.reason;
@@ -178,22 +205,20 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       loaded, itemId: item.item_id, excerptText: articleText, excerptSource, gateReason, tripwireHit,
     });
     if (triage.verdict === 'skip') {
-      recordDecision(db, skipRecord(item, `triage: ${triage.reason}`, { rung, orderStatus: 'resolved' }));
+      record(skipRecord(item, `triage: ${triage.reason}`, { rung, orderStatus: 'resolved' }));
       return;
     }
 
     const ladder: ActiveLadder | null = await fetchLadder(loaded.profile.seriesTicker, db);
     if (ladder === null) {
-      recordDecision(
-        db,
+      record(
         skipRecord(item, `no active ${loaded.profile.seriesTicker} event found`, { rung, orderStatus: 'resolved' })
       );
       return;
     }
 
     if (item.story_key !== null && hasOpenPosition(db, item.story_key, ladder.eventTicker)) {
-      recordDecision(
-        db,
+      record(
         skipRecord(item, 'story already has an open position for the active event', {
           rung,
           eventTicker: ladder.eventTicker,
@@ -204,11 +229,10 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     }
 
     const decision = await decideTrade(anthropicClient, db, {
-      loaded, itemId: item.item_id, articleText, excerptSource, rung, tripwireHit, triageReason: triage.reason,
+      loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit, triageReason: triage.reason,
     });
     if (!decision.shouldTrade) {
-      recordDecision(
-        db,
+      record(
         skipRecord(item, decision.reasoning, {
           rung,
           eventTicker: ladder.eventTicker,
@@ -237,15 +261,14 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         direction: decision.direction,
         magnitude: decision.magnitudePts,
         edgeCents: sizing?.edgeCents ?? null,
-        reasoning: decision.reasoning,
+        reasoning: lowTierTag(decision.reasoning),
         ladderJson,
       });
     };
 
     if (structure === 'capture') {
       paperRecord(null);
-      recordDecision(
-        db,
+      record(
         skipRecord(item, `[PAPER capture] ${decision.direction} ${decision.magnitudePts} ${loaded.profile.magnitudeUnit}: ${decision.reasoning}`, {
           rung, eventTicker: ladder.eventTicker, direction: decision.direction, magnitudePts: decision.magnitudePts, orderStatus: 'resolved',
         })
@@ -261,8 +284,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         ? evaluateBinarySizing({ market, direction: decision.direction, rung })
         : null;
       if (binary === null || !binary.wouldTrade) {
-        recordDecision(
-          db,
+        record(
           skipRecord(item, binary === null ? `binary event must have exactly one market, found ${ladder.bands.length}` : binary.reason, {
             rung, eventTicker: ladder.eventTicker, direction: decision.direction, magnitudePts: decision.magnitudePts, orderStatus: 'resolved',
           })
@@ -270,8 +292,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
         return;
       }
       paperRecord(binary);
-      recordDecision(
-        db,
+      record(
         skipRecord(item, `[PAPER] would buy ${binary.contracts} ${binary.side} on ${binary.marketTicker} at ${binary.entryPriceCents}c: ${decision.reasoning}`, {
           rung, eventTicker: ladder.eventTicker, direction: decision.direction, magnitudePts: decision.magnitudePts, orderStatus: 'resolved',
         })
@@ -298,13 +319,25 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       : null;
     if (paperSizing?.wouldTrade) paperRecord(paperSizing);
 
+    // A low-tier-relaxed item is research data only: it stops at the paper row and
+    // NEVER reaches live-cap sizing, the pending rows or placeOrder (not even the
+    // dry-run simulation), so the relaxation can never touch the real order path.
+    if (lowTierRelaxed) {
+      record(skipRecord(item, paperSizing?.wouldTrade
+        ? `[PAPER ${paperSizing.contracts} ${paperSizing.side} ${paperSizing.marketTicker} @${paperSizing.entryPriceCents}c] ${decision.reasoning}`
+        : `paper sizing: ${paperSizing?.reason ?? 'not paper'}`, {
+        rung, eventTicker: ladder.eventTicker, direction: decision.direction, magnitudePts: decision.magnitudePts, orderStatus: 'resolved',
+      }));
+      return;
+    }
+
     const sizing = evaluateSizing({
       ...sizingBase,
       currentTotalExposureCents: totalExposureCents(db, ladder.eventTicker),
     });
 
     if (!sizing.wouldTrade) {
-      recordDecision(db, {
+      record({
         itemId: item.item_id,
         storyKey: item.story_key,
         eventTicker: ladder.eventTicker,
@@ -472,6 +505,6 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
     }
     // If THIS insert throws too (a genuinely malformed record, or the DB itself),
     // let it propagate: main.ts's catch is the final backstop and will log it.
-    recordDecision(db, skipRecord(item, `pipeline error: ${message}`, { rung, orderStatus: 'resolved' }));
+    record(skipRecord(item, `pipeline error: ${message}`, { rung, orderStatus: 'resolved' }));
   }
 }

@@ -88,6 +88,8 @@ export interface OnItemDeps {
   kalshiClient: KalshiClient;
   profile: LoadedProfile;
   fetchArticle: typeof fetchArticle;
+  /** From prepareStartup (resolvePaperLowTier); the pipeline re-checks dry-run per item. */
+  paperLowTier?: boolean;
 }
 
 /**
@@ -182,7 +184,10 @@ export async function main(): Promise<void> {
     client,
     startup.consumerOptions,
     startup.compiledPhrases,
-    makeOnItem({ anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle }),
+    makeOnItem({
+      anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle,
+      paperLowTier: startup.paperLowTier,
+    }),
     controller.signal
   );
 
