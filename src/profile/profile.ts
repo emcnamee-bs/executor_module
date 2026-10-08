@@ -14,7 +14,7 @@ const MIN_KEYPHRASES = 20;
 
 export type MarketStructure = 'band' | 'threshold' | 'binary' | 'capture';
 
-const ProfileSchema = z
+export const ProfileSchema = z
   .object({
     name: z.string().regex(NAME_RE),
     seriesTicker: z.string().regex(/^[A-Z0-9]{3,40}$/),

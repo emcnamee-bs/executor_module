@@ -5,7 +5,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { openLedger } from '../decide/ledger.js';
 import { callStructured, SONNET_MODEL } from '../decide/structured.js';
 import { validateBank } from './bank.js';
-import { TRADES_ROOT, type MarketStructure, type TradeProfile } from './profile.js';
+import { TRADES_ROOT, ProfileSchema, type MarketStructure, type TradeProfile } from './profile.js';
 import {
   GENERIC_KEYPHRASE_RULES,
   GENERIC_LIST_SIZE_AND_STYLE,
@@ -13,7 +13,7 @@ import {
   buildKeyphrasePrompt,
   dedupeKeyphrases,
 } from '../keyphrases/generate.js';
-import { loadKeyphrases } from '../keyphrases/list.js';
+import { loadKeyphrases, countWords } from '../keyphrases/list.js';
 
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 const MIN_GENERATED_KEYPHRASES = 150;
@@ -23,6 +23,8 @@ const LIVE_LEDGER_PATH = 'data/decisions.db';
 const LEDGER_PATH_RE = /^data\/([a-z0-9-]+\/)?[A-Za-z0-9._-]+\.db$/;
 const CONSUMER_GROUP_RE = /^[A-Za-z0-9_-]{1,60}$/;
 const SERIES_RE = /^[A-Z0-9]{3,40}$/;
+const DIRECT_SOURCE_RE = /^[a-z0-9_]+$/;
+const MAX_SCHEMA_ERROR_CHARS = 500;
 const PROFILE_SCHEMA = {
   type: 'object',
   properties: {
@@ -56,14 +58,15 @@ export async function fetchSeriesSpec(seriesTicker: string, fetchImpl: typeof fe
   if (!events.events || events.events.length === 0) {
     throw new Error(`no open event for series ${seriesTicker}`);
   }
-  const active = [...events.events].sort((a: any, b: any) => a.strike_date.localeCompare(b.strike_date))[0];
-  const markets = await get(`${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(active.event_ticker)}&status=open`);
+  const active = [...events.events].sort((a: any, b: any) => (a.strike_date ?? '').localeCompare(b.strike_date ?? ''))[0];
+  const markets = await get(`${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(active.event_ticker)}&status=open&limit=1000`);
   const list: any[] = markets.markets ?? [];
   if (list.length === 0) throw new Error(`event ${active.event_ticker} has no open markets`);
+  const withRules = list.find((m) => m.rules_primary) ?? list[0];
   return {
     seriesTicker,
     title: active.title ?? seriesTicker,
-    rulesText: [list[0].rules_primary, list[0].rules_secondary].filter(Boolean).join(' ').slice(0, 1500),
+    rulesText: [withRules.rules_primary, withRules.rules_secondary].filter(Boolean).join(' ').slice(0, 1500),
     strikeTypes: list.map((m) => (m.strike_type ?? null) as string | null),
     marketCount: list.length,
     sampleSubtitles: list.slice(0, 6).map((m) => String(m.yes_sub_title ?? m.ticker)),
@@ -93,6 +96,21 @@ IGNORE: <comma-separated look-alike topics that are NOT relevant (at least 4)>
 
 "title" is one question line for the market, "settlement" is 1-3 sentences from the rules text, "decideContext" is 1-3 sentences telling an analyst what quantity they are estimating the effect on and how the market resolves, "magnitudeUnit" is the unit of the settlement quantity (for example pts, %, USD/gal, count), and "maxMagnitude" is a generous positive sanity ceiling on how far one news item could plausibly move that quantity in that unit.`;
 
+/**
+ * True when `target` is the live ledger by name (case-insensitive: macOS volumes usually
+ * are) or by identity (same device and inode, e.g. a hard link or a symlink to it).
+ */
+function isLiveLedger(target: string, live: string): boolean {
+  if (target.toLowerCase() === live.toLowerCase()) return true;
+  try {
+    const t = fs.statSync(target);
+    const l = fs.statSync(live);
+    return t.ino === l.ino && t.dev === l.dev;
+  } catch {
+    return false; // one of them does not exist yet
+  }
+}
+
 export interface BuildOptions {
   seriesTicker: string;
   directSources: string[];
@@ -107,9 +125,10 @@ export interface BuildOptions {
 
 export async function buildTradeProfile(
   opts: BuildOptions,
-  deps: { client: Anthropic; fetchImpl?: typeof fetch; now?: () => Date }
+  deps: { client: Anthropic; fetchImpl?: typeof fetch; now?: () => Date; rename?: typeof fs.renameSync }
 ): Promise<{ dir: string; profile: TradeProfile }> {
   const now = deps.now ?? (() => new Date());
+  const rename = deps.rename ?? fs.renameSync;
   const name = opts.seriesTicker.toLowerCase();
   const tradesRoot = opts.tradesRoot ?? TRADES_ROOT;
   const repoRoot = opts.repoRoot ?? path.resolve(tradesRoot, '..');
@@ -126,9 +145,14 @@ export async function buildTradeProfile(
   if (!CONSUMER_GROUP_RE.test(consumerGroup)) {
     throw new Error(`invalid consumer group ${JSON.stringify(consumerGroup)}: use letters, digits, "_" and "-" (1-60 characters)`);
   }
-  if (ledgerPath === LIVE_LEDGER_PATH && !opts.allowLiveLedger) {
+  for (const id of opts.directSources) {
+    if (!DIRECT_SOURCE_RE.test(id)) {
+      throw new Error(`invalid --direct source id ${JSON.stringify(id)}: use lowercase letters, digits and underscores`);
+    }
+  }
+  if (!opts.allowLiveLedger && isLiveLedger(path.resolve(repoRoot, ledgerPath), path.resolve(repoRoot, LIVE_LEDGER_PATH))) {
     throw new Error(
-      `refusing to open the live ledger ${LIVE_LEDGER_PATH} for build logging; pass --allow-live-ledger to write the build ai_calls rows into it`
+      `refusing to open the live ledger ${LIVE_LEDGER_PATH} (as ${ledgerPath}) for build logging; pass --allow-live-ledger to write the build ai_calls rows into it`
     );
   }
 
@@ -141,7 +165,9 @@ export async function buildTradeProfile(
   try {
     const specText = JSON.stringify(spec, null, 2);
     let generated: any = null;
+    let profile: TradeProfile | null = null;
     let lastError = '';
+    const generatedAt = now().toISOString();
     for (let attempt = 0; attempt < 2 && generated === null; attempt++) {
       const user =
         `Market series spec from Kalshi:\n${specText}` +
@@ -159,13 +185,39 @@ export async function buildTradeProfile(
         if (typeof parsed.magnitudeUnit !== 'string' || parsed.magnitudeUnit.trim() === '') {
           throw new Error('magnitudeUnit must be a non-empty string');
         }
+        // The assembled profile must pass the SAME schema the loader enforces, or the
+        // build would "succeed" and write a profile the process refuses to start with.
+        const candidate = {
+          name,
+          seriesTicker: spec.seriesTicker,
+          title: parsed.title,
+          settlement: parsed.settlement,
+          gateModel: opts.gateModel ?? 'qwen2.5:7b-instruct-q4_K_M',
+          gateKeepAlive: '10m',
+          decideContext: parsed.decideContext,
+          directSources: opts.directSources,
+          marketStructure: structure,
+          magnitudeUnit: parsed.magnitudeUnit,
+          maxMagnitude: parsed.maxMagnitude,
+          ledgerPath,
+          consumerGroup,
+          generatedAt,
+          generatorModel: SONNET_MODEL,
+        };
+        const checked = ProfileSchema.safeParse(candidate);
+        if (!checked.success) {
+          // Field names and limits only: zod messages do not echo the offending value.
+          const detail = checked.error.issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ');
+          throw new Error(`profile fields invalid (${detail})`.slice(0, MAX_SCHEMA_ERROR_CHARS));
+        }
+        profile = checked.data;
         generated = parsed;
       } catch (err) {
-        lastError = (err as Error).message;
+        lastError = (err as Error).message.slice(0, MAX_SCHEMA_ERROR_CHARS);
       }
     }
-    if (generated === null) {
-      throw new Error(`generated bank failed validation twice: ${lastError}`);
+    if (generated === null || profile === null) {
+      throw new Error(`generated bank/profile failed validation twice: ${lastError}`);
     }
 
     let keyphrases: string[];
@@ -184,50 +236,49 @@ export async function buildTradeProfile(
         excerptSource: null, tripwireHit: false,
         summarize: (p) => ({ verdict: `phrases:${(p as any).keyphrases?.length ?? 0}`, reasoning: null }),
       })) as { keyphrases: string[] };
-      keyphrases = dedupeKeyphrases(parsed.keyphrases);
+      // Same rule the loader applies (it drops phrases under 2 words), so the count is what the loader will see.
+      keyphrases = dedupeKeyphrases(parsed.keyphrases).filter((p) => countWords(p) >= 2);
       if (keyphrases.length < MIN_GENERATED_KEYPHRASES) {
-        throw new Error(`generated keyphrase list has ${keyphrases.length} phrases; need at least ${MIN_GENERATED_KEYPHRASES}`);
+        throw new Error(`generated keyphrase list has ${keyphrases.length} usable (2+ word) phrases; need at least ${MIN_GENERATED_KEYPHRASES}`);
       }
     }
 
-    const profile: TradeProfile = {
-      name,
-      seriesTicker: spec.seriesTicker,
-      title: generated.title,
-      settlement: generated.settlement,
-      gateModel: opts.gateModel ?? 'qwen2.5:7b-instruct-q4_K_M',
-      gateKeepAlive: '10m',
-      decideContext: generated.decideContext,
-      directSources: opts.directSources,
-      marketStructure: structure,
-      magnitudeUnit: generated.magnitudeUnit,
-      maxMagnitude: generated.maxMagnitude,
-      ledgerPath,
-      consumerGroup,
-      generatedAt: now().toISOString(),
-      generatorModel: SONNET_MODEL,
-    };
-
-    // Write everything to a temp directory first, then move files into place, so a
-    // failure above (or while writing) leaves any existing profile byte-identical.
+    // Stage the COMPLETE profile in a temp dir inside tradesRoot (same filesystem), then swap
+    // whole directories: old -> .old-*, staged -> target. If the second rename fails the old
+    // directory is renamed back, so an existing profile is never left half-replaced.
     const dir = path.join(tradesRoot, name);
-    const tmp = path.join(tradesRoot, `.build-${name}-${crypto.randomBytes(4).toString('hex')}`);
-    fs.mkdirSync(tmp, { recursive: true });
+    const suffix = crypto.randomBytes(4).toString('hex');
+    const staged = path.join(tradesRoot, `.build-${name}-${suffix}`);
+    const old = path.join(tradesRoot, `.old-${name}-${suffix}`);
+    fs.mkdirSync(staged, { recursive: true });
+    let keepOld = false;
     try {
-      fs.writeFileSync(path.join(tmp, 'profile.json'), JSON.stringify(profile, null, 2) + '\n');
-      fs.writeFileSync(path.join(tmp, 'keyphrases.json'), JSON.stringify(keyphrases, null, 2) + '\n');
-      fs.writeFileSync(path.join(tmp, 'bank.md'), generated.bank.endsWith('\n') ? generated.bank : generated.bank + '\n');
-      const bankText = fs.readFileSync(path.join(tmp, 'bank.md'), 'utf-8');
+      fs.writeFileSync(path.join(staged, 'profile.json'), JSON.stringify(profile, null, 2) + '\n');
+      fs.writeFileSync(path.join(staged, 'keyphrases.json'), JSON.stringify(keyphrases, null, 2) + '\n');
+      fs.writeFileSync(path.join(staged, 'bank.md'), generated.bank.endsWith('\n') ? generated.bank : generated.bank + '\n');
+      const bankText = fs.readFileSync(path.join(staged, 'bank.md'), 'utf-8');
       fs.writeFileSync(
-        path.join(tmp, 'bank.meta.json'),
+        path.join(staged, 'bank.meta.json'),
         JSON.stringify({ sha256: crypto.createHash('sha256').update(bankText).digest('hex'), generatedAt: profile.generatedAt, model: SONNET_MODEL }, null, 2) + '\n'
       );
-      fs.mkdirSync(dir, { recursive: true });
-      for (const file of fs.readdirSync(tmp)) {
-        fs.renameSync(path.join(tmp, file), path.join(dir, file));
+      const hadOld = fs.existsSync(dir);
+      if (hadOld) rename(dir, old);
+      try {
+        rename(staged, dir);
+      } catch (err) {
+        if (hadOld) {
+          try {
+            rename(old, dir);
+          } catch (restoreErr) {
+            keepOld = true; // never delete the only copy of the old profile
+            console.error(`[build-trade] could not restore the previous profile; it is at ${old}:`, (restoreErr as Error).message);
+          }
+        }
+        throw err;
       }
     } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(staged, { recursive: true, force: true });
+      if (!keepOld) fs.rmSync(old, { recursive: true, force: true });
     }
     return { dir, profile };
   } finally {
