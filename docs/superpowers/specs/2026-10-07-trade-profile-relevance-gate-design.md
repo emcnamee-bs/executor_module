@@ -197,7 +197,8 @@ Both use `claude-sonnet-5`, structured output, and the shared truncation guard
 decide fix).
 
 - **Stage 1 (triage):** system = profile title/settlement/`decideContext`; user = the
-  delimited excerpt (<= 800 chars) plus the gate's reason. Schema:
+  delimited excerpt (<= 800 chars) plus the gate's reason (omitted for direct-source
+  items, which never pass through the gate). Schema:
   `{ "reason": string, "verdict": "skip" | "escalate" }`. `escalate` means "this could
   matter, or I need the whole article to judge."
 - **Stage 2 (decision):** same system context; user = the delimited article, <= 2,000
@@ -301,6 +302,10 @@ which can lead to a real order. The guards are few, structural and cheap in toke
 - **Gate calibration set** (live Ollama, like the existing real-Sonnet tests): a small
   labelled set per trade (relevant, adjacent-relevant, irrelevant, injection) with the
   pass criteria the benchmark section sets.
+- `directSources` routing: an item from a direct source reaches Sonnet triage with its
+  snippet and never calls the keyphrase matcher, the fetcher or the Qwen gate; an item
+  from any other source still does (each asserted at the real call site, with a mutation
+  check). The profile validator rejects an unknown `directSources` id.
 - The profile build is tested with a fake Anthropic client; the validator's rejection
   of an oversized or malformed bank is tested to leave existing files untouched.
 
