@@ -7,7 +7,7 @@ export const DEFAULT_KEYPHRASES_PATH = path.resolve(
   '../../data/keyphrases.json'
 );
 
-function countWords(phrase: string): number {
+export function countWords(phrase: string): number {
   return phrase.trim().split(/\s+/).filter(Boolean).length;
 }
 

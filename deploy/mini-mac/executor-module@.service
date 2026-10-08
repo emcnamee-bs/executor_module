@@ -1,0 +1,53 @@
+[Unit]
+# A PAPER-TRADING instance of the executor for one trade profile (trades/%i/).
+# Start with: systemctl --user enable --now executor-module@kxtrumpact
+# It reads the shared secrets in %h/executor_module/.env and optional per-trade settings
+# in %h/executor_module/.env.%i (e.g. EXECUTOR_TRADING_HALTED for this trade alone).
+# Real-money runs use executor-module.service (band profile only, and only on purpose).
+#
+# The safety pins are on the ExecStart line, NOT in Environment=: systemd lets
+# EnvironmentFile= override Environment=, so a pin there could be undone by .env or
+# .env.%i (final review C1). `/usr/bin/env -u EXECUTOR_LIVE_TRADE KALSHI_DRY_RUN=true
+# EXECUTOR_TRADE=%i` is applied after every env file and nothing can override it; and
+# main.ts refuses any live start without EXECUTOR_LIVE_TRADE=<profile name>, which this
+# template strips. Never instantiate it for kxaprpotus: main.ts refuses the live ledger
+# and consumer group without EXECUTOR_LIVE_TRADE.
+Description=executor_module paper trade -- %i
+Documentation=file:%h/executor_module/HANDOFF.md
+After=network-online.target redis-server.service iip.service
+Wants=network-online.target
+
+StartLimitIntervalSec=3600
+StartLimitBurst=30
+
+[Service]
+Type=simple
+WorkingDirectory=%h/executor_module
+EnvironmentFile=%h/executor_module/.env
+EnvironmentFile=-%h/executor_module/.env.%i
+Environment=IIP_SOURCES_FILE=%h/Internet_Info_Plug/config/sources.minimac.yaml
+
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && exit 0; sleep 2; done; echo "Ollama not ready after 60s" >&2; exit 1'
+ExecStart=/usr/bin/env -u EXECUTOR_LIVE_TRADE KALSHI_DRY_RUN=true EXECUTOR_TRADE=%i EXECMOD_CONSUMER_NAME=execmod-%i-primary %h/executor_module/node_modules/.bin/tsx %h/executor_module/src/main.ts
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=executor-%i
+
+# Same hardening as executor-module.service (MemoryDenyWriteExecute omitted: V8's JIT
+# needs W^X transitions that directive's seccomp filter kills outright).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/executor_module/data %h/executor_module/logs
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

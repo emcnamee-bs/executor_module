@@ -17,23 +17,25 @@ any signal or sizing logic around it. Treat every assumption about this market t
 way its sibling project treats every assumption about a data source: verify before you
 build on it.
 
-The intended pipeline, as specified by the operator (not yet built, any part of it):
+**Current pipeline (as built, 2026-10; the original 2026-08 Haiku synopsis -> Sonnet
+verify design was replaced by trade profiles, see §5a.4 and §5a.5):**
 
-1. A scanner watches news-outlet output for a curated list of AI-generated keyphrases —
-   matched against an article's **title and first paragraph**.
-2. A match dispatches a cheap/fast model (**Haiku**) to read the article and produce a
-   synopsis of what it's actually about.
-3. **Sonnet** does a light, fast pass to verify the synopsis against the article (a
-   cross-check, not a rebuild).
-4. **Sonnet** decides the trade: direction (for/against), and whether to buy, sell, or
-   hold — using a sizing/decision method still to be designed.
-5. The decision is executed as a **real order against a real Kalshi market.** This is
-   live money from the point execution is wired up. There is no simulation mode implied
-   by this repo's existence — if a dry-run/paper mode is wanted, it must be built and
-   explicitly chosen, not assumed to exist by default.
+1. A scanner watches news-outlet output (the iip Redis stream) for the trade profile's
+   keyphrases, matched against an item's **headline and snippet**. Items from the
+   profile's `directSources` (the market's own resolution data) skip the keyphrase step.
+2. A **local relevance gate** (Ollama, the profile's `gateModel`, default
+   `qwen2.5:7b-instruct-q4_K_M`) reads up to 800 characters of the fetched article plus
+   the profile's knowledge bank and answers relevant / not relevant. A gate verdict can
+   only pass an item along, never cause a trade.
+3. **Sonnet triage** decides escalate / skip.
+4. **Sonnet** decides the trade (direction, magnitude in the profile's unit, a veto),
+   validated against the profile's `maxMagnitude`; deterministic sizing, the exposure
+   cap and the pacing limit then decide whether an order is placed.
+5. The decision is executed as a **real order against a real Kalshi market**, only for a
+   `band` profile run from the live unit, and only when `KALSHI_DRY_RUN` is not `true`.
+   Every other run is paper (`paper_positions`).
 
-**Nothing above exists yet.** No scanner, no model calls, no decision code, no Kalshi
-client, in this repo. Building all of it is the job.
+The sections below that describe the August state (§1-§5) are kept as history.
 
 ---
 
@@ -316,11 +318,20 @@ and the real exchange, which the test suite deliberately never has.
 |---|---|---|
 | `KALSHI_API_KEY_ID` | **Yes** | Kalshi API key id, used as the `KALSHI-ACCESS-KEY` header. `main()` fails loudly at startup naming it if absent. Never hardcoded, never defaulted (§2). |
 | `KALSHI_PRIVATE_KEY_PATH` | **Yes** | Path to the RSA private key PEM used for RSA-PSS request signing (canonically `~/.kalshi-spine/kalshi_key.pem`, mode 600). The file itself is never committed, logged, or printed. |
-| `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. |
-| `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. |
-| `ANTHROPIC_API_KEY` | **Yes** | The Sonnet verify / Sonnet decide calls (§5a.4). `synopsize` runs on a local Ollama-served model instead -- see §5a.4. |
+| `KALSHI_DRY_RUN` | No | Set to the exact string `'true'` to block every real exchange call. See below for exactly what it does and does not do. For the live unit it belongs in `.env.kxaprpotus` (read only by that unit); paper units pin it to `true` on their ExecStart line, so no env file can change it for them (§5a.5). |
+| `EXECUTOR_TRADING_HALTED` | No | Kill switch. `'true'` makes every item record a skip row before any model call. Independent of `KALSHI_DRY_RUN` — use this to stop trading without stopping the process. **Set it per unit, never in the shared `.env`**: the live trade's halt goes in `.env.kxaprpotus`, a paper trade's in `.env.<name>`. A halt in `.env` silently halts every paper unit as well (each records "kill switch active" for every item). The `[profile]` startup line prints `halted=` so this is visible. |
+| `ANTHROPIC_API_KEY` | **Yes** | The Sonnet triage and decide calls, and `build-trade`'s two generation calls. The relevance gate runs on a local Ollama model instead (§5a.4). |
 | `SLACK_WEBHOOK_URL` | No | Slack incoming-webhook URL that powers the three alert events (§5a.2b). If unset, `sendAlert` logs a warning and no-ops — every event still happens and is still recorded in the ledger, but no human is paged. Bearer-equivalent secret: never hardcoded, never defaulted, never logged (§2). |
-| `OLLAMA_BASE_URL` | No | Overrides the local Ollama server URL `synopsize` calls (§5a.4). Defaults to `http://127.0.0.1:11434` — correct for the normal colocated deployment; not a secret, just a deployment override. |
+| `OLLAMA_BASE_URL` | No | Overrides the local Ollama server URL the relevance gate calls (§5a.4), and that the startup gate-model check asks. Defaults to `http://127.0.0.1:11434` — correct for the normal colocated deployment; not a secret, just a deployment override. |
+| `OLLAMA_REQUEST_TIMEOUT_MS` | No | Deadline on each gate request, default `240000` (4 minutes, under undici's implicit 300 s). A timeout is a recorded gate failure and counts toward this ledger's `ollama-errors` breaker (§5a.4). |
+
+Two more variables select the trade (§5a.5): `EXECUTOR_TRADE` (**required**, no default) and `IIP_SOURCES_FILE` (required when the profile lists `directSources`).
+
+| Variable | Required? | What it does |
+|---|---|---|
+| `EXECUTOR_TRADE` | **Yes** | Name of the trade profile to run (a directory under `trades/`, e.g. `kxaprpotus`). `main()` fails loudly naming it if absent. Both units pin it on their ExecStart line; do not put it in any env file. |
+| `EXECUTOR_LIVE_TRADE` | For a live start | Must equal the profile name for any start with `KALSHI_DRY_RUN` not `true`, and for any profile on the live ledger `data/decisions.db` or group `execmod` (even dry-run). Set ONLY by `executor-module.service` on its ExecStart line; the paper template strips it. Never put it in an env file. For a local `npm run dev` of kxaprpotus, export `EXECUTOR_LIVE_TRADE=kxaprpotus` deliberately. |
+| `IIP_SOURCES_FILE` | Only if the profile has `directSources` | Path to the Internet_Info_Plug sources YAML (mini-mac: `~/Internet_Info_Plug/config/sources.minimac.yaml`). Each `directSources` id is checked against it at startup; an unknown id refuses to start. |
 
 **What `KALSHI_DRY_RUN=true` actually guarantees:** `KalshiClient.createOrder` never
 issues an HTTP request at all — it returns a synthetic `DRYRUN-<client_order_id>` order
@@ -514,11 +525,12 @@ fail the boot.
 
 One limitation of that durable state itself: `process_lifecycle` is a single
 global row with no per-instance identity, so unclean-exit detection assumes ONE
-process instance per `data/decisions.db` — an assumption nothing currently
-enforces (`EXECMOD_CONSUMER_NAME` exists precisely because a second consumer is
-at least contemplated). If two processes ever share one ledger file, one
-process's clean shutdown can mask the other's crash, and one process's crash can
-fire a false unclean-exit alert on an unrelated instance's next boot.
+process instance per ledger. That assumption is now enforced: each process
+holds `<ledger>.lock` for its lifetime, and a second process on the same ledger
+refuses to start (§5a.5, "One process per ledger"). Were two processes ever to share
+one ledger file anyway, one process's clean shutdown could mask the other's crash,
+and one process's crash could fire a false unclean-exit alert on the other's next
+boot.
 
 ### 5a.2c Trade pacing limit (added in slice 9)
 
@@ -528,8 +540,8 @@ same limit, never counts) within a rolling `RATE_LIMIT_WINDOW_MINUTES` (15)
 window, checked by `recentTradeCount` (`ledger.ts`) and enforced in
 `pipeline.ts` immediately after the kill-switch/circuit-breaker and
 rumor-rung checks — before any model call at all (including the local
-synopsis model), so a rate-limited item never spends real API cost on the
-Sonnet verify/decide calls, nor local compute on synopsis. Global scope, not
+relevance gate), so a rate-limited item never spends real API cost on the
+Sonnet triage/decide calls, nor local compute on the gate. Global scope, not
 per-event: this is a pacing
 question ("is the system trading too fast right now?"), independent of which
 market a decision happens to land on.
@@ -594,34 +606,178 @@ exposure cap, nor `reconcileOpenPositions` can see until it resolves to
   table, so a migrated database gets identical DB-level enforcement. Every other column
   drift still needs a manual migration.
 
-### 5a.4 Local model for synopsis (added in this slice)
+### 5a.4 Local relevance gate model (Ollama)
 
-`synopsize` runs against a local Qwen model (`qwen2.5:3b-instruct-q4_K_M`) served
-by Ollama (`http://127.0.0.1:11434` by default, configurable via
-`OLLAMA_BASE_URL`) instead of a hosted API call. This is a new hard runtime
-dependency: Ollama must be installed and have that model already pulled on any
-host running this service, or every synopsis call fails at runtime (see the
-`executor-module.service` `ExecStartPre` readiness probe, deploy/mini-mac,
-which blocks the main process from starting until Ollama's own API answers).
+The relevance gate (step 2 of §0) runs against a local model served by Ollama
+(`http://127.0.0.1:11434` by default, `OLLAMA_BASE_URL` to override): the profile's
+`gateModel`, `qwen2.5:7b-instruct-q4_K_M` for every profile built so far. The model
+must be pulled on the host before any executor starts:
 
-`verifySynopsis` and `decideTrade` remain on the real Anthropic API, unchanged
-from before this slice. Repeated Ollama call failures (from `synopsize`, or any
-future local-model call routed through `ollamaClient.ts`) trip a dedicated
-`ollama-errors` circuit breaker signal (mirroring `kalshi-errors` exactly —
-same threshold/window shape, same `tripBreaker`/`recordOllamaError` pattern),
-alerting to Slack the same way every other breaker signal does (§5a.2b).
+```bash
+ollama pull qwen2.5:7b-instruct-q4_K_M
+ollama list | grep qwen2.5:7b-instruct-q4_K_M
+```
 
-This slice was deliberately narrowed from an original plan that also moved
-`verifySynopsis` onto a local model. A final review found the local 7B model's
-(`qwen2.5:7b-instruct-q4_K_M`) faithfulness checking demonstrably unreliable on
-subtle distortions — it returned `supported: true` on synopses containing
-material distortions it could not detect, with confabulated notes explaining
-why. Naming that plainly here, in the same style as this file's own
-"confirmed live" findings elsewhere (e.g. §5a.2's `client_order_id`/
-`position_fp` findings): the local model is not a safe substitute for Sonnet on
-the verification step, full stop, and `verifySynopsis` was reverted to the
-real Anthropic API rather than shipped with a known-unreliable local check
-sitting on the path to a real order.
+`main()` checks Ollama's `/api/tags` at startup and **refuses to start** (naming the
+`ollama pull` command) when the profile's gate model is not listed, or when Ollama cannot
+be asked at all. Without that check a missing model would return 404 for every gated
+item, and five of those trip the breaker. The unit's `ExecStartPre` probe separately
+waits for Ollama's API to answer.
+
+Every gate request carries an explicit deadline (`OLLAMA_REQUEST_TIMEOUT_MS`, default
+240 s). A timeout, like any other Ollama failure (connection refused, non-2xx, a body
+that is not JSON), writes an `ollama_errors` row and a failed gate `ai_calls` row, and
+the item is recorded as `gate error: ...`. Five Ollama errors in 15 minutes trip the
+`ollama-errors` breaker. **Breakers are per ledger**: a paper unit's timeouts are written
+to its own ledger and can never halt the live trade. A gate failure only drops the item;
+it never passes it on.
+
+**Contention, and the staged rollout.** Every executor shares one CPU-only Ollama
+(`OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`). A gate call takes about 25 s
+warm and about 2 minutes cold, so a news burst matching several profiles queues the live
+trade's gate call behind the paper calls. If the queue passes the deadline, the live
+ledger records the timeouts, and enough of them halt live trading until `npm run
+clear-breaker` (ruling: timeouts count, because halting is the fail-closed direction).
+So:
+
+1. Start paper units **one at a time**, not all together.
+2. After each one, read its `[profile]` line and its gate funnel before starting the
+   next: `SELECT stage, verdict, COUNT(*) FROM ai_calls GROUP BY 1,2` on its ledger
+   (§5a.5), plus `SELECT COUNT(*) FROM ollama_errors WHERE occurred_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day')`
+   on it **and** on `data/decisions.db`.
+3. Watch `ai_calls.wall_ms` for gate rows. If live-ledger gate calls approach the
+   deadline while paper units run, stop paper units until it recovers; do not lift the
+   live halt in that state.
+
+History, still true: an earlier slice tried moving the Sonnet faithfulness check onto
+the 7B model and found it unreliable on subtle distortions (it returned `supported:
+true` on materially distorted synopses). That is why the local model only ever screens
+items **in**. Its "relevant" verdict passes an item to Sonnet triage and is never a
+reason to trade.
+
+### 5a.5 Trade profiles and paper trading
+
+**What a profile is.** Everything market-specific lives in `trades/<name>/` (profile,
+keyphrases, `bank.md`, `bank.meta.json`), selected at startup by `EXECUTOR_TRADE=<name>`.
+Paper profiles are generated by `npm run build-trade -- --series <SERIES> [--direct id,id]
+[--reuse-keyphrases file] [--ledger-path p] [--consumer-group g] [--allow-live-ledger]`,
+which makes two Sonnet calls (keyphrases, then bank) from Kalshi's own market spec and
+prints a `structure=` line, and are committed after building. **A generated bank is
+unreviewed by design**, so read `trades/<name>/bank.md` once after every rebuild (a
+30-second sanity read, not a gate).
+
+**The live profile `trades/kxaprpotus/` is committed and HAND-PINNED. Never regenerate
+it.** Its `decideContext` is the reviewed `DECIDE_CONTEXT` the old pipeline traded on,
+with `maxMagnitude: 10`, `magnitudeUnit: "pts"`, `band`, ledger `data/decisions.db`,
+group `execmod` and the old `data/keyphrases.json` list. Its `bank.md` was written by
+hand from the KXAPRPOTUS specs, and `bank.meta.json` carries its sha256 (edit the bank
+and the loader refuses it until the sha is updated). `test/profile/livePinned.test.ts`
+pins every one of these values. No `build-trade` run is needed for it after a deploy.
+`build-trade` refuses to replace any existing profile pinned to the live ledger or
+group, and refuses to log into `data/decisions.db`, unless `--allow-live-ledger` is
+passed. Do not pass it for kxaprpotus. If you ever do, diff the result against git
+before any restart.
+
+**Variables.** `EXECUTOR_TRADE` is always required; `IIP_SOURCES_FILE` is required
+whenever the profile has `directSources` (table in §5a.1). Both fail loudly at startup,
+like the other required variables.
+
+**Per-trade ledger and consumer group.** A new profile defaults to its own ledger
+`data/<name>/decisions.db` and consumer group `execmod-<name>`, and a new group starts at
+the stream tail (`$`), so it never replays history. The live trade is the exception: its
+profile pins `data/decisions.db` and group `execmod` (built with `--ledger-path` and
+`--consumer-group`) so its history, exposure and breaker state are preserved. A live
+(non-dry-run) start on a ledger file that does not exist is refused unless
+`EXECUTOR_ALLOW_NEW_LEDGER=true`.
+
+**One process per ledger.** At startup each process takes `<ledger>.lock` (an atomic
+O_EXCL pidfile holding pid and boot id) and holds it until exit. A second process on the
+same ledger refuses to start, naming the holder's pid. A lock left by a dead process or
+a previous boot is taken over automatically. A garbled lock file refuses to start;
+delete it by hand only after confirming no executor runs on that ledger. Separately, a
+profile on the live ledger `data/decisions.db` or group `execmod` starts only with
+`EXECUTOR_LIVE_TRADE` naming it, so `executor-module@kxaprpotus` (the paper template
+instantiated for the live trade) is always refused.
+
+**Structure rule.** Only `marketStructure: band` may place real orders. Any other
+structure (`threshold`, `binary`, `capture`) refuses to start unless `KALSHI_DRY_RUN` is
+exactly `true`, and the pipeline re-checks this per item.
+
+**Live vs paper units, and why the pins are on ExecStart.** systemd lets
+`EnvironmentFile=` override `Environment=` (systemd.exec(5)), so a value pinned with
+`Environment=` is NOT safe from an env file. Both units therefore pin their values on
+the command line with `/usr/bin/env`, which is applied after every env file:
+
+- `executor-module.service` (real money): `ExecStart=/usr/bin/env EXECUTOR_TRADE=kxaprpotus
+  EXECUTOR_LIVE_TRADE=kxaprpotus ...`. It reads `.env`, then its own
+  `.env.kxaprpotus`, which is **required**: the unit has no `-` prefix on that
+  `EnvironmentFile=`, so a missing or misnamed file fails the start instead of
+  silently starting live and unhalted. It does not pin `KALSHI_DRY_RUN`: the
+  live/dry-run choice is the operator's, made in `.env.kxaprpotus`.
+- `executor-module@<name>.service` (paper): `ExecStart=/usr/bin/env -u EXECUTOR_LIVE_TRADE
+  KALSHI_DRY_RUN=true EXECUTOR_TRADE=%i ...`. It reads `.env` and `.env.<name>`, but
+  no line in either can make it live, retarget it, or give it `EXECUTOR_LIVE_TRADE`.
+  Start it with `systemctl --user enable --now executor-module@kxtrumpact`.
+
+The code guard behind the units: `main()` refuses any start with `KALSHI_DRY_RUN` not
+exactly `true` unless `EXECUTOR_LIVE_TRADE` equals the profile name. So even a paper
+unit that somehow lost its dry-run pin cannot place a real order, and the live unit
+cannot be pointed at another band profile and trade it.
+
+**Where the switches go.** The shared `.env` holds only secrets and shared settings. It
+must contain no `KALSHI_DRY_RUN`, `EXECUTOR_TRADE`, `EXECUTOR_LIVE_TRADE` or
+`EXECUTOR_TRADING_HALTED` line. The paper units read it too, so a halt there halts all
+of them. The live trade's halt and dry-run choice go in `.env.kxaprpotus`. Check
+with `grep -E '^(KALSHI_DRY_RUN|EXECUTOR_TRADE|EXECUTOR_LIVE_TRADE|EXECUTOR_TRADING_HALTED)='
+~/executor_module/.env ~/executor_module/.env.*`, and confirm every unit's
+`[profile]` line shows the `dryRun=` and `halted=` you expect.
+
+**`.env.kxaprpotus` must exist and carry the live unit's switch lines.** While the
+live trade is halted or soaking, it contains `EXECUTOR_TRADING_HALTED=true` and/or
+`KALSHI_DRY_RUN=true`. Both are honoured only as the exact string `true`.
+
+- **Lift the halt (or go live) by DELETING the line, never by writing
+  `=false`.** A `=false` line reads the same as no line, so it is a live switch that
+  looks like a safety setting. Deleting the line makes the change visible in a grep.
+- **Every change to the file is three steps:**
+  1. `grep -E '^(KALSHI_DRY_RUN|EXECUTOR_TRADING_HALTED)=' ~/executor_module/.env.kxaprpotus`
+  2. `systemctl --user restart executor-module`
+  3. `journalctl --user -u executor-module --since '-2 min' --no-pager | grep -E '\[profile\]'`.
+     Confirm `dryRun=` and `halted=` are what you intended.
+- **A live start with no halt also logs `[profile] WARN: LIVE AND NOT HALTED
+  trade=kxaprpotus ...`.** Seeing that line when you did not mean to go live means:
+  halt now.
+
+**Deploy order after merging this branch.** Pull the gate model (§5a.4) and move any
+`EXECUTOR_TRADING_HALTED` / `KALSHI_DRY_RUN` line from `.env` to `.env.kxaprpotus`
+before restarting anything. Then restart the live unit; kxaprpotus needs no build. Then
+build, commit and start the paper units one at a time (§5a.4, staged rollout).
+
+**Paper results.** Paper decisions are written to `paper_positions` (never read by the
+real-money exposure queries). `npm run score-paper` settles finalized ones: it needs
+`EXECUTOR_LEDGER_PATH=data/<name>/decisions.db`, calls only public Kalshi market lookups,
+and writes only `paper_positions` (`pnl_cents` is gross of fees). The
+`score-paper.timer` unit runs it daily at 21:30 for the live ledger `data/decisions.db`
+(which holds paper rows while the live trade runs dry-run) and every
+`data/*/decisions.db`.
+
+**Audit trail.** `ai_calls` holds every model call (gate, triage, decide, and the
+profile-build calls), including failures, with the full request (`request_json`), raw and
+parsed output, reasoning and verdict, written before the pipeline acts on it. Analysis
+queries (read-only, run per ledger):
+
+```sql
+-- funnel: how far did items get?
+SELECT stage, verdict, COUNT(*) FROM ai_calls GROUP BY stage, verdict ORDER BY stage, 3 DESC;
+-- every reason the gate gave for a "no", newest first, to hand-check for missed relevance
+SELECT called_at, item_id, reasoning FROM ai_calls WHERE stage='gate' AND verdict='false' ORDER BY id DESC LIMIT 50;
+-- paper results once settled (gross of fees)
+SELECT trade, structure, COUNT(*) AS n, SUM(pnl_cents) AS pnl_cents, SUM(contracts*entry_price_cents) AS staked_cents
+FROM paper_positions WHERE settled_at IS NOT NULL AND side IS NOT NULL GROUP BY trade, structure;
+-- what the model said when it wanted to trade, with the ladder it saw (ladder_json)
+SELECT created_at, market_ticker, side, entry_price_cents, direction, magnitude, reasoning, ladder_json
+FROM paper_positions ORDER BY id DESC LIMIT 25;
+```
 
 ---
 

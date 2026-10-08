@@ -3,16 +3,15 @@
 // Manually clears a market_blocks entry after a human has investigated and
 // confirmed it's safe to resume trading that market_ticker. Not part of `npm test`
 // -- invoke directly:
-//   direnv exec . npx tsx scripts/clear-market-block.ts <market_ticker>
+//   EXECUTOR_TRADE=<trade> direnv exec . npx tsx scripts/clear-market-block.ts <market_ticker>
+// EXECUTOR_TRADE is required (each trade has its own ledger); a missing ledger is an error.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openLedger } from '../src/decide/ledger.js';
+import { openExistingLedger } from '../src/decide/ledger.js';
+import { resolveTradeLedger } from '../src/profile/profile.js';
 
-const DEFAULT_LEDGER_PATH = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../data/decisions.db'
-);
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function main(): void {
   const marketTicker = process.argv[2];
@@ -21,7 +20,9 @@ function main(): void {
     process.exit(1);
   }
 
-  const db = openLedger(DEFAULT_LEDGER_PATH);
+  const { trade, ledgerPath } = resolveTradeLedger(process.env, REPO_ROOT);
+  console.log(`[clear-market-block] trade=${trade} ledger=${ledgerPath}`);
+  const db = openExistingLedger(ledgerPath);
   const result = db
     .prepare(
       `UPDATE market_blocks SET cleared_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')

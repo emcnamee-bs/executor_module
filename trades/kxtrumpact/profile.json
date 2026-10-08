@@ -1,0 +1,19 @@
+{
+  "name": "kxtrumpact",
+  "seriesTicker": "KXTRUMPACT",
+  "title": "How many presidential actions will Trump take this week? (Oct 4–10, 2026)",
+  "settlement": "The market resolves based on the count of items (proclamations, executive orders, nominations & appointments, memoranda) visibly published on the \"Presidential Actions\" tab at whitehouse.gov, checked at 10:00 AM ET on Oct 11, 2026. Only items with a publication date within Oct 4–10, 2026 count, regardless of legal effect; items on other pages (e.g., Briefings & Statements) or uploaded late do not count.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Estimate the effect of news on the weekly count of White House \"Presidential Actions\" page entries (executive orders, proclamations, memoranda, nominations/appointments) published Oct 4–10, 2026, as it would be tallied at 10:00 AM ET Oct 11, 2026.",
+  "directSources": [
+    "whitehouse_presidential_actions"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "count",
+  "maxMagnitude": 10,
+  "ledgerPath": "data/kxtrumpact/decisions.db",
+  "consumerGroup": "execmod-kxtrumpact",
+  "generatedAt": "2026-10-08T08:57:04.763Z",
+  "generatorModel": "claude-sonnet-5"
+}

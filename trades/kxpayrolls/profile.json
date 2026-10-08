@@ -1,0 +1,19 @@
+{
+  "name": "kxpayrolls",
+  "seriesTicker": "KXPAYROLLS",
+  "title": "Will October 2026 US nonfarm payrolls increase exceed a given threshold?",
+  "settlement": "If the increase in total non-farm payroll employment is above the strike level (e.g., 90,000) as reported by the Bureau of Labor Statistics Monthly Employment Situation Report for October 2026, the market resolves Yes. The market closes at 8:29 AM ET on the expected release date of the report.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the effect of news on the BLS October 2026 nonfarm payrolls month-over-month change (in thousands of jobs), which determines whether it settles above each threshold (e.g., 90,000, 80,000, etc.) in the Employment Situation Report.",
+  "directSources": [
+    "bls_releases"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "thousand jobs",
+  "maxMagnitude": 150,
+  "ledgerPath": "data/kxpayrolls/decisions.db",
+  "consumerGroup": "execmod-kxpayrolls",
+  "generatedAt": "2026-10-08T08:52:10.618Z",
+  "generatorModel": "claude-sonnet-5"
+}

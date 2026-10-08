@@ -3,8 +3,10 @@ import { createRedisClient } from './redis/client.js';
 import { StreamConsumer, type ConsumerOptions, type StreamEntry } from './redis/consumer.js';
 import { parseItemFields, type Item } from './item.js';
 import { formatSummaryLine } from './log.js';
-import { compilePhrases, findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
-import { loadKeyphrases, DEFAULT_KEYPHRASES_PATH } from './keyphrases/list.js';
+import { findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
+import type { LoadedProfile } from './profile/profile.js';
+import { prepareStartup, assertLedgerStartAllowed } from './startup.js';
+import { fetchArticle } from './fetch/excerpt.js';
 import {
   openLedger,
   recordProcessStarting,
@@ -22,14 +24,10 @@ import type Database from 'better-sqlite3';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const STREAM_KEY = 'iip:items';
-const GROUP_NAME = 'execmod';
-const CONSUMER_NAME = process.env.EXECMOD_CONSUMER_NAME ?? 'execmod-primary';
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const DEFAULT_LEDGER_PATH = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../data/decisions.db'
-);
+// Re-exported for existing callers/tests; the guard itself lives with the rest of startup.
+export { assertLedgerStartAllowed };
 
 /** How much of an unparseable payload the error line carries before it is cut off. */
 const RAW_PREVIEW_LIMIT = 500;
@@ -88,6 +86,8 @@ export interface OnItemDeps {
   db: Database.Database;
   fetchLadder: typeof fetchActiveLadder;
   kalshiClient: KalshiClient;
+  profile: LoadedProfile;
+  fetchArticle: typeof fetchArticle;
 }
 
 /**
@@ -103,10 +103,15 @@ export function makeOnItem(deps: OnItemDeps): OnItem {
       return;
     }
     console.log(formatSummaryLine(outcome.item));
-    if (outcome.matchedPhrases.length === 0) return;
+    // A direct source IS the market's resolution data, so it is routed to the pipeline
+    // whether or not a keyphrase matched; every other source needs a keyphrase hit.
+    const isDirect = deps.profile.profile.directSources.includes(outcome.item.source_id);
+    if (outcome.matchedPhrases.length === 0 && !isDirect) return;
 
     console.log(
-      `[KEYPHRASE-MATCH] item=${outcome.item.item_id} phrases=${JSON.stringify(outcome.matchedPhrases)} headline=${outcome.item.headline}`
+      isDirect
+        ? `[DIRECT-SOURCE] item=${outcome.item.item_id} source=${outcome.item.source_id} headline=${outcome.item.headline}`
+        : `[KEYPHRASE-MATCH] item=${outcome.item.item_id} phrases=${JSON.stringify(outcome.matchedPhrases)} headline=${outcome.item.headline}`
     );
     try {
       await runDecisionPipeline(outcome.item, deps);
@@ -117,24 +122,17 @@ export function makeOnItem(deps: OnItemDeps): OnItem {
 }
 
 export async function main(): Promise<void> {
-  const keyphrases = loadKeyphrases(DEFAULT_KEYPHRASES_PATH);
-  const compiledPhrases = compilePhrases(keyphrases);
-
-  // Startup visibility: without this, an empty list is indistinguishable at runtime
-  // from a healthy pipeline that simply has not seen a newsworthy item yet — the
-  // process logs item summaries forever and never a match, looking fine either way.
-  console.log(`[keyphrases] loaded ${keyphrases.length} phrase(s) from ${DEFAULT_KEYPHRASES_PATH}`);
-  if (keyphrases.length === 0) {
-    console.warn(
-      '[keyphrases] WARNING: 0 keyphrases loaded — keyphrase matching will never fire until data/keyphrases.json has entries'
-    );
-  }
+  // Every start guard, the ledger/group/stream-position pins, the phrase compile, the
+  // gate-model check and the single-instance lock: see src/startup.ts (tested there).
+  const startup = await prepareStartup(process.env, REPO_ROOT);
+  const { loaded, ledgerPath } = startup;
+  process.once('exit', () => startup.lock.release());
 
   const client = createRedisClient();
   await client.connect();
 
   const anthropicClient = new Anthropic();
-  const db = openLedger(DEFAULT_LEDGER_PATH);
+  const db = openLedger(ledgerPath);
   const ollamaClient = createOllamaClient(undefined, db);
   // Isolated like every other auxiliary/observability write in this codebase
   // (checkFailedOrdersSignal, checkDivergencesSignal, recordKalshiError): a
@@ -182,9 +180,9 @@ export async function main(): Promise<void> {
 
   await runOnce(
     client,
-    { streamKey: STREAM_KEY, groupName: GROUP_NAME, consumerName: CONSUMER_NAME },
-    compiledPhrases,
-    makeOnItem({ anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient }),
+    startup.consumerOptions,
+    startup.compiledPhrases,
+    makeOnItem({ anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle }),
     controller.signal
   );
 
@@ -202,6 +200,7 @@ export async function main(): Promise<void> {
   reconciliationTimer.stop();
   await client.quit();
   db.close();
+  startup.lock.release();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

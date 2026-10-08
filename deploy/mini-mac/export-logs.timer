@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily log export (7-day retention)
+
+[Timer]
+OnCalendar=*-*-* 23:50:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

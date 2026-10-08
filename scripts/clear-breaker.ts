@@ -4,19 +4,21 @@
 // Run this only after confirming the underlying problem is actually resolved --
 // clearing does not investigate anything, it only un-halts trading. Not part of
 // `npm test` -- invoke directly:
-//   direnv exec . npx tsx scripts/clear-breaker.ts
+//   EXECUTOR_TRADE=<trade> direnv exec . npx tsx scripts/clear-breaker.ts
+// EXECUTOR_TRADE is required: each trade has its own ledger, and clearing the wrong one
+// would un-halt a different trade. A missing ledger is an error, never created.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openLedger, clearAllTrips } from '../src/decide/ledger.js';
+import { openExistingLedger, clearAllTrips } from '../src/decide/ledger.js';
+import { resolveTradeLedger } from '../src/profile/profile.js';
 
-const DEFAULT_LEDGER_PATH = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../data/decisions.db'
-);
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function main(): void {
-  const db = openLedger(DEFAULT_LEDGER_PATH);
+  const { trade, ledgerPath } = resolveTradeLedger(process.env, REPO_ROOT);
+  console.log(`[clear-breaker] trade=${trade} ledger=${ledgerPath}`);
+  const db = openExistingLedger(ledgerPath);
   const cleared = clearAllTrips(db);
   db.close();
 

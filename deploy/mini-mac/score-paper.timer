@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily executor_module paper-trade settlement scoring
+
+[Timer]
+OnCalendar=*-*-* 21:30:00
+Persistent=true
+Unit=score-paper.service
+
+[Install]
+WantedBy=timers.target

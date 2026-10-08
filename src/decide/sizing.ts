@@ -20,13 +20,30 @@ const DEFAULT_BAND_WIDTH_PTS = 0.2;
  */
 const MIN_IMPLIED_SUM = 0.85;
 const MAX_IMPLIED_SUM = 1.15;
+/**
+ * A survival curve must fall as the strike rises. Bid/ask noise can make a pair of
+ * adjacent strikes rise slightly, so only a rise larger than this marks the ladder as
+ * not a survival function (stale or mis-parsed quotes).
+ */
+const MAX_SURVIVAL_RISE = 0.1;
 
 export interface SizingInput {
   bands: BandMarket[];
   rung: Rung;
   direction: 'up' | 'down';
+  /** In the profile's magnitude unit (points, dollars, counts...). The field name is historical. */
   magnitudePts: number;
   currentTotalExposureCents: number;
+  /**
+   * 'band' (default, unchanged): bands of probability mass placed at band midpoints.
+   * 'threshold': cumulative "above strike" markets placed AT their strike.
+   */
+  curveKind?: 'band' | 'threshold';
+  /**
+   * Overrides the live caps. Only paper trading passes this (see src/paper/paper.ts):
+   * omitted, every cap is the live ledger constant, so real-money behaviour is unchanged.
+   */
+  caps?: { perTradeCents: number; totalExposureCents: number };
 }
 
 export interface SizingResult {
@@ -209,12 +226,77 @@ export function buildCandidatesForBand(
   return candidates;
 }
 
+/**
+ * Survival curve for a threshold ladder: one point per strike, at the strike, carrying
+ * P(value > strike). `greater`/`greater_or_equal` contribute their yes probability at
+ * their floor; `less` contributes `1 - yes` at its cap (a "less than" yes price is a CDF,
+ * the opposite orientation). Bands, custom and strike-less markets are skipped.
+ */
+export function buildThresholdCurve(bands: BandMarket[]): CurvePoint[] {
+  const points: Array<CurvePoint & { spread: number }> = [];
+  for (const b of bands) {
+    const p = bandYesProbability(b);
+    if (p === null || b.yesAskCents === null || b.yesBidCents === null) continue;
+    const spread = b.yesAskCents - b.yesBidCents;
+    if ((b.strikeType === 'greater' || b.strikeType === 'greater_or_equal') && b.floorStrike !== null) {
+      points.push({ centerPts: b.floorStrike, probability: p, spread });
+    } else if (b.strikeType === 'less' && b.capStrike !== null) {
+      points.push({ centerPts: b.capStrike, probability: 1 - p, spread });
+    }
+  }
+  // Deterministic regardless of input order: by strike, then tightest spread, then lower probability.
+  points.sort((a, b) => a.centerPts - b.centerPts || a.spread - b.spread || a.probability - b.probability);
+  // interpolateProbability divides by the gap between neighbouring points: one point per strike
+  // (the first of each strike group, i.e. the tightest-spread market).
+  return points
+    .filter((point, i) => i === 0 || point.centerPts !== points[i - 1].centerPts)
+    .map(({ centerPts, probability }) => ({ centerPts, probability }));
+}
+
+/** null when the curve can be used; otherwise the reason it cannot. */
+export function thresholdCurveProblem(curve: CurvePoint[]): string | null {
+  if (curve.length < 2) {
+    return 'threshold ladder needs at least two priced strikes to build a fair-value curve';
+  }
+  for (let i = 1; i < curve.length; i++) {
+    if (curve[i].probability > curve[i - 1].probability + MAX_SURVIVAL_RISE) {
+      return (
+        `threshold ladder is not monotone: P(>${curve[i].centerPts}) = ${curve[i].probability.toFixed(2)} ` +
+        `exceeds P(>${curve[i - 1].centerPts}) = ${curve[i - 1].probability.toFixed(2)} by more than ${MAX_SURVIVAL_RISE}`
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * Candidates for one threshold market. Reuses buildCandidatesForBand with a band width of
+ * 0: bandMidpointPts then returns the strike itself (`floor + 0/2`), so the existing
+ * shift-and-interpolate fair value applies to the survival curve unchanged. Only
+ * `greater`/`greater_or_equal` markets are tradeable; open-ended `less` markets feed the
+ * curve but are not candidates, mirroring how the band path treats its tails.
+ */
+export function buildCandidatesForThreshold(
+  band: BandMarket,
+  curve: CurvePoint[],
+  signedMagnitude: number
+): BandCandidate[] {
+  if (band.strikeType !== 'greater' && band.strikeType !== 'greater_or_equal') return [];
+  // A plain threshold has a floor and no cap; anything else is not a cumulative "above X" market.
+  if (band.floorStrike === null || band.capStrike !== null) return [];
+  return buildCandidatesForBand(band, curve, 0, signedMagnitude);
+}
+function sideForDirection(direction: 'up' | 'down'): 'yes' | 'no' {
+  return direction === 'up' ? 'yes' : 'no';
+}
+
 export interface ContractCapInput {
   askCents: number;
   kelly: number;
   stake: number;
   depthContracts: number;
   remainingExposureCents: number;
+  perTradeCents?: number;
 }
 
 /**
@@ -225,7 +307,7 @@ export interface ContractCapInput {
  */
 export function contractsWithinCaps(input: ContractCapInput): number {
   if (!(input.askCents > 0)) return 0;
-  const byCeiling = Math.floor(MAX_NOTIONAL_CENTS_PER_TRADE / input.askCents);
+  const byCeiling = Math.floor((input.perTradeCents ?? MAX_NOTIONAL_CENTS_PER_TRADE) / input.askCents);
   const byExposureRemaining = Math.floor(input.remainingExposureCents / input.askCents);
   const byKellyStake = Math.floor(byCeiling * input.kelly * input.stake);
   if (!Number.isFinite(byKellyStake)) return 0;
@@ -253,16 +335,23 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     return decline(`rung is ${input.rung}, stake ${stake} -- never trades`);
   }
 
-  const widthPts = typicalBandWidthPts(input.bands);
-  const curve = buildProbabilityCurve(input.bands, widthPts);
+  const isThreshold = input.curveKind === 'threshold';
+  const widthPts = isThreshold ? 0 : typicalBandWidthPts(input.bands);
+  const curve = isThreshold ? buildThresholdCurve(input.bands) : buildProbabilityCurve(input.bands, widthPts);
   if (curve.length === 0) {
     return decline('no band has a usable two-sided price; cannot build a fair-value curve');
+  }
+  if (isThreshold) {
+    const curveProblem = thresholdCurveProblem(curve);
+    if (curveProblem !== null) return decline(curveProblem);
   }
 
   // Sanity-check the ladder as a distribution before any fair-value/edge/Kelly math:
   // the curve points are exactly the bands with a real two-sided price and a usable
   // center, so this sums the same set the interpolation would read.
-  const impliedSum = curve.reduce((total, point) => total + point.probability, 0);
+  // A survival curve does not sum to 1 (its shape was already checked by
+  // thresholdCurveProblem above), so the distribution-sum window applies to bands only.
+  const impliedSum = isThreshold ? 1 : curve.reduce((total, point) => total + point.probability, 0);
   if (impliedSum < MIN_IMPLIED_SUM || impliedSum > MAX_IMPLIED_SUM) {
     return decline(
       `implied distribution sums to ${impliedSum.toFixed(3)}, outside sane range ` +
@@ -290,9 +379,10 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     );
   }
 
-  const remainingExposureCents = MAX_TOTAL_EXPOSURE_CENTS - input.currentTotalExposureCents;
+  const totalExposureCap = input.caps?.totalExposureCents ?? MAX_TOTAL_EXPOSURE_CENTS;
+  const remainingExposureCents = totalExposureCap - input.currentTotalExposureCents;
   if (remainingExposureCents <= 0) {
-    return decline(`total exposure cap reached (${input.currentTotalExposureCents}c of ${MAX_TOTAL_EXPOSURE_CENTS}c)`);
+    return decline(`total exposure cap reached (${input.currentTotalExposureCents}c of ${totalExposureCap}c)`);
   }
 
   let best: BandCandidate | null = null;
@@ -306,8 +396,15 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     // not the same quantity as a bounded interior band's, so the synthetic center
     // `bandMidpointPts` invents for it cannot be compared to interior bands on the
     // same curve, and any "edge" that comparison produces is a pricing artifact.
-    if (band.strikeType !== 'between') continue;
-    for (const candidate of buildCandidatesForBand(band, curve, widthPts, signedMagnitudePts)) {
+    if (!isThreshold && band.strikeType !== 'between') continue;
+    const bandCandidates = isThreshold
+      ? buildCandidatesForThreshold(band, curve, signedMagnitudePts)
+      : buildCandidatesForBand(band, curve, widthPts, signedMagnitudePts);
+    // Threshold mode only: a shifted survival curve can only favour the side the signal implies
+    // (up -> YES, down -> NO); the opposite side's "edge" is quote noise, never a trade.
+    const wantedSide = sideForDirection(input.direction);
+    for (const candidate of bandCandidates) {
+      if (isThreshold && candidate.side !== wantedSide) continue;
       const verdict = gateCandidate(candidate);
       if (!verdict.ok) {
         lastGateFailureReason = verdict.reason;
@@ -337,6 +434,7 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     stake,
     depthContracts: best.depthContracts,
     remainingExposureCents,
+    perTradeCents: input.caps?.perTradeCents,
   });
 
   if (contracts <= 0) {
@@ -354,5 +452,63 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     notionalCents,
     edgeCents: best.edgeCents,
     reason: `${contracts} contracts, ${best.edgeCents.toFixed(2)}c edge, stake ${stake}`,
+  };
+}
+
+/**
+ * Paper sizing for a single yes/no market (no ladder, no strike): one contract on the
+ * side the direction implies (`up` = YES, `down` = NO) at the current ask. There is no
+ * fair-value model for a binary event, so there is no edge to gate on; gateCandidate is
+ * reused with `edgeCents` set to MIN_EDGE_CENTS purely so that its MICROSTRUCTURE gates
+ * (crossed book, price range, spread, depth) are the only ones that can fail.
+ */
+export function evaluateBinarySizing(input: {
+  market: BandMarket;
+  direction: 'up' | 'down';
+  rung: Rung;
+}): SizingResult {
+  const { market, direction, rung } = input;
+  const decline = (reason: string): SizingResult => ({
+    wouldTrade: false,
+    marketTicker: null,
+    side: null,
+    contracts: 0,
+    entryPriceCents: null,
+    notionalCents: 0,
+    edgeCents: null,
+    reason,
+  });
+
+  const stake = RUNG_STAKES[rung];
+  if (stake <= 0) return decline(`rung is ${rung}, stake ${stake} -- never trades`);
+  if (market.status !== 'active') return decline(`market ${market.ticker} is ${market.status}, not active`);
+  if (market.yesAskCents === null || market.yesBidCents === null) {
+    return decline('market has no two-sided quote');
+  }
+
+  const side: 'yes' | 'no' = direction === 'up' ? 'yes' : 'no';
+  const askCents = side === 'yes' ? market.yesAskCents : SETTLEMENT_CENTS - market.yesBidCents;
+  const depthContracts = side === 'yes' ? market.yesAskSizeContracts : market.yesBidSizeContracts;
+
+  const verdict = gateCandidate({
+    ticker: market.ticker,
+    side,
+    askCents,
+    spreadCents: market.yesAskCents - market.yesBidCents,
+    depthContracts,
+    fairPriceCents: askCents + MIN_EDGE_CENTS,
+    edgeCents: MIN_EDGE_CENTS,
+  });
+  if (!verdict.ok) return decline(verdict.reason);
+
+  return {
+    wouldTrade: true,
+    marketTicker: market.ticker,
+    side,
+    contracts: 1,
+    entryPriceCents: askCents,
+    notionalCents: askCents,
+    edgeCents: null,
+    reason: `binary paper position: 1 contract ${side} at ${askCents}c (direction ${direction}, rung ${rung})`,
   };
 }

@@ -48,6 +48,17 @@ async function postToSlack(webhookUrl: string, message: string): Promise<void> {
 }
 
 /**
+ * The trade this process runs, set once at startup from the validated profile name
+ * (final review M4): with one process per trade sharing a single webhook, an alert
+ * that does not name its trade cannot be acted on. Null (scripts, tests): no prefix.
+ */
+let alertTrade: string | null = null;
+
+export function setAlertTrade(name: string | null): void {
+  alertTrade = name;
+}
+
+/**
  * Fire-and-forget from every call site except the startup unclean-exit alert
  * in main.ts (see the comment there for why that one is deliberately
  * awaited) -- this function never throws or rejects regardless, so no call
@@ -58,7 +69,8 @@ async function postToSlack(webhookUrl: string, message: string): Promise<void> {
  * this is a logged no-op, so local dev and the test suite never need a real
  * webhook configured.
  */
-export async function sendAlert(message: string): Promise<void> {
+export async function sendAlert(rawMessage: string): Promise<void> {
+  const message = alertTrade === null ? rawMessage : `[trade=${alertTrade}] ${rawMessage}`;
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) {
     console.warn('[alert] SLACK_WEBHOOK_URL is not set -- alert not sent:', message);

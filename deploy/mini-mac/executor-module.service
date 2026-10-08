@@ -1,15 +1,15 @@
 [Unit]
-# The live executor: news scan -> keyphrase match -> local-model synopsis -> Sonnet
-# verify -> Sonnet decide -> real order execution against Kalshi, for market
-# KXAPRPOTUS. Synopsis runs on a local Ollama-served Qwen model (HANDOFF.md Sec
-# 5a.4); verify and decide stay on the real Anthropic API.
+# The live executor for trade profile trades/kxaprpotus/ (market series KXAPRPOTUS):
+# news scan -> keyphrase match (or direct source) -> local relevance gate (Ollama,
+# the profile's gateModel, HANDOFF.md Sec 5a.4) -> Sonnet triage -> Sonnet decide ->
+# sizing and caps -> real order execution against Kalshi (unless KALSHI_DRY_RUN=true).
 # Consumes the local `iip:items` Redis stream fed by this box's own iip.service
 # instance (deploy/mini-mac/iip.service) -- both run on mini-mac, nothing here talks
 # to any other host.
 #
 # A systemd USER unit, matching iip.service's own reasoning: the process owns only
 # its own files and needs no elevated capability to run.
-Description=executor_module -- Kalshi KXAPRPOTUS trading pipeline
+Description=executor_module -- Kalshi KXAPRPOTUS live trading (trades/kxaprpotus)
 Documentation=file:%h/executor_module/HANDOFF.md
 After=network-online.target redis-server.service iip.service
 Wants=network-online.target
@@ -25,12 +25,22 @@ Type=simple
 WorkingDirectory=%h/executor_module
 
 # Every secret this process needs (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH,
-# ANTHROPIC_API_KEY, SLACK_WEBHOOK_URL, REDIS_URL, KALSHI_DRY_RUN) lives ONLY in
+# ANTHROPIC_API_KEY, SLACK_WEBHOOK_URL, REDIS_URL) lives ONLY in
 # %h/executor_module/.env -- .env* is already gitignored in this repo -- and is
 # never written to this tracked unit file. main.ts itself fails loudly at startup
 # naming any required variable that's absent (HANDOFF.md Sec 5a.1), so a missing
 # .env fails the same way a missing variable already does, not silently.
 EnvironmentFile=%h/executor_module/.env
+# THIS unit's own switches -- KALSHI_DRY_RUN (the operator's explicit live/dry-run
+# choice) and EXECUTOR_TRADING_HALTED (the live kill switch) -- go in .env.kxaprpotus,
+# read only by this unit. The shared .env is also read by every paper unit, so it must
+# carry neither (a halt there silently halts every paper unit too). HANDOFF.md Sec 5a.5.
+# REQUIRED (no "-" prefix): a missing or misnamed file fails the start instead of
+# silently starting live and unhalted. Lift the halt by DELETING its line, never by
+# writing EXECUTOR_TRADING_HALTED=false.
+EnvironmentFile=%h/executor_module/.env.kxaprpotus
+
+Environment=IIP_SOURCES_FILE=%h/Internet_Info_Plug/config/sources.minimac.yaml
 
 # Ollama installs as a system-level unit; this is a user-level unit, so a bare
 # `After=ollama.service` cannot order across that systemd namespace boundary --
@@ -43,7 +53,12 @@ EnvironmentFile=%h/executor_module/.env
 # that was never ready.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && exit 0; sleep 2; done; echo "Ollama not ready after 60s" >&2; exit 1'
 
-ExecStart=%h/executor_module/node_modules/.bin/tsx %h/executor_module/src/main.ts
+# Which trade this unit runs, pinned on the command line where no env file can override
+# it (systemd lets EnvironmentFile= beat Environment=; final review C1).
+# EXECUTOR_LIVE_TRADE is what lets main.ts place real orders for this profile at all:
+# a live start without EXECUTOR_LIVE_TRADE=<profile name> is refused, and only this
+# unit sets it. KALSHI_DRY_RUN is deliberately NOT pinned here.
+ExecStart=/usr/bin/env EXECUTOR_TRADE=kxaprpotus EXECUTOR_LIVE_TRADE=kxaprpotus %h/executor_module/node_modules/.bin/tsx %h/executor_module/src/main.ts
 
 Restart=always
 RestartSec=10
@@ -53,8 +68,9 @@ StandardError=journal
 SyslogIdentifier=executor-module
 
 # Hardening, matching iip.service's own pattern -- this process reads its own repo,
-# writes its own SQLite ledger, and makes outbound HTTPS calls (Anthropic, Kalshi,
-# Redis over localhost, Slack); it has no reason to touch anything else.
+# writes its own SQLite ledger (and its .lock file) under data/, and makes outbound
+# calls (Anthropic, Kalshi, Ollama and Redis over localhost, Slack); it has no reason
+# to touch anything else.
 #
 # MemoryDenyWriteExecute is deliberately OMITTED here, unlike iip.service: verified
 # empirically (2026-09-01) that Node's V8 JIT needs W^X page transitions this

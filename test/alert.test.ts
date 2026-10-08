@@ -1,6 +1,6 @@
 // test/alert.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { sendAlert } from '../src/alert.js';
+import { sendAlert, setAlertTrade } from '../src/alert.js';
 
 describe('sendAlert', () => {
   let fetchSpy: { mockRestore: () => void } | undefined;
@@ -31,6 +31,22 @@ describe('sendAlert', () => {
     await sendAlert('hello operator');
 
     expect(calls).toBe(1);
+  });
+
+  it('prefixes every alert with [trade=<name>] once a trade is set, so 11 processes on one webhook are distinguishable (M4)', async () => {
+    const bodies: string[] = [];
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      bodies.push(JSON.parse(init?.body as string).text);
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetchSpy;
+    setAlertTrade('kxtrumpapprove');
+    try {
+      await sendAlert('[UNCLEAN-EXIT] restarted');
+    } finally {
+      setAlertTrade(null);
+    }
+    await sendAlert('no trade set');
+    expect(bodies).toEqual(['[trade=kxtrumpapprove] [UNCLEAN-EXIT] restarted', 'no trade set']);
   });
 
   it('retries exactly once after a short delay when the first attempt fails, then succeeds', async () => {

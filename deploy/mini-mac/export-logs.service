@@ -1,0 +1,6 @@
+[Unit]
+Description=Export executor/iip/ollama journal to files and prune exports older than 7 days
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh %h/executor_module/deploy/mini-mac/export-logs.sh

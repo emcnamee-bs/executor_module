@@ -20,7 +20,7 @@ describe('refineKeyphrases (real Sonnet call)', () => {
       expect(typeof phrase).toBe('string');
       expect(phrase.trim().split(/\s+/).filter(Boolean).length).toBeGreaterThanOrEqual(2);
     }
-  }, 30000);
+  }, 120000);
 
   it('returns a non-empty list when starting from an empty seed list', async () => {
     const client = new Anthropic();
@@ -28,7 +28,7 @@ describe('refineKeyphrases (real Sonnet call)', () => {
 
     expect(Array.isArray(result)).toBe(true);
     expect(result.length).toBeGreaterThan(0);
-  }, 30000);
+  }, 120000);
 });
 
 describe('refineKeyphrases (failure path)', () => {
@@ -109,5 +109,71 @@ describe('runGenerator (write-guard control flow)', () => {
     for (const phrase of written) {
       expect(typeof phrase).toBe('string');
     }
-  }, 60000);
+  }, 120000);
+});
+
+describe('refineKeyphrases (fake client, offline)', () => {
+  function fakeClient(response: Record<string, unknown>, capture?: { params?: any }) {
+    return {
+      messages: {
+        parse: async (params: unknown) => {
+          if (capture) capture.params = params;
+          return response;
+        },
+      },
+    } as unknown as Anthropic;
+  }
+
+  it('asks for a large, verbose list: a size target, multi-phrasing guidance, and a roomy token budget', async () => {
+    const cap: { params?: any } = {};
+    await refineKeyphrases(
+      fakeClient({ stop_reason: 'end_turn', parsed_output: { keyphrases: ['trump approval rating'] } }, cap),
+      ['trump approval rating']
+    );
+    const prompt: string = cap.params.messages[0].content;
+    expect(prompt).toMatch(/at least 200/i);
+    expect(prompt).toMatch(/3 to 5 word|three to five word/i);
+    expect(prompt).toMatch(/headline writer|release page/i);
+    expect(cap.params.max_tokens).toBeGreaterThanOrEqual(8192);
+  });
+
+  it('fails loudly naming max_tokens when the list was cut off', async () => {
+    await expect(
+      refineKeyphrases(fakeClient({ stop_reason: 'max_tokens', parsed_output: null }), [])
+    ).rejects.toThrow(/max_tokens/);
+  });
+
+  it('trims and de-duplicates phrases case-insensitively, keeping first spelling and order', async () => {
+    const result = await refineKeyphrases(
+      fakeClient({
+        stop_reason: 'end_turn',
+        parsed_output: { keyphrases: ['Trump approval rating', ' trump approval rating ', 'new Gallup poll', 'NEW GALLUP POLL'] },
+      }),
+      []
+    );
+    expect(result).toEqual(['Trump approval rating', 'new Gallup poll']);
+  });
+});
+
+describe('refineKeyphrases market context', () => {
+  const capture = () => {
+    const cap: { params?: any } = {};
+    const client = { messages: { parse: async (p: unknown) => { cap.params = p; return { stop_reason: 'end_turn', parsed_output: { keyphrases: ['gas price rise'] } }; } } } as unknown as Anthropic;
+    return { cap, client };
+  };
+  it('uses the approval context by default (unchanged for the live trade)', async () => {
+    const { cap, client } = capture();
+    await refineKeyphrases(client, []);
+    expect(cap.params.messages[0].content).toContain('KXAPRPOTUS');
+    expect(cap.params.messages[0].content).toContain('HOW PHRASES ARE MATCHED');
+  });
+  it('uses a supplied market context instead, still with the matching rules and size guidance', async () => {
+    const { cap, client } = capture();
+    await refineKeyphrases(client, [], 'CONTEXT FOR KXAAAGASW ONLY');
+    const sent: string = cap.params.messages[0].content;
+    expect(sent).toContain('CONTEXT FOR KXAAAGASW ONLY');
+    expect(sent).not.toContain('KXAPRPOTUS');
+    expect(sent).toMatch(/at least 200/i);
+    expect(sent).not.toMatch(/RealClearPolitics|Rasmussen/);
+  });
 });

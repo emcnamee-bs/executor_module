@@ -5,11 +5,14 @@ import { recordKalshiError } from './ledger.js';
 
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 
+/** Kalshi's own `strike_type` values; a single yes/no market has none at all (null). */
+export type StrikeType = 'less' | 'greater' | 'greater_or_equal' | 'between' | 'custom' | null;
+
 export interface BandMarket {
   ticker: string;
   floorStrike: number | null;
   capStrike: number | null;
-  strikeType: 'less' | 'greater' | 'between';
+  strikeType: StrikeType;
   status: string;
   /** null when Kalshi reports no resting order on this side (raw price exactly 0.0000). */
   yesAskCents: number | null;
@@ -42,7 +45,7 @@ interface KalshiMarket {
   ticker: string;
   floor_strike?: number;
   cap_strike?: number;
-  strike_type: 'less' | 'greater' | 'between';
+  strike_type?: StrikeType;
   status: string;
   yes_ask_dollars: string;
   yes_bid_dollars: string;
@@ -98,7 +101,7 @@ export async function fetchActiveLadder(seriesTicker: string, db?: Database.Data
       ticker: m.ticker,
       floorStrike: m.floor_strike ?? null,
       capStrike: m.cap_strike ?? null,
-      strikeType: m.strike_type,
+      strikeType: m.strike_type ?? null,
       status: m.status,
       yesAskCents: priceCentsOrNull(m.yes_ask_dollars),
       yesBidCents: priceCentsOrNull(m.yes_bid_dollars),
