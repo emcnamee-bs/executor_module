@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { acquireLedgerLock, lockPathFor } from '../../src/decide/ledgerLock.js';
+import { acquireLedgerLock, lockPathFor, readProcCmdline } from '../../src/decide/ledgerLock.js';
 
 function deadPid(): number {
   // A child that has already exited: its pid is (for the moment) not a live process.
@@ -60,10 +60,75 @@ describe('acquireLedgerLock (one executor process per ledger)', () => {
     lock.release();
   });
 
-  it('refuses (fails closed) on an unreadable/garbled lock file rather than guessing it is stale', () => {
-    fs.writeFileSync(`${ledger}.lock`, 'not json');
-    expect(() => acquireLedgerLock(ledger)).toThrow(/lock file .* unreadable/);
-    expect(fs.readFileSync(`${ledger}.lock`, 'utf-8')).toBe('not json');
+  const age = (p: string, seconds: number) => {
+    const t = new Date(Date.now() - seconds * 1000);
+    fs.utimesSync(p, t, t);
+  };
+
+  it.each([['garbled', 'not json'], ['empty', '']])(
+    'refuses a FRESH %s lock file (it may be a racer mid-write) and leaves it alone', (_l, body) => {
+      fs.writeFileSync(`${ledger}.lock`, body);
+      expect(() => acquireLedgerLock(ledger)).toThrow(/lock file .* unreadable or garbled/);
+      expect(fs.readFileSync(`${ledger}.lock`, 'utf-8')).toBe(body);
+    });
+
+  it.each([['garbled', 'not json'], ['empty', '']])(
+    'treats a %s lock file older than 10 s as stale and takes it over', (_l, body) => {
+      fs.writeFileSync(`${ledger}.lock`, body);
+      age(`${ledger}.lock`, 11);
+      const lock = acquireLedgerLock(ledger);
+      expect(JSON.parse(fs.readFileSync(lock.path, 'utf-8')).pid).toBe(process.pid);
+      lock.release();
+    });
+
+  it('a garbled lock just under 10 s old is still refused', () => {
+    fs.writeFileSync(`${ledger}.lock`, '{');
+    age(`${ledger}.lock`, 8);
+    expect(() => acquireLedgerLock(ledger)).toThrow(/unreadable or garbled/);
+  });
+
+  describe('a live pid is only a holder if it is an executor (pid reuse)', () => {
+    let other: ReturnType<typeof spawn>;
+    beforeEach(async () => {
+      other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    afterEach(async () => {
+      other.kill('SIGKILL');
+      await new Promise((r) => other.once('exit', r));
+    });
+    const writeLock = (pid: number) =>
+      fs.writeFileSync(`${ledger}.lock`, JSON.stringify({ pid, bootId: 'b', startedAt: 'x' }));
+
+    it('a live pid whose /proc cmdline lacks main.ts is stale (reused pid) and is taken over', () => {
+      writeLock(other.pid!);
+      const lock = acquireLedgerLock(ledger, { bootId: () => 'b', readCmdline: () => 'node -e setInterval' });
+      expect(JSON.parse(fs.readFileSync(lock.path, 'utf-8')).pid).toBe(process.pid);
+      lock.release();
+    });
+
+    it('a live pid whose cmdline contains main.ts is a real holder: refused', () => {
+      writeLock(other.pid!);
+      expect(() =>
+        acquireLedgerLock(ledger, { bootId: () => 'b', readCmdline: () => 'node /home/x/executor_module/src/main.ts' })
+      ).toThrow(/already running/);
+    });
+
+    it('where /proc is unavailable (null) the cmdline check is skipped: a live pid holds', () => {
+      writeLock(other.pid!);
+      expect(() => acquireLedgerLock(ledger, { bootId: () => 'b', readCmdline: () => null })).toThrow(/already running/);
+    });
+
+    it('this very process is always a holder (a second start in-process), whatever its cmdline', () => {
+      writeLock(process.pid);
+      expect(() => acquireLedgerLock(ledger, { bootId: () => 'b', readCmdline: () => 'vitest' })).toThrow(/already running/);
+    });
+
+    it('the default cmdline reader returns null without /proc and a string with it', () => {
+      const v = readProcCmdline(process.pid);
+      if (fs.existsSync('/proc/self')) expect(typeof v).toBe('string');
+      else expect(v).toBeNull();
+    });
   });
 
   it('a lock held by a different live PROCESS refuses this one, and is taken over once that process dies', async () => {
@@ -71,7 +136,9 @@ describe('acquireLedgerLock (one executor process per ledger)', () => {
     // which would fork a grandchild): the pid in the lock is then exactly child.pid.
     const loader = pathToFileURL(path.resolve(__dirname, '../../node_modules/tsx/dist/loader.mjs')).href;
     const mod = path.resolve(__dirname, '../../src/decide/ledgerLock.ts');
-    const script = path.join(dir, 'holder.ts');
+    // Named main.ts so the /proc cmdline check (Linux) recognises it as an executor.
+    fs.mkdirSync(path.join(dir, 'holder'));
+    const script = path.join(dir, 'holder', 'main.ts');
     fs.writeFileSync(script, `import { acquireLedgerLock } from ${JSON.stringify(mod)};\nacquireLedgerLock(${JSON.stringify(ledger)});\nconsole.log('LOCKED');\nsetInterval(() => {}, 1000);\n`);
     const child = spawn(process.execPath, ['--no-warnings', '--loader', loader, script], { stdio: ['ignore', 'pipe', 'inherit'] });
     await new Promise<void>((resolve, reject) => {
