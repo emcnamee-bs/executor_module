@@ -145,6 +145,36 @@ export function resolveLedgerPath(profile: Pick<TradeProfile, 'ledgerPath'>, rep
   return resolved;
 }
 
+/**
+ * Cross-profile check, run in CI over the committed trades/ directory: no two profiles
+ * may share a consumer group (they would split one stream between two trades) or a
+ * ledger (they would mix exposure, breakers and dedup). One process cannot see this at
+ * startup. Dot directories (build staging, .old copies) are skipped. Returns one
+ * message per collision or unreadable profile; empty means clean.
+ */
+export function findProfileCollisions(root: string = TRADES_ROOT): string[] {
+  const problems: string[] = [];
+  const byGroup = new Map<string, string[]>();
+  const byLedger = new Map<string, string[]>();
+  const add = (m: Map<string, string[]>, k: string, name: string) => m.set(k, [...(m.get(k) ?? []), name]);
+  for (const name of fs.readdirSync(root).filter((d) => !d.startsWith('.')).sort()) {
+    const file = path.join(root, name, 'profile.json');
+    if (!fs.existsSync(file)) continue;
+    let p: { consumerGroup?: unknown; ledgerPath?: unknown };
+    try {
+      p = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    } catch (err) {
+      problems.push(`${name}: profile.json unreadable: ${(err as Error).message}`);
+      continue;
+    }
+    add(byGroup, String(p.consumerGroup), name);
+    add(byLedger, String(p.ledgerPath).toLowerCase(), name);
+  }
+  for (const [g, names] of byGroup) if (names.length > 1) problems.push(`consumerGroup "${g}" is used by ${names.join(', ')}`);
+  for (const [l, names] of byLedger) if (names.length > 1) problems.push(`ledgerPath "${l}" is used by ${names.join(', ')}`);
+  return problems;
+}
+
 /** Operator scripts act on ONE trade's ledger: EXECUTOR_TRADE is required, never defaulted. */
 export function resolveTradeLedger(
   env: NodeJS.ProcessEnv,
