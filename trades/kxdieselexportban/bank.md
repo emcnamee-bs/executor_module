@@ -1,0 +1,11 @@
+TRADE: Binary bet on whether the US government will impose and implement a ban on diesel exports before Nov 3, 2026.
+SETTLES ON: Yes only if a Source Agency reports that a diesel export ban is officially in effect (not merely proposed) before the deadline; stale or wire-republished articles without clear outlet attribution do not count.
+MOVES THE PRICE:
+- Supply shocks: refinery outages, hurricane damage to Gulf Coast refineries, unplanned shutdowns, crude supply disruptions reducing diesel output
+- Domestic demand/price pressure: diesel price spikes, trucking fuel shortages, farm fuel shortages during harvest, winter heating oil crunch (diesel/heating oil overlap)
+- Policy/political signals: statements from DOE, Energy Secretary, White House, or Congress about considering export restrictions, draft executive orders, legislative proposals targeting fuel exports
+- Geopolitics: sanctions on Russian refined products boosting US export demand, OPEC+ supply cuts, war-related disruptions to global diesel trade, Europe or Latin America diesel shortages pulling US barrels abroad
+- Scheduled/administrative events: DOE or EIA inventory reports showing low distillate stocks, SPR releases of diesel/heating oil, congressional hearings on fuel exports, industry lobbying (API, trade groups) for or against restrictions
+- Market/industry reaction: refiners or exporters lobbying against a ban, API or AFPM statements, state governors petitioning for export curbs amid regional shortages
+SETTLEMENT-SENSITIVE FACTS: Only designated Source Agencies' reporting counts, so a major policy leak from an uncredentialed outlet won't trigger resolution; the ban must be actually in effect, not just announced or proposed; articles merely citing or republishing older (pre-issuance) reports do not qualify even if accurate; wire content must be hosted on the outlet's own platform with clear attribution to count.
+IGNORE: Diesel price fluctuations unrelated to export policy, routine OPEC production quota news with no US export link, general gasoline price stories, unrelated sanctions on countries without linkage to US diesel export policy, historical or past export ban discussions from years prior with no new policy action, generic EIA weekly reports absent any export-restriction discussion.

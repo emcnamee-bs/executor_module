@@ -1,0 +1,17 @@
+{
+  "name": "kxdieselexportban",
+  "seriesTicker": "KXDIESELEXPORTBAN",
+  "title": "Will the US ban diesel exports before Election Day?",
+  "settlement": "This market resolves to Yes if the United States has imposed a ban on exports of diesel that goes into effect after market issuance and before Nov 3, 2026. Only reporting from designated Source Agencies qualifies, and mere references to prior publications or unattributed wire-service republishing do not count.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating how much a news item shifts the implied probability (price) that the US will impose a diesel export ban before Election Day 2026. Resolution requires an actual, in-effect export ban reported by a qualifying Source Agency, not just proposals, rumors, or expired/duplicate reports.",
+  "directSources": [],
+  "marketStructure": "binary",
+  "magnitudeUnit": "¢",
+  "maxMagnitude": 60,
+  "ledgerPath": "data/kxdieselexportban/decisions.db",
+  "consumerGroup": "execmod-kxdieselexportban",
+  "generatedAt": "2026-10-08T09:00:43.946Z",
+  "generatorModel": "claude-sonnet-5"
+}

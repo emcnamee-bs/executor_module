@@ -1,0 +1,19 @@
+{
+  "name": "kxhormuzweekly",
+  "seriesTicker": "KXHORMUZWEEKLY",
+  "title": "Will weekly transit calls through the Strait of Hormuz exceed 75 (Oct 5–11, 2026)?",
+  "settlement": "Resolves YES if the sum of daily transit-call counts through the Strait of Hormuz, as reported by IMF PortWatch, exceeds 75 for the period Oct 5–11, 2026. The total is calculated by summing daily counts across the seven days. Resolution occurs no earlier than the Tuesday 9 AM following the period once complete data is posted.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the effect of a news item on the weekly total count of transit calls (vessel crossings) through the Strait of Hormuz as tallied by IMF PortWatch; the market resolves YES if that weekly sum is above 75.",
+  "directSources": [
+    "imf_portwatch_hormuz"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "count",
+  "maxMagnitude": 40,
+  "ledgerPath": "data/kxhormuzweekly/decisions.db",
+  "consumerGroup": "execmod-kxhormuzweekly",
+  "generatedAt": "2026-10-08T08:49:29.807Z",
+  "generatorModel": "claude-sonnet-5"
+}

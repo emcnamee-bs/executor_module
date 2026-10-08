@@ -1,0 +1,17 @@
+{
+  "name": "kxusairanagreement",
+  "seriesTicker": "KXUSAIRANAGREEMENT",
+  "title": "US-Iran nuclear deal?",
+  "settlement": "If the United States has agreed to, signed, or accepted a new Iran-US nuclear deal before the deadline, the market resolves Yes. A qualifying deal is a formal written agreement signed by authorized representatives of both governments that imposes verifiable restrictions on Iran's nuclear program (enrichment, centrifuges, facility operations) and lifts/suspends/modifies at least one US sanction in exchange.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Estimate the probability that a verifiable US-Iran nuclear agreement (as defined) is reached before the market's deadline; resolution requires both a nuclear-restriction component with verification and a reciprocal sanctions-relief component, publicly agreed or signed by authorized representatives of both governments.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "%",
+  "maxMagnitude": 40,
+  "ledgerPath": "data/kxusairanagreement/decisions.db",
+  "consumerGroup": "execmod-kxusairanagreement",
+  "generatedAt": "2026-10-08T08:53:11.238Z",
+  "generatorModel": "claude-sonnet-5"
+}

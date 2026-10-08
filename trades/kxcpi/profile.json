@@ -1,0 +1,19 @@
+{
+  "name": "kxcpi",
+  "seriesTicker": "KXCPI",
+  "title": "Will September 2026 CPI month-over-month increase exceed a given threshold?",
+  "settlement": "If the Consumer Price Index (CPI) increases by more than the stated threshold (single-decimal) in September 2026, the market resolves Yes. The Expiration Value is the single-decimal month-over-month % change published by the Bureau of Labor Statistics on October 14, 2026, with possible delay if a federal government shutdown disrupts data reliability.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Estimate the likely effect of this news on the September 2026 month-over-month CPI percentage change (single-decimal, seasonally adjusted) as published by BLS; the market resolves Yes if that figure exceeds the stated threshold.",
+  "directSources": [
+    "bls_releases"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "%",
+  "maxMagnitude": 0.5,
+  "ledgerPath": "data/kxcpi/decisions.db",
+  "consumerGroup": "execmod-kxcpi",
+  "generatedAt": "2026-10-08T08:58:46.313Z",
+  "generatorModel": "claude-sonnet-5"
+}
