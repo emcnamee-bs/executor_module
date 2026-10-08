@@ -342,14 +342,16 @@ once the operator approves the wording.
 | `federal_reserve_speeches` | federalreserve.gov/feeds/speeches_and_testimony.xml | `feed` | 1 | Fed decision |
 | `whitehouse_presidential_actions` | whitehouse.gov/presidential-actions/feed/ (about 570 KB) | `feed` | 1 | presidential-actions count, executive-action markets |
 | `eia_today_in_energy` | eia.gov/rss/todayinenergy.xml | `feed` | 1 | gas, diesel |
-| `nhc_atlantic` | nhc.noaa.gov/index-at.xml | `feed` | 1 | gas (Gulf storms) |
 | `oilprice_main`, `rigzone_latest` | oilprice.com/rss/main, rigzone.com/news/rss/rigzone_latest.aspx | `feed` | 3 | gas, diesel, Hormuz |
 | `npr_news`, `politico_politics`, `thehill_news` | feeds.npr.org/1001/rss.xml, rss.politico.com/politics-news.xml, thehill.com/feed/ | `feed` | 3 | approval, policy, Iran |
-| `ukmto_advisories` | ukmto.org (HTML) | existing `primary` page watcher | 1 | Hormuz |
 | `aaa_national_average` | gasprices.aaa.com ("Today's AAA National Average $x.xxxx" in the page) | **new `series`** | 1 | gas price |
 | `imf_portwatch_hormuz` | PortWatch ArcGIS FeatureServer `Daily_Chokepoints_Data`, filtered to one chokepoint, newest first | **new `series`** | 1 | Hormuz transit calls |
 
-Not usable: CENTCOM news (403 from mini-mac). The PortWatch series lags about four days
+Not usable or deferred (found while planning, 2026-10-08): CENTCOM news (403 from mini-mac);
+UKMTO (its incident list is rendered client-side, so a page watcher would baseline an empty
+string and never fire, which is a silent source); and the NHC storm feed (a snapshot of
+active storms whose entries vanish, which iip's rollback check would falsely mark DEAD, and
+it needs a snapshot-aware adapter). The result is ten feeds and two series sources. The PortWatch series lags about four days
 (newest point on 2026-10-04 when queried on 2026-10-08) and currently shows 0-4 transit
 calls per day, so it is a settlement tracker, not a breaking-news feed.
 Tier-3 sources reach a trade only through the existing corroboration rule
@@ -367,8 +369,11 @@ a regex with one capture group), `label`, `unit`, `emit_on` (`new_point` or
 - Each poll fetches, extracts one numeric value and its data date, and emits **one
   `RawItem` per new data point** (never re-emitting an unchanged value). The item carries
   the factual statement in `snippet` (value, unit, data date, previous value, delta);
-  the headline is templated and honestly flagged `synthetic_headline`, `source_publish_ts`
-  is the data date, and the URL is the data page.
+  the headline is templated and honestly flagged `synthetic_headline`, the data date is
+  spelled out in the headline and snippet, and the URL is the data page. iip's normalizer
+  nulls a publish time older than two days, so a lagging series such as PortWatch (newest
+  point about four days old) reaches the executor with `source_publish_ts` null; that is the
+  honest outcome and is not worked around.
 - **A failed extraction is an error, never "no change".** If the page or API returns
   200 but the value cannot be extracted (markup change, schema change, empty result), the
   adapter reports DEGRADED and emits nothing; it must never emit 0 or reuse the old value.
@@ -390,7 +395,7 @@ a configured iip source.
 
 ### Deployment
 
-`iip run` takes its config path as an argument. mini-mac runs a dedicated
+`iip run --config <file>` takes its config path as an argument. mini-mac runs a dedicated
 sources file (checked into `Internet_Info_Plug/config/`) that contains the existing
 sources plus the new ones; the `ai1` baseline run keeps `config/sources.yaml` exactly as
 it is, so its 28-day observation is unperturbed. Each new source is added with an explicit
