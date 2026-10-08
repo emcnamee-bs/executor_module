@@ -1,0 +1,17 @@
+{
+  "name": "kxretirepelosi",
+  "seriesTicker": "KXRETIREPELOSI",
+  "title": "Will Nancy Pelosi resign her office before the midterms?",
+  "settlement": "If Nancy Pelosi resigns her office, or publicly announces she will resign her office, before November 3, 2026, the market resolves to Yes. Otherwise it resolves No.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability (in percentage points) that this Yes contract is trading at, based on news about Nancy Pelosi's health, re-election plans, leadership status, or any resignation announcement; the market resolves Yes only if she resigns or announces resignation before Nov 3, 2026.",
+  "directSources": [],
+  "marketStructure": "binary",
+  "magnitudeUnit": "pts",
+  "maxMagnitude": 60,
+  "ledgerPath": "data/kxretirepelosi/decisions.db",
+  "consumerGroup": "execmod-kxretirepelosi",
+  "generatedAt": "2026-10-08T21:42:44.328Z",
+  "generatorModel": "claude-sonnet-5"
+}

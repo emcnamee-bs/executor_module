@@ -1,0 +1,17 @@
+{
+  "name": "kxgdp",
+  "seriesTicker": "KXGDP",
+  "title": "Will US real GDP growth in Q3 2026 exceed the stated threshold?",
+  "settlement": "Resolves YES if the BEA's seasonally adjusted and annualized Advance Estimate of real GDP growth for Q3 2026 is strictly greater than the stated threshold (e.g., 4.0%, 3.5%, etc.). Expiration Value is the one-decimal percentage published by the BEA in its Advance Estimate release.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Analyst is estimating the likely effect of the news item on the BEA's Q3 2026 Advance Estimate of annualized real GDP growth (a single quarterly percentage figure); market resolves YES if that published figure exceeds the threshold, so assess whether the news pushes expected growth up or down and by roughly how much.",
+  "directSources": [],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "pct pts",
+  "maxMagnitude": 2,
+  "ledgerPath": "data/kxgdp/decisions.db",
+  "consumerGroup": "execmod-kxgdp",
+  "generatedAt": "2026-10-08T21:48:51.218Z",
+  "generatorModel": "claude-sonnet-5"
+}

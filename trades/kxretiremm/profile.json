@@ -1,0 +1,17 @@
+{
+  "name": "kxretiremm",
+  "seriesTicker": "KXRETIREMM",
+  "title": "Will Mitch McConnell resign his office before the midterms?",
+  "settlement": "If Mitch McConnell has resigned, retired, or otherwise voluntarily stepped down from his Congressional office, or announced intent to do so prematurely, after issuance and before Nov 3, 2026, the market resolves Yes. Otherwise it resolves No.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability that Mitch McConnell resigns, retires early, or announces intent to voluntarily leave his Senate seat before Nov 3, 2026; the market resolves Yes only on an actual resignation or a credible public announcement of intent to step down prematurely, not on speculation, term-end retirement without early announcement timing ambiguity aside, or electoral defeat.",
+  "directSources": [],
+  "marketStructure": "binary",
+  "magnitudeUnit": "probability points",
+  "maxMagnitude": 40,
+  "ledgerPath": "data/kxretiremm/decisions.db",
+  "consumerGroup": "execmod-kxretiremm",
+  "generatedAt": "2026-10-08T21:41:42.494Z",
+  "generatorModel": "claude-sonnet-5"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "kxcabillionairetax",
+  "seriesTicker": "KXCABILLIONAIRETAX",
+  "title": "Will the California billionaire wealth tax ballot initiative be officially held before Nov 5, 2026?",
+  "settlement": "Resolves YES if a one-time tax on billionaires ballot initiative has been officially held in California before Nov 5, 2026, meaning voting has commenced and concluded, votes cast and counted, and the initiative appeared on official ballots. Scheduling, signature gathering, court challenges, preliminary results, or recounts do NOT count as 'officially held'.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability (in percentage points) that the California billionaire wealth tax initiative will have completed an official vote before Nov 5, 2026. The market resolves YES only if actual voting has commenced and concluded by that date; procedural steps like qualifying for the ballot or legal fights do not satisfy the condition.",
+  "directSources": [],
+  "marketStructure": "binary",
+  "magnitudeUnit": "pp",
+  "maxMagnitude": 15,
+  "ledgerPath": "data/kxcabillionairetax/decisions.db",
+  "consumerGroup": "execmod-kxcabillionairetax",
+  "generatedAt": "2026-10-08T21:52:17.895Z",
+  "generatorModel": "claude-sonnet-5"
+}
