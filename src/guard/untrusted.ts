@@ -10,18 +10,25 @@ const TRUNCATION_MARKER = '…[truncated]';
 
 // `>?` is optional so an unterminated `</article` is also removed; `\b` keeps
 // `<articles>` and `<article-list>`-style words from being eaten as the wrapper tag.
-const ARTICLE_TAG = /<\s*\/?\s*article\b[^>]*>?/gi;
+const ARTICLE_TAG = /<\s{0,16}\/?\s{0,16}article\b[^>]*>?/gi;
 // Invisible characters removed outright (they can hide inside a tag name), and line/paragraph
 // separators that become a space.
-const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u00AD\u180E\u3164\u115F\u1160]/g;
 const LINE_SEPARATORS = /[\u2028\u2029]/g;
 // Every C0 control character except newline (0x0A), plus DEL and the C1 block (incl. U+0085).
 const CONTROL_CHARS = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g;
-const ANY_ARTICLE_TAG = /<\s*\/?\s*article\b/i;
+const ANY_ARTICLE_TAG = /<\s{0,16}\/?\s{0,16}article\b/i;
+// Work bounds: the module is the trust boundary and must not rely on callers pre-truncating.
+const MAX_INPUT_CHARS = MAX_SOURCE_CHARS * 4;
+const MAX_SCAN_CHARS = 20000;
 
 /** Normalise FIRST so no encoding trick can survive into tag removal. */
 function normalise(text: string): string {
-  return text.replace(INVISIBLE_CHARS, '').replace(LINE_SEPARATORS, ' ').replace(CONTROL_CHARS, ' ');
+  return text
+    .replace(INVISIBLE_CHARS, '')
+    .replace(LINE_SEPARATORS, ' ')
+    .replace(CONTROL_CHARS, ' ')
+    .replace(/\s{17,}/g, ' '); // a forged tag cannot hide behind a long whitespace run
 }
 
 function removeArticleTags(text: string): string {
@@ -53,7 +60,7 @@ function cut(text: string, length: number): string {
 export function wrapUntrusted(text: string, maxChars: number = MAX_SOURCE_CHARS): string {
   const requested = Number.isNaN(maxChars) ? 0 : Math.floor(maxChars);
   const cap = Math.min(Math.max(0, requested), MAX_SOURCE_CHARS);
-  let cleaned = removeArticleTags(normalise(text)).trim();
+  let cleaned = removeArticleTags(normalise(cut(text, MAX_INPUT_CHARS))).trim();
   // Belt and braces: if anything tag-like survived, defuse every `<` (same length).
   if (ANY_ARTICLE_TAG.test(cleaned)) cleaned = cleaned.replace(/</g, '\u2039');
 
@@ -91,7 +98,7 @@ const INJECTION_PATTERNS: InjectionPattern[] = [
   },
   {
     name: 'system-notice',
-    regex: /\bsystem\s+(?:notice|prompt|message|override|instructions?)\b|<\/?system>|\[\/?system\]|#{2,}\s*system\b/i,
+    regex: /\bsystem\s+(?:notice|prompt|message|override|instructions?)\b|<\/?system>|\[\/?system\]|#{2,6}\s{0,10}system\b/i,
   },
   {
     name: 'must-answer',
@@ -120,6 +127,6 @@ const INJECTION_PATTERNS: InjectionPattern[] = [
 /** Names of the deterministic tripwire patterns that `text` matches, in fixed order. */
 export function detectInjection(text: string): string[] {
   // Remove invisible characters and collapse all whitespace (incl. newlines) so split phrases match.
-  const flat = text.replace(INVISIBLE_CHARS, '').replace(/\s+/g, ' ');
+  const flat = cut(text, MAX_SCAN_CHARS).replace(INVISIBLE_CHARS, '').replace(/\s+/g, ' ');
   return INJECTION_PATTERNS.filter((p) => p.regex.test(flat)).map((p) => p.name);
 }
