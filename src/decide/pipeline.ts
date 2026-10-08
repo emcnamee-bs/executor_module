@@ -152,10 +152,21 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
 
     let gateReason: string | null = null;
     if (!isDirect && !tripwireHit) {
-      const gate = await runGate(
-        { ollama: ollamaClient, db, profile: loaded },
-        { itemId: item.item_id, excerptText: articleText, excerptSource, tripwireHit }
-      );
+      let gate;
+      try {
+        gate = await runGate(
+          { ollama: ollamaClient, db, profile: loaded },
+          { itemId: item.item_id, excerptText: articleText, excerptSource, tripwireHit }
+        );
+      } catch (err) {
+        // Malformed output (GateError) or an Ollama failure, including a timeout: the
+        // gate's own ai_calls row is already written. Recorded with the spec's
+        // `gate error:` prefix (final review M2) so analysis queries can find it; no
+        // pending row exists yet, so a plain skip is correct.
+        const message = err instanceof Error ? err.message : String(err);
+        recordDecision(db, skipRecord(item, `gate error: ${message}`, { rung, orderStatus: 'resolved' }));
+        return;
+      }
       if (!gate.relevant) {
         recordDecision(db, skipRecord(item, `gate: not relevant: ${gate.reason}`, { rung, orderStatus: 'resolved' }));
         return;

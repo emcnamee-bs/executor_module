@@ -219,7 +219,7 @@ describe('profile flow, end to end through makeOnItem', () => {
     expect((db.prepare("SELECT excerpt_source FROM ai_calls WHERE stage='gate'").get() as any).excerpt_source).toBe('snippet');
   });
 
-  it('a failing local model records a pipeline error skip and spends no Sonnet call', async () => {
+  it('a failing local model records a "gate error:" skip (spec §3/§9) and spends no Sonnet call', async () => {
     const onItem = makeOnItem({
       anthropicClient: fakes.anthropic(),
       ollamaClient: { chat: async () => '', chatDetailed: async () => { throw new Error('connect ECONNREFUSED'); } } as any,
@@ -227,8 +227,19 @@ describe('profile flow, end to end through makeOnItem', () => {
     });
     await onItem({ ok: true, entry: { id: '1-0', fields: {} }, item: item(), matchedPhrases: ['x y'] });
     expect(fakes.anthropicCalls).toHaveLength(0);
-    expect((db.prepare('SELECT reason FROM decisions').get() as any).reason).toMatch(/^pipeline error: connect ECONNREFUSED/);
+    expect((db.prepare('SELECT reason FROM decisions').get() as any).reason).toMatch(/^gate error: .*connect ECONNREFUSED/);
     expect((db.prepare("SELECT error FROM ai_calls WHERE stage='gate'").get() as any).error).toMatch(/ECONNREFUSED/);
+  });
+
+  it('malformed gate output records a "gate error:" skip, not a pipeline error, and spends no Sonnet call (M2)', async () => {
+    const onItem = makeOnItem({
+      anthropicClient: fakes.anthropic(),
+      ollamaClient: { chat: async () => '', chatDetailed: async () => ({ content: 'not json', loadMs: 0, promptEvalCount: 1, evalCount: 1, totalMs: 1, doneReason: 'stop' }) } as any,
+      db, fetchLadder: async () => GAS_LADDER, kalshiClient: {} as any, profile: loaded, fetchArticle: fakes.fetchArticle as any,
+    });
+    await onItem({ ok: true, entry: { id: '1-0', fields: {} }, item: item(), matchedPhrases: ['x y'] });
+    expect(fakes.anthropicCalls).toHaveLength(0);
+    expect((db.prepare('SELECT reason FROM decisions').get() as any).reason).toMatch(/^gate error: gate output is not valid JSON/);
   });
 
   it('a series with no open event records a clean skip naming the profile series', async () => {
