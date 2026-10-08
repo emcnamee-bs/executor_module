@@ -161,3 +161,13 @@ describe('validateDecideOutput', () => {
     expect(() => validateDecideOutput(value)).toThrow(expected);
   });
 });
+
+describe('decideTrade truncation (fake client, offline)', () => {
+  it('fails loudly naming max_tokens when the response was cut off', async () => {
+    const { default: AnthropicSdk } = await import('@anthropic-ai/sdk');
+    const fake = {
+      messages: { parse: async () => ({ stop_reason: 'max_tokens', parsed_output: null }) },
+    } as unknown as InstanceType<typeof AnthropicSdk>;
+    await expect(decideTrade(fake, 'h', 's', 'syn', 'reported')).rejects.toThrow(/max_tokens/);
+  });
+});

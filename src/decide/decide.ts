@@ -107,7 +107,7 @@ export async function decideTrade(
   // undefined. Use .parse() here from the start.
   const response = await client.messages.parse({
     model: 'claude-sonnet-5',
-    max_tokens: 1024,
+    max_tokens: 2048,
     messages: [
       {
         role: 'user',
@@ -119,6 +119,9 @@ export async function decideTrade(
     } as Anthropic.Messages.MessageCreateParams['output_config'],
   });
 
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error('Sonnet decide response was truncated at max_tokens');
+  }
   if (!response.parsed_output) {
     throw new Error('Sonnet did not return parseable structured output for the decide step');
   }

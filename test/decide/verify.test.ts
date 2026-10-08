@@ -64,3 +64,26 @@ describe('validateVerifyOutput', () => {
     expect(() => validateVerifyOutput(value)).toThrow(expected);
   });
 });
+
+describe('verifySynopsis truncation (fake client, offline)', () => {
+  it('fails loudly naming max_tokens when the response was cut off', async () => {
+    const fake = {
+      messages: { parse: async () => ({ stop_reason: 'max_tokens', parsed_output: null }) },
+    } as unknown as Anthropic;
+    await expect(verifySynopsis(fake, 'h', 's', 'syn')).rejects.toThrow(/max_tokens/);
+  });
+
+  it('requests enough output room that a verbose note is not truncated', async () => {
+    let seen = 0;
+    const fake = {
+      messages: {
+        parse: async (p: { max_tokens: number }) => {
+          seen = p.max_tokens;
+          return { stop_reason: 'end_turn', parsed_output: { supported: true, note: 'ok' } };
+        },
+      },
+    } as unknown as Anthropic;
+    await verifySynopsis(fake, 'h', 's', 'syn');
+    expect(seen).toBeGreaterThanOrEqual(1024);
+  });
+});
