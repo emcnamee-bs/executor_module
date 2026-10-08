@@ -3,9 +3,9 @@ import { createRedisClient } from './redis/client.js';
 import { StreamConsumer, type ConsumerOptions, type StreamEntry } from './redis/consumer.js';
 import { parseItemFields, type Item } from './item.js';
 import { formatSummaryLine } from './log.js';
-import { compilePhrases, findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
-import { loadProfile, assertLiveAllowed, resolveLedgerPath, type LoadedProfile } from './profile/profile.js';
-import { loadIipSourceIds, assertDirectSourcesKnown } from './profile/iipSources.js';
+import { findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
+import type { LoadedProfile } from './profile/profile.js';
+import { prepareStartup, assertLedgerStartAllowed } from './startup.js';
 import { fetchArticle } from './fetch/excerpt.js';
 import {
   openLedger,
@@ -21,32 +21,13 @@ import { reconcilePendingOrders } from './execute/order.js';
 import { startReconciliationTimer } from './execute/reconcileOpenPositions.js';
 import Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const STREAM_KEY = 'iip:items';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/**
- * A live (non-dry-run) start on a ledger file that does not exist means a mis-pinned
- * profile would silently run with zero exposure, no breaker history and no pending-order
- * reconciliation. Refuse unless the operator opts in with the exact string "true".
- */
-export function assertLedgerStartAllowed(
-  ledgerPath: string,
-  env: NodeJS.ProcessEnv = process.env,
-  exists: (p: string) => boolean = fs.existsSync
-): void {
-  if (env.KALSHI_DRY_RUN === 'true') return;
-  if (exists(ledgerPath)) return;
-  if (env.EXECUTOR_ALLOW_NEW_LEDGER === 'true') return;
-  throw new Error(
-    `live start refused: ledger ${ledgerPath} does not exist, so this would run on a fresh empty ledger ` +
-      `(no exposure, breaker or pending-order history). Fix the profile's ledgerPath, or set ` +
-      `EXECUTOR_ALLOW_NEW_LEDGER=true to create a new ledger deliberately.`
-  );
-}
+// Re-exported for existing callers/tests; the guard itself lives with the rest of startup.
+export { assertLedgerStartAllowed };
 
 /** How much of an unparseable payload the error line carries before it is cut off. */
 const RAW_PREVIEW_LIMIT = 500;
@@ -141,31 +122,16 @@ export function makeOnItem(deps: OnItemDeps): OnItem {
 }
 
 export async function main(): Promise<void> {
-  const loaded = loadProfile(mustGetEnv('EXECUTOR_TRADE'));
-  assertLiveAllowed(loaded.profile);
-  const ledgerPath = resolveLedgerPath(loaded.profile, REPO_ROOT);
-  // Refuses a LIVE start on a ledger file that does not exist (mis-pinned profile guard).
-  assertLedgerStartAllowed(ledgerPath);
-  if (loaded.profile.directSources.length > 0) {
-    assertDirectSourcesKnown(loaded.profile, loadIipSourceIds(mustGetEnv('IIP_SOURCES_FILE')));
-  }
-  const compiledPhrases = compilePhrases(loaded.keyphrases);
-
-  // Startup visibility: an empty list or a wrong bank is indistinguishable at runtime
-  // from a healthy pipeline that has not seen a newsworthy item yet.
-  console.log(
-    `[profile] trade=${loaded.profile.name} series=${loaded.profile.seriesTicker} ` +
-      `structure=${loaded.profile.marketStructure} gateModel=${loaded.profile.gateModel} ` +
-      `ledger=${ledgerPath} group=${loaded.profile.consumerGroup} ` +
-      `bankSha=${loaded.bankSha.slice(0, 12)} keyphrases=${loaded.keyphrases.length} ` +
-      `directSources=${JSON.stringify(loaded.profile.directSources)} dryRun=${process.env.KALSHI_DRY_RUN === 'true'}`
-  );
+  // Every start guard, the ledger/group/stream-position pins, the phrase compile, the
+  // gate-model check and the single-instance lock: see src/startup.ts (tested there).
+  const startup = await prepareStartup(process.env, REPO_ROOT);
+  const { loaded, ledgerPath } = startup;
+  process.once('exit', () => startup.lock.release());
 
   const client = createRedisClient();
   await client.connect();
 
   const anthropicClient = new Anthropic();
-  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
   const db = openLedger(ledgerPath);
   const ollamaClient = createOllamaClient(undefined, db);
   // Isolated like every other auxiliary/observability write in this codebase
@@ -214,13 +180,8 @@ export async function main(): Promise<void> {
 
   await runOnce(
     client,
-    {
-      streamKey: STREAM_KEY,
-      groupName: loaded.profile.consumerGroup,
-      consumerName: process.env.EXECMOD_CONSUMER_NAME ?? `${loaded.profile.consumerGroup}-primary`,
-      startId: '$',
-    },
-    compiledPhrases,
+    startup.consumerOptions,
+    startup.compiledPhrases,
     makeOnItem({ anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle }),
     controller.signal
   );
@@ -239,6 +200,7 @@ export async function main(): Promise<void> {
   reconciliationTimer.stop();
   await client.quit();
   db.close();
+  startup.lock.release();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
