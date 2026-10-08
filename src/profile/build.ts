@@ -139,6 +139,15 @@ function assertNotPinnedLiveProfile(dir: string): void {
   }
 }
 
+function staleOldDirs(tradesRoot: string, name: string): string[] {
+  try {
+    const re = new RegExp(`^\\.old-${name}-[0-9a-f]{8}$`);
+    return fs.readdirSync(tradesRoot).filter((e) => re.test(e)).sort();
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Best-effort recovery at the start of a build: if the target dir is missing but a
  * `.old-<name>-*` exists (a swap that died between its two renames), restore it; then
@@ -245,9 +254,21 @@ export async function buildTradeProfile(
     );
   }
 
-  if (!opts.allowLiveLedger) assertNotPinnedLiveProfile(path.join(tradesRoot, name));
+  // A live-pinned .old-<name>-* copy (a crashed swap of the live profile) must stop the
+  // build. With a target present the sweep would DELETE the .old copies, so check them
+  // first; without one the sweep restores a single copy (or keeps several), so check
+  // the target and whatever .old copies remain AFTER it.
+  const checkOlds = (): void => {
+    for (const e of staleOldDirs(tradesRoot, name)) assertNotPinnedLiveProfile(path.join(tradesRoot, e));
+  };
+  if (!opts.allowLiveLedger && fs.existsSync(path.join(tradesRoot, name))) checkOlds();
 
   sweepStaleDirs(tradesRoot, name, rename, tryRm);
+
+  if (!opts.allowLiveLedger) {
+    assertNotPinnedLiveProfile(path.join(tradesRoot, name));
+    checkOlds();
+  }
 
   const spec = await fetchSeriesSpec(opts.seriesTicker, deps.fetchImpl);
   const structure = deriveStructure(spec.strikeTypes, spec.marketCount);

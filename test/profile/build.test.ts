@@ -239,6 +239,37 @@ describe('buildTradeProfile never silently overwrites the hand-pinned live profi
     expect(fs.existsSync(path.join(root, 'data'))).toBe(false);
   });
 
+  it('a live-pinned profile that the stale sweep RESTORES (crashed swap) is still refused: the guard runs after the sweep', async () => {
+    const dir = writeProfile(tradesRoot(), 'kxaaagasw', { profile: { ledgerPath: 'data/decisions.db', consumerGroup: 'execmod' } });
+    const before = snap(dir);
+    fs.renameSync(dir, path.join(tradesRoot(), '.old-kxaaagasw-deadbeef'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client, calls } = fakeClient();
+    await expect(buildTradeProfile(opts(), { client, fetchImpl: noFetch })).rejects.toThrow(/hand-pinned live profile/);
+    expect(calls).toHaveLength(0);
+    expect(snap(dir)).toEqual(before);
+  });
+
+  it('refuses when any .old-<name>-* copy is pinned to the live ledger, and leaves it in place', async () => {
+    writeProfile(tradesRoot(), 'kxaaagasw'); // an ordinary current profile
+    const old = writeProfile(tradesRoot(), '.old-kxaaagasw-deadbeef', { profile: { name: 'kxaaagasw', ledgerPath: 'data/decisions.db' } });
+    const before = snap(old);
+    const { client, calls } = fakeClient();
+    await expect(buildTradeProfile(opts(), { client, fetchImpl: noFetch })).rejects.toThrow(/\.old-kxaaagasw-deadbeef.*live/);
+    expect(calls).toHaveLength(0);
+    expect(snap(old)).toEqual(before);
+  });
+
+  it('with several .old copies (no restore) one of them live-pinned, it refuses', async () => {
+    writeProfile(tradesRoot(), '.old-kxaaagasw-00000000', { profile: { name: 'kxaaagasw' } });
+    writeProfile(tradesRoot(), '.old-kxaaagasw-deadbeef', { profile: { name: 'kxaaagasw', consumerGroup: 'execmod' } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client, calls } = fakeClient();
+    await expect(buildTradeProfile(opts(), { client, fetchImpl: noFetch })).rejects.toThrow(/live/);
+    expect(calls).toHaveLength(0);
+    expect(fs.readdirSync(tradesRoot()).sort()).toEqual(['.old-kxaaagasw-00000000', '.old-kxaaagasw-deadbeef']);
+  });
+
   it('with allowLiveLedger the operator can deliberately replace it', async () => {
     writeProfile(tradesRoot(), 'kxaaagasw', { profile: { ledgerPath: 'data/decisions.db', consumerGroup: 'execmod' } });
     const { client } = fakeClient();
