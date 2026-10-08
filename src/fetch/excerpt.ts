@@ -339,8 +339,16 @@ function removeElements(html: string, tag: string): string {
 
 export function extractArticle(rawHtml: string, maxChars: number): Article {
   const cap = normaliseCap(maxChars);
-  // Bound the input before any pattern runs.
-  const html = stripComments(clip(typeof rawHtml === 'string' ? rawHtml : '', MAX_HTML_CHARS));
+  // Order matters. (1) Cut the input to the body cap so every pass below is linear in a
+  // known size. (2) Strip comments and every script/style/boilerplate element FIRST, on that
+  // full input: modern news pages put >64 KB of JSON/CSS in <head>, and clipping before
+  // stripping would leave only code. (3) Only then clip the cleaned text to 64 KB (the 2,000
+  // character output budget never needs more) before any title/meta/paragraph regex runs.
+  // Trade-off, accepted: an UNCLOSED <script>/<style> swallows the rest of the document (as
+  // browsers parse it too), so that page yields an empty or partial article.
+  let cleaned = stripComments(clip(typeof rawHtml === 'string' ? rawHtml : '', MAX_BODY_BYTES));
+  for (const tag of BOILERPLATE_TAGS) cleaned = removeElements(cleaned, tag);
+  const html = clip(cleaned, MAX_HTML_CHARS);
 
   let title = '';
   const titleOpen = new RegExp(`<title\\b${TAG_BODY}>`, 'i').exec(html);
@@ -356,8 +364,7 @@ export function extractArticle(rawHtml: string, maxChars: number): Article {
   const meta = readMeta(html);
   const description = clip(meta.get('og:description') ?? meta.get('description') ?? '', MAX_FIELD_RAW_CHARS);
 
-  let body = html;
-  for (const tag of BOILERPLATE_TAGS) body = removeElements(body, tag);
+  const body = html; // boilerplate was already removed above
 
   // One forward pass over paragraph open/close tokens: text between an opener and the next
   // token (a closer or another opener) is one paragraph, so unclosed <p> still reads.

@@ -451,3 +451,55 @@ describe('fetchArticle hardening', () => {
     expect(cancelled).toBe(true);
   });
 });
+
+describe('extractArticle survives large script/style blocks before the article (round 2)', () => {
+  const REAL =
+    '<title>Real headline</title><meta property="og:description" content="Real description">' +
+    '</head><body>' +
+    Array.from({ length: 5 }, (_, i) => `<p>Paragraph number ${i} of the real article body text, long enough to keep.</p>`).join('');
+  const expectArticle = (a: ReturnType<typeof extractArticle>) => {
+    expect(a.title).toBe('Real headline');
+    expect(a.description).toBe('Real description');
+    expect(a.text).toContain('Paragraph number 0');
+    expect(a.text).toContain('Paragraph number 4');
+  };
+
+  it('(a) closed 96 KB JSON script in <head> before title/meta/body', () => {
+    const html = `<html><head><script type="application/json">${'{"a":"<p>x</p>"}'.repeat(7000)}</script>${REAL}`;
+    expect(html.length).toBeGreaterThan(96 * 1024);
+    expectArticle(extractArticle(html, 2000));
+  });
+
+  it('(b) 200 KB style block then the article', () => {
+    expectArticle(extractArticle(`<html><head><style>${'.a{color:red}'.repeat(16000)}</style>${REAL}`, 2000));
+  });
+
+  it('(c) many small closed scripts totalling over 64 KB, then the article', () => {
+    const scripts = '<script>var a = 1;</script>'.repeat(3000);
+    expect(scripts.length).toBeGreaterThan(64 * 1024);
+    expectArticle(extractArticle(`<html><head>${scripts}${REAL}`, 2000));
+  });
+
+  it('(d) an unclosed <script> returns without throwing, quickly (empty/partial accepted)', () => {
+    const started = Date.now();
+    const a = extractArticle(`<html><head><script>var x = 1;${REAL}`, 2000);
+    expect(a.text).toBe('');
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  const CAP = 256 * 1024;
+  it.each([
+    ['<script> x30000 no closers', '<script>'.repeat(30000)],
+    ['<style> x30000', '<style>'.repeat(30000)],
+    ['<noscript> x30000', '<noscript>'.repeat(30000)],
+    ['<svg> x30000 no closers', '<svg>'.repeat(30000)],
+    ['<!-- no closers', '<!--'.repeat(60000)],
+    ['<script>x</script> x20000', '<script>x</script>'.repeat(20000)],
+    ['<script x2000 attr junk', ('<script ' + 'a'.repeat(1990)).repeat(120)],
+    ['<nav></nav> alternating', '<nav>a</nav><p>b</p>'.repeat(12000)],
+  ])('%s finishes in under 250 ms', (_n, body) => {
+    const started = Date.now();
+    extractArticle(`<title>T</title>${body}`.slice(0, CAP), 800);
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+});
