@@ -187,6 +187,52 @@ CREATE TABLE IF NOT EXISTS process_lifecycle (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   state TEXT NOT NULL CHECK (state IN ('running', 'stopped_cleanly'))
 );
+
+-- One row per model call (gate, triage, decide, profile build), written BEFORE the
+-- pipeline acts on the result. New table: CREATE TABLE IF NOT EXISTS creates it on
+-- any existing ledger, so no ALTER-style migration is needed.
+CREATE TABLE IF NOT EXISTS ai_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  called_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  trade TEXT NOT NULL,
+  item_id TEXT,              -- NULL for profile-build calls
+  stage TEXT NOT NULL,       -- build_keyphrases | build_bank | gate | triage | decide
+  provider TEXT NOT NULL,    -- ollama | anthropic
+  model TEXT NOT NULL,
+  prompt_sha TEXT NOT NULL,  -- hash of the system prompt, to group calls by prompt version
+  request_json TEXT NOT NULL,   -- full messages as sent (system + user)
+  raw_output TEXT,
+  parsed_json TEXT,
+  reasoning TEXT,            -- the model's stated reason, copied out for easy querying
+  verdict TEXT,              -- relevant true/false | skip/escalate | trade/no-trade
+  excerpt_source TEXT,       -- page | snippet
+  tripwire_hit INTEGER NOT NULL DEFAULT 0,
+  wall_ms INTEGER, load_ms INTEGER,
+  prompt_tokens INTEGER, output_tokens INTEGER,
+  stop_reason TEXT, error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ai_calls_item ON ai_calls(item_id);
+
+-- Paper (simulated) positions for every market structure. Never read by the
+-- real-money exposure/dedup queries, which only look at the decisions table.
+CREATE TABLE IF NOT EXISTS paper_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  trade TEXT NOT NULL,
+  item_id TEXT NOT NULL UNIQUE,
+  structure TEXT NOT NULL,
+  event_ticker TEXT NOT NULL,
+  market_ticker TEXT,                -- NULL for capture rows
+  side TEXT CHECK (side IN ('yes','no') OR side IS NULL),
+  contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
+  entry_price_cents INTEGER CHECK (entry_price_cents IS NULL OR (entry_price_cents > 0 AND entry_price_cents < 100)),
+  direction TEXT, magnitude REAL, edge_cents REAL,
+  reasoning TEXT,
+  ladder_json TEXT NOT NULL,         -- every market in the event with strike type, strikes, bid/ask at decision time
+  settled_at TEXT, result TEXT CHECK (result IN ('yes','no') OR result IS NULL),
+  pnl_cents INTEGER,                 -- GROSS of fees, per project convention
+  CHECK (side IS NULL OR (market_ticker IS NOT NULL AND contracts > 0 AND entry_price_cents IS NOT NULL))
+);
 `;
 
 /**

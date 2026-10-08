@@ -10,6 +10,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "clear-block": "tsx scripts/clear-market-block.ts",
     "clear-breaker": "tsx scripts/clear-breaker.ts",
+    "score-paper": "tsx scripts/score-paper.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
