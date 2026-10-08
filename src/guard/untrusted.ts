@@ -11,8 +11,18 @@ const TRUNCATION_MARKER = '…[truncated]';
 // `>?` is optional so an unterminated `</article` is also removed; `\b` keeps
 // `<articles>` and `<article-list>`-style words from being eaten as the wrapper tag.
 const ARTICLE_TAG = /<\s*\/?\s*article\b[^>]*>?/gi;
-// Every C0 control character except newline (0x0A), plus DEL.
-const CONTROL_CHARS = /[\u0000-\u0009\u000B-\u001F\u007F]/g;
+// Invisible characters removed outright (they can hide inside a tag name), and line/paragraph
+// separators that become a space.
+const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+const LINE_SEPARATORS = /[\u2028\u2029]/g;
+// Every C0 control character except newline (0x0A), plus DEL and the C1 block (incl. U+0085).
+const CONTROL_CHARS = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g;
+const ANY_ARTICLE_TAG = /<\s*\/?\s*article\b/i;
+
+/** Normalise FIRST so no encoding trick can survive into tag removal. */
+function normalise(text: string): string {
+  return text.replace(INVISIBLE_CHARS, '').replace(LINE_SEPARATORS, ' ').replace(CONTROL_CHARS, ' ');
+}
 
 function removeArticleTags(text: string): string {
   // Replace with a space and repeat until stable so a split tag such as
@@ -41,8 +51,11 @@ function cut(text: string, length: number): string {
  * including the visible truncation marker when it was cut.
  */
 export function wrapUntrusted(text: string, maxChars: number = MAX_SOURCE_CHARS): string {
-  const cap = Math.min(Math.max(0, Math.floor(maxChars)), MAX_SOURCE_CHARS);
-  const cleaned = removeArticleTags(text).replace(CONTROL_CHARS, ' ').trim();
+  const requested = Number.isNaN(maxChars) ? 0 : Math.floor(maxChars);
+  const cap = Math.min(Math.max(0, requested), MAX_SOURCE_CHARS);
+  let cleaned = removeArticleTags(normalise(text)).trim();
+  // Belt and braces: if anything tag-like survived, defuse every `<` (same length).
+  if (ANY_ARTICLE_TAG.test(cleaned)) cleaned = cleaned.replace(/</g, '\u2039');
 
   let body: string;
   if (cleaned.length <= cap) {
@@ -65,11 +78,20 @@ interface InjectionPattern {
 const INJECTION_PATTERNS: InjectionPattern[] = [
   {
     name: 'ignore-instructions',
-    regex: /\b(?:ignore|disregard|forget|override)\b[^.\n]{0,40}?\b(?:previous|prior|above|earlier|preceding|all|any|your)\b[^.\n]{0,25}?\binstructions?\b/i,
+    regex: new RegExp(
+      [
+        String.raw`\b(?:ignore|disregard|forget|override)\b[^.]{0,40}?\b(?:previous|prior|above|earlier|preceding|all|any|your)\b[^.]{0,25}?\b(?:instructions?|directions?|directives?)\b`,
+        String.raw`\b(?:ignore|disregard|forget)\s+(?:everything|anything|all)\s+(?:above|before|previous|prior)\b`,
+        String.raw`\b(?:ignore|disregard|forget)\s+(?:what|everything)\s+you\s+(?:were|are|have\s+been)\s+told\b`,
+        String.raw`\b(?:do\s+not|don't|never)\s+follow\s+(?:your|the\s+previous|the\s+above|previous|prior)\s+(?:instructions?|directions?)\b`,
+        String.raw`\bforget\s+everything\b(?:\s+\S+){0,4}?\s+(?:above|before|previous|you\s+were\s+told|instructions?)\b`,
+      ].join('|'),
+      'i',
+    ),
   },
   {
     name: 'system-notice',
-    regex: /\bsystem\s+(?:notice|prompt|message|override|instructions?)\b/i,
+    regex: /\bsystem\s+(?:notice|prompt|message|override|instructions?)\b|<\/?system>|\[\/?system\]|#{2,}\s*system\b/i,
   },
   {
     name: 'must-answer',
@@ -97,5 +119,7 @@ const INJECTION_PATTERNS: InjectionPattern[] = [
 
 /** Names of the deterministic tripwire patterns that `text` matches, in fixed order. */
 export function detectInjection(text: string): string[] {
-  return INJECTION_PATTERNS.filter((p) => p.regex.test(text)).map((p) => p.name);
+  // Remove invisible characters and collapse all whitespace (incl. newlines) so split phrases match.
+  const flat = text.replace(INVISIBLE_CHARS, '').replace(/\s+/g, ' ');
+  return INJECTION_PATTERNS.filter((p) => p.regex.test(flat)).map((p) => p.name);
 }
