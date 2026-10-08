@@ -144,3 +144,21 @@ export function resolveLedgerPath(profile: Pick<TradeProfile, 'ledgerPath'>, rep
   }
   return resolved;
 }
+
+/** Operator scripts act on ONE trade's ledger: EXECUTOR_TRADE is required, never defaulted. */
+export function resolveTradeLedger(
+  env: NodeJS.ProcessEnv,
+  repoRoot: string,
+  tradesRoot: string = TRADES_ROOT
+): { trade: string; ledgerPath: string } {
+  const trade = env.EXECUTOR_TRADE;
+  if (!trade) throw new Error('EXECUTOR_TRADE must be set (the trade whose ledger this script acts on)');
+  const loaded = loadProfile(trade, tradesRoot);
+  return { trade: loaded.profile.name, ledgerPath: resolveLedgerPath(loaded.profile, repoRoot) };
+}
+
+/** score-paper takes an explicit ledger path; it must still resolve to a file under <repo>/data/. */
+export function resolveScoreLedgerPath(raw: string | undefined, repoRoot: string): string {
+  if (!raw) throw new Error('EXECUTOR_LEDGER_PATH must be set to the ledger file to score');
+  return resolveLedgerPath({ ledgerPath: raw }, repoRoot);
+}

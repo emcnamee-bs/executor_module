@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadProfile, assertLiveAllowed, resolveLedgerPath } from '../../src/profile/profile.js';
+import { loadProfile, assertLiveAllowed, resolveLedgerPath, resolveTradeLedger, resolveScoreLedgerPath } from '../../src/profile/profile.js';
 import { loadIipSourceIds, assertDirectSourcesKnown } from '../../src/profile/iipSources.js';
 import { writeProfile, GOOD_BANK } from './fixtures.js';
 
@@ -178,5 +178,29 @@ describe('resolveLedgerPath', () => {
 
   it.each(['../x.db', 'data/../../x.db', '/etc/x.db'])('rejects a ledgerPath of %s that escapes data/', (p) => {
     expect(() => resolveLedgerPath(withPath(p), repo)).toThrow('ledgerPath escapes the data directory');
+  });
+});
+
+describe('operator ledger resolution (scripts)', () => {
+  const repo = path.resolve('/tmp/some-repo');
+  let root: string;
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'trades-op-')); });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it('resolveTradeLedger requires EXECUTOR_TRADE and returns the trade name and resolved ledger path', () => {
+    writeProfile(root, 'gas-trade');
+    expect(() => resolveTradeLedger({}, repo, root)).toThrow(/EXECUTOR_TRADE/);
+    expect(resolveTradeLedger({ EXECUTOR_TRADE: 'gas-trade' }, repo, root)).toEqual({
+      trade: 'gas-trade',
+      ledgerPath: path.join(repo, 'data', 'gas-trade', 'decisions.db'),
+    });
+  });
+
+  it('resolveScoreLedgerPath requires the variable, containment under data/, and returns the resolved path', () => {
+    expect(() => resolveScoreLedgerPath(undefined, repo)).toThrow(/EXECUTOR_LEDGER_PATH/);
+    expect(resolveScoreLedgerPath('data/x/decisions.db', repo)).toBe(path.join(repo, 'data', 'x', 'decisions.db'));
+    for (const p of ['../x.db', '/etc/x.db', 'data/../../x.db']) {
+      expect(() => resolveScoreLedgerPath(p, repo)).toThrow('ledgerPath escapes the data directory');
+    }
   });
 });

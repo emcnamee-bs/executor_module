@@ -28,6 +28,26 @@ import { fileURLToPath } from 'node:url';
 const STREAM_KEY = 'iip:items';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * A live (non-dry-run) start on a ledger file that does not exist means a mis-pinned
+ * profile would silently run with zero exposure, no breaker history and no pending-order
+ * reconciliation. Refuse unless the operator opts in with the exact string "true".
+ */
+export function assertLedgerStartAllowed(
+  ledgerPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (p: string) => boolean = fs.existsSync
+): void {
+  if (env.KALSHI_DRY_RUN === 'true') return;
+  if (exists(ledgerPath)) return;
+  if (env.EXECUTOR_ALLOW_NEW_LEDGER === 'true') return;
+  throw new Error(
+    `live start refused: ledger ${ledgerPath} does not exist, so this would run on a fresh empty ledger ` +
+      `(no exposure, breaker or pending-order history). Fix the profile's ledgerPath, or set ` +
+      `EXECUTOR_ALLOW_NEW_LEDGER=true to create a new ledger deliberately.`
+  );
+}
+
 /** How much of an unparseable payload the error line carries before it is cut off. */
 const RAW_PREVIEW_LIMIT = 500;
 
@@ -123,6 +143,9 @@ export function makeOnItem(deps: OnItemDeps): OnItem {
 export async function main(): Promise<void> {
   const loaded = loadProfile(mustGetEnv('EXECUTOR_TRADE'));
   assertLiveAllowed(loaded.profile);
+  const ledgerPath = resolveLedgerPath(loaded.profile, REPO_ROOT);
+  // Refuses a LIVE start on a ledger file that does not exist (mis-pinned profile guard).
+  assertLedgerStartAllowed(ledgerPath);
   if (loaded.profile.directSources.length > 0) {
     assertDirectSourcesKnown(loaded.profile, loadIipSourceIds(mustGetEnv('IIP_SOURCES_FILE')));
   }
@@ -133,6 +156,7 @@ export async function main(): Promise<void> {
   console.log(
     `[profile] trade=${loaded.profile.name} series=${loaded.profile.seriesTicker} ` +
       `structure=${loaded.profile.marketStructure} gateModel=${loaded.profile.gateModel} ` +
+      `ledger=${ledgerPath} group=${loaded.profile.consumerGroup} ` +
       `bankSha=${loaded.bankSha.slice(0, 12)} keyphrases=${loaded.keyphrases.length} ` +
       `directSources=${JSON.stringify(loaded.profile.directSources)} dryRun=${process.env.KALSHI_DRY_RUN === 'true'}`
   );
@@ -141,7 +165,6 @@ export async function main(): Promise<void> {
   await client.connect();
 
   const anthropicClient = new Anthropic();
-  const ledgerPath = resolveLedgerPath(loaded.profile, REPO_ROOT);
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
   const db = openLedger(ledgerPath);
   const ollamaClient = createOllamaClient(undefined, db);

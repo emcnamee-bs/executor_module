@@ -6,7 +6,7 @@ import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { createOllamaClient } from '../src/decide/ollamaClient.js';
 import { createRedisClient } from '../src/redis/client.js';
-import { runOnce, makeOnItem, type ItemOutcome } from '../src/main.js';
+import { runOnce, makeOnItem, assertLedgerStartAllowed, type ItemOutcome } from '../src/main.js';
 import { compilePhrases } from '../src/keyphrases/match.js';
 import { openLedger, recordPendingDecision, recordPendingOrder } from '../src/decide/ledger.js';
 import { reconcilePendingOrders } from '../src/execute/order.js';
@@ -632,5 +632,32 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
     };
     expect(resolved.would_trade).toBe(1);
     expect(resolved.contracts).toBe(5);
+  });
+});
+
+describe('assertLedgerStartAllowed (a live profile must not silently start on a fresh ledger)', () => {
+  const missing = () => false;
+  const present = () => true;
+  const P = '/repo/data/x/decisions.db';
+
+  it('live + missing ledger throws, naming the path and the opt-in variable', () => {
+    expect(() => assertLedgerStartAllowed(P, {}, missing)).toThrow(P);
+    expect(() => assertLedgerStartAllowed(P, {}, missing)).toThrow('EXECUTOR_ALLOW_NEW_LEDGER');
+    expect(() => assertLedgerStartAllowed(P, { KALSHI_DRY_RUN: 'false' }, missing)).toThrow(P);
+  });
+  it('live + missing + EXECUTOR_ALLOW_NEW_LEDGER=true is allowed', () => {
+    expect(() => assertLedgerStartAllowed(P, { EXECUTOR_ALLOW_NEW_LEDGER: 'true' }, missing)).not.toThrow();
+  });
+  it('only the exact string "true" opts in', () => {
+    for (const v of ['TRUE', '1', 'yes', '']) {
+      expect(() => assertLedgerStartAllowed(P, { EXECUTOR_ALLOW_NEW_LEDGER: v }, missing)).toThrow();
+    }
+  });
+  it('live + existing ledger is allowed', () => {
+    expect(() => assertLedgerStartAllowed(P, {}, present)).not.toThrow();
+  });
+  it('dry-run + missing ledger is allowed; only the exact string "true" counts as dry-run', () => {
+    expect(() => assertLedgerStartAllowed(P, { KALSHI_DRY_RUN: 'true' }, missing)).not.toThrow();
+    expect(() => assertLedgerStartAllowed(P, { KALSHI_DRY_RUN: '1' }, missing)).toThrow();
   });
 });

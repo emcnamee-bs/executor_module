@@ -5,15 +5,18 @@
 // of `npm test` -- invoke directly:
 //   EXECUTOR_LEDGER_PATH=data/<trade>/decisions.db npm run score-paper
 
-import { openLedger } from '../src/decide/ledger.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { openExistingLedger } from '../src/decide/ledger.js';
+import { resolveScoreLedgerPath } from '../src/profile/profile.js';
 import { fetchMarketStatus } from '../src/decide/kalshi.js';
 import { settlePaperRows } from '../src/paper/score.js';
 
 async function main(): Promise<void> {
-  const ledgerPath = process.env.EXECUTOR_LEDGER_PATH;
-  if (!ledgerPath) throw new Error('EXECUTOR_LEDGER_PATH must be set to the ledger file to score');
-
-  const db = openLedger(ledgerPath);
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const ledgerPath = resolveScoreLedgerPath(process.env.EXECUTOR_LEDGER_PATH, repoRoot);
+  console.log(`[score-paper] ledger=${ledgerPath}`);
+  const db = openExistingLedger(ledgerPath);
   // fetchMarketStatus is deliberately called WITHOUT the db argument: with it, a Kalshi
   // lookup failure would be recorded in kalshi_errors and could feed the live circuit
   // breaker. Paper scoring must never be able to halt trading.

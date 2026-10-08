@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 // src/decide/ledger.ts
 import Database from 'better-sqlite3';
 import type { Rung } from './rung.js';
@@ -324,6 +325,17 @@ function migrateCircuitBreakerTripsSignal(db: Database.Database): void {
       ALTER TABLE circuit_breaker_trips_new RENAME TO circuit_breaker_trips;
     `);
   })();
+}
+
+/**
+ * Opens a ledger that must already exist. Operator tools use this so a wrong or
+ * mistyped path fails loudly instead of silently creating an empty database.
+ */
+export function openExistingLedger(dbPath: string): Database.Database {
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`ledger file not found: ${dbPath} (refusing to create a new database)`);
+  }
+  return openLedger(dbPath);
 }
 
 export function openLedger(dbPath: string): Database.Database {
