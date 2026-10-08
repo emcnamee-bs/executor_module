@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -115,5 +115,74 @@ describe('callStructured', () => {
     const { client } = fakeClient(ok);
     await callStructured(base(client, { summarize: () => { throw new Error('boom'); } }));
     expect((db.prepare('SELECT verdict FROM ai_calls').get() as any).verdict).toBe('unsummarizable');
+  });
+
+  const brokenDb = { prepare: () => { throw new Error('database is locked'); } } as unknown as Database.Database;
+
+  describe('when the ai_calls write fails', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it('API error: rejects with the ORIGINAL API error and logs to console.error', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { client } = fakeClient(() => { throw new Error('429 rate limited'); });
+      await expect(callStructured(base(client, { db: brokenDb }))).rejects.toThrow('429 rate limited');
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('truncation: rejects with the original max_tokens error and logs to console.error', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { client } = fakeClient({ ...ok, stop_reason: 'max_tokens', parsed_output: null });
+      await expect(callStructured(base(client, { db: brokenDb }))).rejects.toThrow(/max_tokens/);
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('null parsed_output: rejects with the original parseable error and logs to console.error', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { client } = fakeClient({ ...ok, parsed_output: null });
+      await expect(callStructured(base(client, { db: brokenDb }))).rejects.toThrow(/parseable/);
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('success path: a failing write propagates (deliberate fail-closed: no result without an audit row)', async () => {
+      const { client } = fakeClient(ok);
+      await expect(callStructured(base(client, { db: brokenDb }))).rejects.toThrow('database is locked');
+    });
+  });
+
+  it('request_json contains the schema object and max_tokens', async () => {
+    const { client } = fakeClient(ok);
+    await callStructured(base(client, { schema: { type: 'object', title: 'S' }, maxTokens: 777 }));
+    const req = JSON.parse((db.prepare('SELECT request_json FROM ai_calls').get() as any).request_json);
+    expect(req.schema).toEqual({ type: 'object', title: 'S' });
+    expect(req.max_tokens).toBe(777);
+  });
+
+  it('ignores non-text content blocks when building raw_output', async () => {
+    const { client } = fakeClient({
+      ...ok,
+      content: [{ type: 'tool_use', id: 'x', name: 'n', input: {} }, { type: 'text', text: 'ONLY TEXT' }],
+    });
+    await callStructured(base(client));
+    expect((db.prepare('SELECT raw_output FROM ai_calls').get() as any).raw_output).toBe('ONLY TEXT');
+  });
+
+  it('prompt_sha is stable for the same system prompt and differs for another', async () => {
+    const { client } = fakeClient(ok);
+    await callStructured(base(client));
+    await callStructured(base(client));
+    await callStructured(base(client, { system: 'OTHER SYSTEM' }));
+    const shas = (db.prepare('SELECT prompt_sha FROM ai_calls ORDER BY id').all() as any[]).map((r) => r.prompt_sha);
+    expect(shas[0]).toBe(shas[1]);
+    expect(shas[2]).not.toBe(shas[0]);
+  });
+
+  it('on an API error the row has null tokens and stop reason but a non-null wall_ms', async () => {
+    const { client } = fakeClient(() => { throw new Error('boom'); });
+    await expect(callStructured(base(client))).rejects.toThrow('boom');
+    const row = db.prepare('SELECT * FROM ai_calls').get() as any;
+    expect(row.prompt_tokens).toBeNull();
+    expect(row.output_tokens).toBeNull();
+    expect(row.stop_reason).toBeNull();
+    expect(row.wall_ms).not.toBeNull();
   });
 });

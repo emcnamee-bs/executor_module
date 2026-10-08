@@ -25,6 +25,20 @@ export interface StructuredCall {
  * `ai_calls` row per call (including failures) written BEFORE the caller acts on the
  * result, so a crash after the model answered still leaves the evidence.
  */
+type AiCallRow = Parameters<typeof recordAiCall>[1];
+
+/**
+ * ERROR paths only: a logging failure (locked or full DB) must never replace the
+ * original error the caller needs to see, so it is reported (message text only) and swallowed.
+ */
+function recordFailure(db: Database.Database, stage: AiStage, rec: AiCallRow): void {
+  try {
+    recordAiCall(db, rec);
+  } catch (logErr) {
+    console.error(`[ai-log] failed to record ${stage} call:`, logErr instanceof Error ? logErr.message : String(logErr));
+  }
+}
+
 export async function callStructured(call: StructuredCall): Promise<unknown> {
   const messages = [{ role: 'user' as const, content: call.user }];
   const requestJson = JSON.stringify({
@@ -57,7 +71,7 @@ export async function callStructured(call: StructuredCall): Promise<unknown> {
       output_config: { format: { type: 'json_schema', schema: call.schema } } as any,
     });
   } catch (err) {
-    recordAiCall(call.db, {
+    recordFailure(call.db, call.stage, {
       ...base,
       rawOutput: null,
       parsedJson: null,
@@ -91,12 +105,12 @@ export async function callStructured(call: StructuredCall): Promise<unknown> {
 
   if (response.stop_reason === 'max_tokens') {
     const message = `Sonnet ${call.stage} response was truncated at max_tokens`;
-    recordAiCall(call.db, { ...common, reasoning: null, verdict: null, error: message });
+    recordFailure(call.db, call.stage, { ...common, reasoning: null, verdict: null, error: message });
     throw new Error(message);
   }
   if (parsed === null) {
     const message = `Sonnet did not return parseable structured output for the ${call.stage} step`;
-    recordAiCall(call.db, { ...common, reasoning: null, verdict: null, error: message });
+    recordFailure(call.db, call.stage, { ...common, reasoning: null, verdict: null, error: message });
     throw new Error(message);
   }
 
@@ -106,6 +120,8 @@ export async function callStructured(call: StructuredCall): Promise<unknown> {
   } catch {
     summary = { verdict: 'unsummarizable', reasoning: null };
   }
+  // SUCCESS path: deliberately NOT guarded. If the audit row cannot be written this throws,
+  // failing closed: the pipeline's catch records a skip and no order is placed without an audit row.
   recordAiCall(call.db, { ...common, reasoning: summary.reasoning, verdict: summary.verdict, error: null });
   return parsed;
 }
