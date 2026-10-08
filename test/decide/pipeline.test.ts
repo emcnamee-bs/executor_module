@@ -803,6 +803,16 @@ describe('runDecisionPipeline', () => {
     expect(fetchLadder).not.toHaveBeenCalled();
   });
 
+  it('passes the profile, the db, the item id and the article excerpt into runGate', async () => {
+    await runDecisionPipeline(baseItem({ item_id: 'gate-args' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    const [gateDeps, gateInput] = (gateModule.runGate as any).mock.calls[0];
+    expect(gateDeps.profile).toBe(TEST_PROFILE);
+    expect(gateDeps.ollama).toBe(ollamaClient);
+    expect(gateDeps.db).toBe(db);
+    expect(gateInput).toMatchObject({ itemId: 'gate-args', excerptSource: 'snippet', tripwireHit: false });
+    expect(gateInput.excerptText).toContain('BLS reports unemployment rate fell to 3.9%');
+  });
+
   it('records a skip carrying the triage reason when Sonnet triage says skip, before the ladder fetch', async () => {
     vi.spyOn(triageModule, 'triageItem').mockResolvedValue({ verdict: 'skip', reason: 'priced in' });
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());
