@@ -111,3 +111,46 @@ describe('runGenerator (write-guard control flow)', () => {
     }
   }, 60000);
 });
+
+describe('refineKeyphrases (fake client, offline)', () => {
+  function fakeClient(response: Record<string, unknown>, capture?: { params?: any }) {
+    return {
+      messages: {
+        parse: async (params: unknown) => {
+          if (capture) capture.params = params;
+          return response;
+        },
+      },
+    } as unknown as Anthropic;
+  }
+
+  it('asks for a large, verbose list: a size target, multi-phrasing guidance, and a roomy token budget', async () => {
+    const cap: { params?: any } = {};
+    await refineKeyphrases(
+      fakeClient({ stop_reason: 'end_turn', parsed_output: { keyphrases: ['trump approval rating'] } }, cap),
+      ['trump approval rating']
+    );
+    const prompt: string = cap.params.messages[0].content;
+    expect(prompt).toMatch(/at least 200/i);
+    expect(prompt).toMatch(/3 to 5 word|three to five word/i);
+    expect(prompt).toMatch(/headline writer|release page/i);
+    expect(cap.params.max_tokens).toBeGreaterThanOrEqual(8192);
+  });
+
+  it('fails loudly naming max_tokens when the list was cut off', async () => {
+    await expect(
+      refineKeyphrases(fakeClient({ stop_reason: 'max_tokens', parsed_output: null }), [])
+    ).rejects.toThrow(/max_tokens/);
+  });
+
+  it('trims and de-duplicates phrases case-insensitively, keeping first spelling and order', async () => {
+    const result = await refineKeyphrases(
+      fakeClient({
+        stop_reason: 'end_turn',
+        parsed_output: { keyphrases: ['Trump approval rating', ' trump approval rating ', 'new Gallup poll', 'NEW GALLUP POLL'] },
+      }),
+      []
+    );
+    expect(result).toEqual(['Trump approval rating', 'new Gallup poll']);
+  });
+});

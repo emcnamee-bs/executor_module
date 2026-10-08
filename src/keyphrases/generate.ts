@@ -7,7 +7,17 @@ Because of this, TWO categories of news matter equally (do not rank one above th
 1. Individual poll publications that would feed directly into that RCP average (e.g. a new Rasmussen, Quinnipiac, Economist/YouGov, Morning Consult, or similar poll on presidential approval being released).
 2. General political and economic news that could plausibly shift how people respond to approval polls taken in the following days (e.g. major policy actions, economic data releases, significant scandals or controversies, foreign policy developments).
 
-Every keyphrase must be at least 2 words long -- a single word like "Trump" or "poll" would match nearly every news item and produce useless noise. Prefer specific, multi-word phrases that would plausibly appear verbatim in a real news headline or opening sentence (e.g. "Trump approval rating", "new Rasmussen poll", "job approval numbers"), not generic single concepts.`;
+Every keyphrase must be at least 2 words long -- a single word like "Trump" or "poll" would match nearly every news item and produce useless noise. Prefer specific, multi-word phrases that would plausibly appear verbatim in a real news headline or opening sentence (e.g. "Trump approval rating", "new Rasmussen poll", "job approval numbers"), not generic single concepts.
+
+HOW PHRASES ARE MATCHED: case-insensitive, whole words, and the words must appear CONTIGUOUSLY and in order in the item's title or first paragraph. A phrase no headline would ever contain verbatim is dead weight, so every phrase must be something a real headline or release page would actually say.`;
+
+const LIST_SIZE_AND_STYLE = `SIZE AND STYLE OF THE LIST:
+- Return at least 200 phrases (aim for 250 to 350). Coverage matters more than brevity: a missed poll release is a missed trade, while a stray extra match only costs a cheap downstream filter.
+- Be verbose in VARIETY, not padding. Cover each topic in several distinct phrasings: the way a headline writer would put it, the way a poll-release page title would put it (pollster plus "poll" plus dates or "approval" wording), and the way a wire-service opening sentence would put it.
+- Mix lengths: keep the short 2-word anchors, and add many more specific 3 to 5 word phrases (e.g. "Economist/YouGov poll shows approval", "job approval rating among independents", "approval rating hits new low").
+- Cover every major pollster and aggregator by name (including Economist/YouGov, Gallup, Quinnipiac, Emerson, Rasmussen, Morning Consult, Reuters/Ipsos, AP-NORC, TIPP, Silver Bulletin, RealClearPolitics, Marquette, Harvard-Harris, Atlas Intel, Echelon, Pew, Fox, CNN, NBC, CBS) combined with approval/disapproval/job-performance wording.
+- Cover subgroup and issue-approval phrasings (independents, Republicans, Democrats, swing voters, economy, inflation, immigration, foreign policy, Iran, tariffs) and movement words (slips, climbs, hits new low, rebounds, steady, underwater, net approval).
+- Do not drop a phrase merely because it is long; only drop ones that are stale, near-duplicates, or would match unrelated news.`;
 
 // Define the JSON schema directly for structured output
 const KEYPHRASE_JSON_SCHEMA = {
@@ -53,13 +63,26 @@ export function validateKeyphraseOutput(parsedOutput: unknown): string[] {
   return keyphrases as string[];
 }
 
+function dedupeKeyphrases(phrases: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of phrases) {
+    const phrase = raw.trim();
+    const key = phrase.toLowerCase().replace(/\s+/g, ' ');
+    if (phrase.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(phrase);
+  }
+  return out;
+}
+
 export async function refineKeyphrases(
   client: Anthropic,
   currentPhrases: string[]
 ): Promise<string[]> {
   const response = await client.messages.parse({
     model: 'claude-sonnet-5',
-    max_tokens: 4096,
+    max_tokens: 8192,
     output_config: {
       format: {
         type: 'json_schema',
@@ -69,16 +92,19 @@ export async function refineKeyphrases(
     messages: [
       {
         role: 'user',
-        content: `${MARKET_CONTEXT}\n\nHere is the current keyphrase list (may be empty on first run):\n${JSON.stringify(currentPhrases, null, 2)}\n\nRevise and extend this list. Keep phrases that are still relevant, remove ones that are stale or too generic, and add new ones you think are missing. Return the complete revised list, not just additions.`,
+        content: `${MARKET_CONTEXT}\n\n${LIST_SIZE_AND_STYLE}\n\nHere is the current keyphrase list (may be empty on first run):\n${JSON.stringify(currentPhrases, null, 2)}\n\nRevise and extend this list. Keep phrases that are still relevant, remove ones that are stale or too generic, and add new ones you think are missing. Return the complete revised list, not just additions.`,
       },
     ],
   });
 
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error('Sonnet keyphrase response was truncated at max_tokens');
+  }
   if (!response.parsed_output) {
     throw new Error('Sonnet did not return parseable structured output for the keyphrase list');
   }
 
-  return validateKeyphraseOutput(response.parsed_output);
+  return dedupeKeyphrases(validateKeyphraseOutput(response.parsed_output));
 }
 
 /**
