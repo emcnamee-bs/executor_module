@@ -1,0 +1,17 @@
+{
+  "name": "kxaprpotus",
+  "seriesTicker": "KXAPRPOTUS",
+  "title": "What will the U.S. President's RealClearPolitics approval rating be this week?",
+  "settlement": "Each weekly event is a ladder of narrow percentage-band markets. It resolves on a snapshot of the approval number displayed on RealClearPolitics's Trump approval-rating aggregate page (realclearpolling.com/polls/approval/donald-trump/approval-rating) at 11:00 AM ET on the strike date.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are assessing a news item for its likely effect on the U.S. President's approval rating, as measured by RealClearPolitics's polling average (a Kalshi market resolves weekly on a snapshot of this average).",
+  "directSources": [],
+  "marketStructure": "band",
+  "magnitudeUnit": "pts",
+  "maxMagnitude": 10,
+  "ledgerPath": "data/decisions.db",
+  "consumerGroup": "execmod",
+  "generatedAt": "2026-10-08T00:00:00Z",
+  "generatorModel": "hand-pinned (decideContext is the first paragraph of DECIDE_CONTEXT in main:src/decide/decide.ts; do not regenerate with build-trade)"
+}

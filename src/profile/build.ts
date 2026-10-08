@@ -19,6 +19,7 @@ const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 const MIN_GENERATED_KEYPHRASES = 150;
 const MIN_REUSED_KEYPHRASES = 20;
 const LIVE_LEDGER_PATH = 'data/decisions.db';
+const LIVE_CONSUMER_GROUP = 'execmod';
 // Must stay in step with ProfileSchema in profile.ts: a profile that fails these would be unloadable.
 const LEDGER_PATH_RE = /^data\/([a-z0-9-]+\/)?[A-Za-z0-9._-]+\.db$/;
 const CONSUMER_GROUP_RE = /^[A-Za-z0-9_-]{1,60}$/;
@@ -108,6 +109,33 @@ function isLiveLedger(target: string, live: string): boolean {
     return t.ino === l.ino && t.dev === l.dev;
   } catch {
     return false; // one of them does not exist yet
+  }
+}
+
+/**
+ * The live trade's profile (trades/kxaprpotus/) is hand-pinned and committed: its decide
+ * prompt, magnitude ceiling, ledger and consumer group are reviewed values. A plain
+ * `build-trade --series KXAPRPOTUS` would otherwise replace it with a freshly generated,
+ * unreviewed profile on a NEW ledger and group (the defaults), which a live start would
+ * accept once the build itself had created that ledger. Refuse to replace any existing
+ * profile that is pinned to the live ledger or the live group unless the operator passes
+ * --allow-live-ledger. Only a positive identification refuses: an unreadable profile.json
+ * is left to the normal build (such a profile cannot start anyway).
+ */
+function assertNotPinnedLiveProfile(dir: string): void {
+  let existing: { ledgerPath?: unknown; consumerGroup?: unknown };
+  try {
+    existing = JSON.parse(fs.readFileSync(path.join(dir, 'profile.json'), 'utf-8'));
+  } catch {
+    return;
+  }
+  const ledger = typeof existing?.ledgerPath === 'string' ? existing.ledgerPath : '';
+  const group = typeof existing?.consumerGroup === 'string' ? existing.consumerGroup : '';
+  if (ledger.toLowerCase() === LIVE_LEDGER_PATH || group === LIVE_CONSUMER_GROUP) {
+    throw new Error(
+      `refusing to replace the hand-pinned live profile at ${dir} (ledgerPath ${ledger}, consumerGroup ${group}); ` +
+        `it is committed and reviewed, not regenerated. Pass --allow-live-ledger only if you really mean to rebuild it.`
+    );
   }
 }
 
@@ -204,6 +232,8 @@ export async function buildTradeProfile(
       `refusing to open the live ledger ${LIVE_LEDGER_PATH} (as ${ledgerPath}) for build logging; pass --allow-live-ledger to write the build ai_calls rows into it`
     );
   }
+
+  if (!opts.allowLiveLedger) assertNotPinnedLiveProfile(path.join(tradesRoot, name));
 
   sweepStaleDirs(tradesRoot, name, rename, tryRm);
 

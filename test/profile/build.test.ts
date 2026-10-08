@@ -8,7 +8,7 @@ import { deriveStructure, fetchSeriesSpec, buildTradeProfile } from '../../src/p
 import { loadProfile } from '../../src/profile/profile.js';
 import { validateBank } from '../../src/profile/bank.js';
 import { parseBuildArgs } from '../../src/profile/cliArgs.js';
-import { GOOD_BANK } from './fixtures.js';
+import { GOOD_BANK, writeProfile } from './fixtures.js';
 
 const EVENTS = { events: [{ event_ticker: 'KXAAAGASW-26OCT12', strike_date: '2026-10-12T03:59:00Z', title: 'Gas prices this week' }] };
 const MARKETS = { markets: [
@@ -216,7 +216,47 @@ describe('buildTradeProfile input validation and the live ledger', () => {
   });
 });
 
-const snapshot = (dir: string) => fs.readdirSync(dir).sort().map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf-8')]);
+describe('buildTradeProfile never silently overwrites the hand-pinned live profile (I1)', () => {
+  let root: string;
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'build-')); });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  const tradesRoot = () => path.join(root, 'trades');
+  const opts = (over = {}) => ({ seriesTicker: 'KXAAAGASW', directSources: [], tradesRoot: tradesRoot(), repoRoot: root, ...over });
+  const noFetch = (async () => { throw new Error('fetch must not be reached'); }) as unknown as typeof fetch;
+  const snap = (d: string) => fs.readdirSync(d).sort().map((f) => [f, fs.readFileSync(path.join(d, f), 'utf-8')]);
+
+  it.each([
+    ['ledgerPath data/decisions.db', { ledgerPath: 'data/decisions.db' }],
+    ['ledgerPath data/Decisions.db (case variant)', { ledgerPath: 'data/Decisions.db' }],
+    ['consumerGroup execmod', { consumerGroup: 'execmod' }],
+  ])('refuses to replace an existing profile pinned to the live %s, before any fetch or model call', async (_label, pinned) => {
+    const dir = writeProfile(tradesRoot(), 'kxaaagasw', { profile: pinned });
+    const before = snap(dir);
+    const { client, calls } = fakeClient();
+    await expect(buildTradeProfile(opts(), { client, fetchImpl: noFetch })).rejects.toThrow(/hand-pinned live profile.*--allow-live-ledger/);
+    expect(calls).toHaveLength(0);
+    expect(snap(dir)).toEqual(before);
+    expect(fs.existsSync(path.join(root, 'data'))).toBe(false);
+  });
+
+  it('with allowLiveLedger the operator can deliberately replace it', async () => {
+    writeProfile(tradesRoot(), 'kxaaagasw', { profile: { ledgerPath: 'data/decisions.db', consumerGroup: 'execmod' } });
+    const { client } = fakeClient();
+    const { profile } = await buildTradeProfile(
+      opts({ ledgerPath: 'data/decisions.db', consumerGroup: 'execmod', allowLiveLedger: true }),
+      { client, fetchImpl: fakeFetch() }
+    );
+    expect(profile.ledgerPath).toBe('data/decisions.db');
+  });
+
+  it('an existing ordinary (non-live) profile is still rebuilt without any flag', async () => {
+    writeProfile(tradesRoot(), 'kxaaagasw');
+    const { client } = fakeClient();
+    await expect(buildTradeProfile(opts(), { client, fetchImpl: fakeFetch() })).resolves.toBeTruthy();
+  });
+});
+
+const snapshot =(dir: string) => fs.readdirSync(dir).sort().map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf-8')]);
 const names = (d: string) => fs.readdirSync(d).sort();
 
 function seqClient(profileOuts: Array<Record<string, unknown>>, phrases?: string[]) {
