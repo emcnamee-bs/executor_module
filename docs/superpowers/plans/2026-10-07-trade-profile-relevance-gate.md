@@ -6071,11 +6071,11 @@ git bundle create ~/.claude/jobs/e060f6f7/tmp/exec.bundle main..HEAD
 scp ~/.claude/jobs/e060f6f7/tmp/exec.bundle mini-mac:/tmp/exec.bundle
 ssh mini-mac 'cd /home/emac/executor_module && git fetch /tmp/exec.bundle HEAD:refs/heads/trade-profiles && git merge --ff-only trade-profiles && npm ci --omit=dev=false && npx tsc --noEmit && echo TSC_OK'
 ```
-Expected: `TSC_OK`. Then, ON mini-mac (it holds `ANTHROPIC_API_KEY` in `.env`; load it into the shell first with `set -a; source .env; set +a`), build the live trade's profile from the CURRENT keyphrase file, ledger and consumer group so its history is preserved, then the ten paper profiles (each is two Sonnet calls):
+Expected: `TSC_OK`. **Updated by the final-review fix wave:** the live trade's profile `trades/kxaprpotus/` is now committed and hand-pinned (final review I1; HANDOFF §5a.5), so it is NOT built here. `build-trade` refuses to replace it without `--allow-live-ledger`, and that flag must not be passed for it. Before any restart, on mini-mac: `ollama pull qwen2.5:7b-instruct-q4_K_M` (main.ts refuses to start without the gate model), and move any `KALSHI_DRY_RUN` / `EXECUTOR_TRADING_HALTED` line from `.env` into `.env.kxaprpotus` (HANDOFF §5a.5, "Where the switches go"). Then, ON mini-mac (it holds `ANTHROPIC_API_KEY` in `.env`; load it into the shell first with `set -a; source .env; set +a`), build the ten paper profiles (each is two Sonnet calls):
 
 ```bash
 cd /home/emac/executor_module && set -a && source .env && set +a
-npm run build-trade -- --series KXAPRPOTUS --reuse-keyphrases data/keyphrases.json --ledger-path data/decisions.db --consumer-group execmod
+# trades/kxaprpotus is committed and hand-pinned: no build for it.
 npm run build-trade -- --series KXTRUMPAPPROVE
 npm run build-trade -- --series KXTRUMPACT --direct whitehouse_presidential_actions
 npm run build-trade -- --series KXAAAGASW --direct aaa_national_average
@@ -6087,12 +6087,12 @@ npm run build-trade -- --series KXUSAIRANAGREEMENT
 npm run build-trade -- --series KXELECTIONEMERGENCY --direct whitehouse_presidential_actions
 npm run build-trade -- --series KXDIESELEXPORTBAN
 ```
-Expected for each: `[build-trade] wrote ...trades/<name>` and a `structure=` line. The expected structures are `band` for KXAPRPOTUS and KXTRUMPAPPROVE, `threshold` for KXTRUMPACT, KXAAAGASW, KXHORMUZWEEKLY, KXCPI, KXPAYROLLS, `binary` for KXUSAIRANAGREEMENT, KXELECTIONEMERGENCY, KXDIESELEXPORTBAN, `capture` for KXFEDDECISION; if any differs, stop and read the series spec in the build output before continuing. `KXAPRPOTUS` is a band profile and, being the live trade, must be started through `executor-module.service`, never the paper template. KXTRUMPAPPROVE is also `band` but runs through the paper template here (its unit hard-codes `KALSHI_DRY_RUN=true`).
+Expected for each: `[build-trade] wrote ...trades/<name>` and a `structure=` line. The expected structures are `band` for KXAPRPOTUS and KXTRUMPAPPROVE, `threshold` for KXTRUMPACT, KXAAAGASW, KXHORMUZWEEKLY, KXCPI, KXPAYROLLS, `binary` for KXUSAIRANAGREEMENT, KXELECTIONEMERGENCY, KXDIESELEXPORTBAN, `capture` for KXFEDDECISION; if any differs, stop and read the series spec in the build output before continuing. `KXAPRPOTUS` is a band profile and, being the live trade, must be started through `executor-module.service`, never the paper template. KXTRUMPAPPROVE is also `band` but runs through the paper template here (its ExecStart line pins `KALSHI_DRY_RUN=true` and strips `EXECUTOR_LIVE_TRADE`, so no env file can make it live).
 
 Read each generated `trades/*/bank.md` once (the banks are unreviewed by design; this is a 30-second sanity read, not a gate) and commit the profiles:
 
 ```bash
-git add trades && git commit -m "feat(trades): generated profiles for the live approval trade and ten paper trades"
+git add trades && git commit -m "feat(trades): generated profiles for ten paper trades"
 ```
 
 - [ ] **Step 7: Start the paper instances and verify**
@@ -6104,7 +6104,7 @@ ssh mini-mac 'free -m | sed -n 2p; systemctl show ollama -p Environment --value'
 ```
 If `OLLAMA_MAX_LOADED_MODELS=1` and `OLLAMA_NUM_PARALLEL=1` are not present, ask the operator to run `sudo systemctl edit ollama` and add `[Service]` / `Environment="OLLAMA_MAX_LOADED_MODELS=1"` / `Environment="OLLAMA_NUM_PARALLEL=1"`, then `sudo systemctl restart ollama` (this needs sudo, so it is an operator step, not an agent step).
 
-Then restart the live unit on the new code and start the paper instances one at a time, confirming each starts cleanly before the next:
+Then restart the live unit on the new code and start the paper instances one at a time, confirming each starts cleanly AND reading its gate funnel and the live ledger's `ollama_errors` before the next (staged rollout, HANDOFF §5a.4). The loop below is the minimum; pause between instances long enough to see gate traffic:
 
 ```bash
 ssh mini-mac 'systemctl --user daemon-reload && systemctl --user restart executor-module && sleep 20 && journalctl --user -u executor-module --since "-1 min" --no-pager | grep -E "\[profile\]|startup|Error"'
@@ -6112,7 +6112,7 @@ for t in kxtrumpapprove kxtrumpact kxaaagasw kxhormuzweekly kxcpi kxfeddecision 
   ssh mini-mac "systemctl --user enable --now executor-module@$t && sleep 15 && journalctl --user -u executor-$t --since '-30 sec' --no-pager | grep -E '\[profile\]|Error|refus' | tail -2"
 done
 ```
-Expected per instance: one `[profile] trade=<t> ... dryRun=true` line and no `Error`/`refusing`. `systemctl --user list-units 'executor-module@*'` shows all ten `active (running)`.
+Expected per instance: one `[profile] trade=<t> ... dryRun=true halted=false` line and no `Error`/`refus` (a `halted=true` means the halt is still in the shared `.env`). `systemctl --user list-units 'executor-module@*'` shows all ten `active (running)`.
 
 Verification after the first full day (run on mini-mac; `data/<t>/decisions.db` per trade):
 

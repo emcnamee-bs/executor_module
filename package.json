@@ -6,7 +6,6 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "dev": "tsx src/main.ts",
-    "generate-keyphrases": "tsx src/keyphrases/generate.ts",
     "build-trade": "tsx scripts/build-trade.ts",
     "smoke": "tsx scripts/smoke.ts",
     "clear-block": "tsx scripts/clear-market-block.ts",
