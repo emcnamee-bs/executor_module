@@ -314,3 +314,140 @@ describe('fetchArticle', () => {
     expect(a!.truncated).toBe(true);
   });
 });
+
+// ------------------------------------------------------------- fix round 1 regressions
+
+describe('extractArticle is linear on adversarial bodies (sync regex cannot be aborted)', () => {
+  const CAP = 256 * 1024;
+  const bodies: Array<[string, string]> = [
+    ['<title> + many "<"', '<title>' + '<'.repeat(250000)],
+    ['many "<p "', '<p '.repeat(80000)],
+    ['many "<meta "', '<meta '.repeat(40000)],
+    ['many "<!--"', '<!--'.repeat(60000)],
+    ['many "<script>"', '<script>'.repeat(30000)],
+    ['many "<nav>"', '<nav>'.repeat(50000)],
+    ['many "<svg>"', '<svg>'.repeat(50000)],
+    ['many "<p>"', '<p>'.repeat(80000)],
+  ];
+  it.each(bodies)('%s finishes in under 250 ms', (_name, body) => {
+    const html = body.slice(0, CAP);
+    const started = Date.now();
+    extractArticle(html, 800);
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  it('does not extract a <title> or meta that sits inside an HTML comment', () => {
+    const html = '<html><head><!-- <title>Hidden</title><meta name="description" content="Hidden desc"> --><title>Real</title></head></html>';
+    const a = extractArticle(html, 500);
+    expect(a.title).toBe('Real');
+    expect(a.description).toBe('');
+  });
+
+  it('caps a huge title before processing it', () => {
+    const a = extractArticle('<title>' + 'x'.repeat(100000) + '</title>', 2000);
+    expect(a.title.length).toBeLessThanOrEqual(2000);
+  });
+});
+
+describe('maxChars fails closed', () => {
+  it.each([NaN, -5, -Infinity, 0])('%s gives an empty valid article', (cap) => {
+    const a = extractArticle(ARTICLE_HTML, cap);
+    expect(a.title + a.description + a.text).toBe('');
+    expect(snippetArticle('Headline', 'snippet', cap).title).toBe('');
+  });
+  it('clamps Infinity and huge values to 2000', () => {
+    const big = `<title>${'t'.repeat(1500)}</title><p>${'p'.repeat(5000)}</p>`;
+    for (const cap of [Infinity, 1e9]) {
+      const a = extractArticle(big, cap);
+      expect(a.title.length + a.description.length + a.text.length).toBeLessThanOrEqual(2000);
+    }
+    const s = snippetArticle('h'.repeat(3000), null, Infinity);
+    expect(s.title.length).toBe(2000);
+  });
+});
+
+describe('isPublicAddress extra reserved ranges', () => {
+  it.each([
+    '192.0.0.1', '192.0.2.5', '198.18.0.1', '198.19.255.255', '198.51.100.7', '203.0.113.9',
+    'fec0::1', 'febf::1', '2001:db8::1', '2002:5db8:d822::1', '64:ff9b::808:808',
+  ])('%s is blocked', (ip) => {
+    expect(isPublicAddress(ip)).toBe(false);
+  });
+  it.each(['192.0.1.1', '198.20.0.1', '198.51.101.1', '203.0.114.1', '2001:db9::1', '2003::1'])('%s stays public', (ip) => {
+    expect(isPublicAddress(ip)).toBe(true);
+  });
+});
+
+describe('fetchArticle hardening', () => {
+  it('rejects URLs with credentials without fetching', async () => {
+    const fetchImpl = vi.fn();
+    expect(await fetchArticle('https://user:pw@news.example.com/a', { maxChars: 800, fetchImpl: fetchImpl as any, lookupImpl })).toBeNull();
+    expect(await fetchArticle('https://user@news.example.com/a', { maxChars: 800, fetchImpl: fetchImpl as any, lookupImpl })).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('returns null promptly when the DNS lookup never resolves', async () => {
+    const fetchImpl = vi.fn();
+    const hang = () => new Promise<string[]>(() => undefined);
+    const started = Date.now();
+    expect(await fetchArticle('https://news.example.com/a', { maxChars: 800, timeoutMs: 50, fetchImpl: fetchImpl as any, lookupImpl: hang })).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('returns null promptly when a body emits one chunk then stalls', async () => {
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (!sent) {
+          sent = true;
+          c.enqueue(new TextEncoder().encode('<p>start'));
+          return;
+        }
+        return new Promise(() => undefined); // never yields again
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/html' } }));
+    const started = Date.now();
+    expect(await fetchArticle('https://news.example.com/a', { maxChars: 800, timeoutMs: 80, fetchImpl: fetchImpl as any, lookupImpl })).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('returns null when a body drips one byte at a time past the timeout', async () => {
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        timer = setInterval(() => c.enqueue(new TextEncoder().encode('a')), 5);
+      },
+      cancel() {
+        clearInterval(timer);
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/html' } }));
+    const started = Date.now();
+    expect(await fetchArticle('https://news.example.com/a', { maxChars: 800, timeoutMs: 80, fetchImpl: fetchImpl as any, lookupImpl })).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+    clearInterval(timer);
+  });
+
+  it('cancels the body of a redirect response before following it', async () => {
+    let cancelled = false;
+    const mkRedirect = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            return new Promise(() => undefined);
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 302, headers: { location: '/final' } }
+      );
+    let n = 0;
+    const fetchImpl = vi.fn(async () => (++n === 1 ? mkRedirect() : htmlResponse(ARTICLE_HTML)));
+    const a = await fetchArticle('https://news.example.com/a', { maxChars: 800, fetchImpl: fetchImpl as any, lookupImpl });
+    expect(a).not.toBeNull();
+    expect(cancelled).toBe(true);
+  });
+});
