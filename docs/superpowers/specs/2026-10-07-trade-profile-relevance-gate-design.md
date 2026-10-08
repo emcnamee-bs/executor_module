@@ -64,7 +64,7 @@ A profile is a directory, `trades/<name>/`, committed to git:
 
 | File | Contents |
 |---|---|
-| `profile.json` | `name`, `seriesTicker`, `title` (one line), `settlement` (how it resolves, 1-3 sentences, from Kalshi's own rules text), `gateModel`, `gateKeepAlive`, `decideContext` (what Sonnet should estimate), `directSources` (iip source ids that ARE this market's resolution data; see section 11), `generatedAt`, `generatorModel` |
+| `profile.json` | `name`, `seriesTicker`, `title` (one line), `settlement` (how it resolves, 1-3 sentences, from Kalshi's own rules text), `gateModel`, `gateKeepAlive`, `decideContext` (what Sonnet should estimate), `directSources` (iip source ids that ARE this market's resolution data; see section 11), `marketStructure` (`band` \| `threshold` \| `binary` \| `capture`; section 12), `magnitudeUnit` (for example `pts`, `%`, `USD/gal`, `transit calls`), `maxMagnitude` (the sanity ceiling that replaces the hard-coded 10), `generatedAt`, `generatorModel` |
 | `keyphrases.json` | the keyphrase list (the 330-phrase style list from the generator) |
 | `bank.md` | the knowledge bank, <= ~500 tokens |
 | `bank.meta.json` | sha256 of `bank.md`, token estimate, `generatedAt`, source rules text hash |
@@ -421,6 +421,87 @@ transfer used for `executor_module`, followed by a service restart.
   matching still bounds model calls.
 - **Terms of use and politeness.** Each source is polled at a deliberately slow rate
   with the existing per-host rate limiter and the source's own user agent.
+
+## 12. Market structures and paper trading
+
+### Finding
+
+Reading the code against the ten chosen markets showed that the existing sizing path
+(`kalshi.ts` ladder fetch, `sizing.ts` probability curve) is written for the approval
+market's **band** ladder (`less` / `between` / `greater`, bands of ~0.2 points). Surveyed
+from Kalshi's public API on 2026-10-08:
+
+| Structure | Series | Notes |
+|---|---|---|
+| `band` | `KXAPRPOTUS`, `KXTRUMPAPPROVE` | `less` + several `between` + `greater`; the existing sizing applies unchanged |
+| `threshold` | `KXTRUMPACT` (`greater_or_equal`), `KXAAAGASW`, `KXHORMUZWEEKLY`, `KXCPI`, `KXPAYROLLS` (`greater`) | each market is a cumulative "above X" survival probability |
+| `binary` | `KXUSAIRANAGREEMENT`, `KXELECTIONEMERGENCY`, `KXDIESELEXPORTBAN` | one yes/no market, no strike |
+| `capture` | `KXFEDDECISION` | `custom` strike type (named outcomes); no pricing model in v1 |
+
+Treating a `greater` threshold as a band centred at `strike + width/2` (what the current
+curve code would do) misprices it, because its probability is cumulative, not a bin.
+
+### Decision
+
+Profiles declare `marketStructure`, and the module supports exactly these in v1:
+
+- **`band`**: unchanged sizing, and the only structure allowed to run with real money.
+- **`threshold`**: the same gates (spread, depth, price range, minimum edge, exposure and
+  pacing limits) and the same shift-and-interpolate fair-value idea, with the curve built
+  from thresholds: the point for each market sits **at the strike** and carries that
+  market's yes probability, and the shift is `direction x magnitude` in the profile's
+  `magnitudeUnit`. `greater_or_equal` is treated as `greater`.
+- **`binary`**: no ladder. When Sonnet says `should_trade`, the paper position is one
+  contract on the side its direction implies (`up` = the event is more likely than the
+  market implies = YES, `down` = NO) at the current ask, only if the ask is inside the
+  existing price range gate. The `decideContext` states this meaning; `magnitude` is
+  recorded but not used.
+- **`capture`**: the decision and a snapshot of the market(s) are recorded; no position.
+
+**Real orders are refused for every structure except `band`**: `main()` exits at startup
+naming the profile if `marketStructure` is not `band` and `KALSHI_DRY_RUN` is not exactly
+`true`. The three non-band structures are for paper trading until they have been proven
+against settlements.
+
+### Paper positions
+
+A new table, created by the existing `CREATE TABLE IF NOT EXISTS`:
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  trade TEXT NOT NULL,
+  item_id TEXT NOT NULL UNIQUE,
+  structure TEXT NOT NULL,
+  event_ticker TEXT NOT NULL,
+  market_ticker TEXT,                -- NULL for capture rows
+  side TEXT CHECK (side IN ('yes','no') OR side IS NULL),
+  contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
+  entry_price_cents INTEGER CHECK (entry_price_cents IS NULL OR (entry_price_cents > 0 AND entry_price_cents < 100)),
+  direction TEXT, magnitude REAL, edge_cents REAL,
+  reasoning TEXT,
+  ladder_json TEXT NOT NULL,         -- every market in the event with strike type, strikes, bid/ask at decision time
+  settled_at TEXT, result TEXT CHECK (result IN ('yes','no') OR result IS NULL),
+  pnl_cents INTEGER,                 -- GROSS of fees, per project convention
+  CHECK (side IS NULL OR (market_ticker IS NOT NULL AND contracts > 0 AND entry_price_cents IS NOT NULL))
+);
+```
+
+Every `would trade` outcome while `KALSHI_DRY_RUN=true` writes one row, for every
+structure (for `band` this is in addition to the existing simulated-order path, which
+keeps exercising the real order code). `scripts/score-paper.ts` settles unsettled rows
+whose market has finalized by reading the public `GET /markets/{ticker}` `result`, and
+sets `pnl_cents = contracts x (100 - entry)` for a winning side and `-contracts x entry`
+for a losing one. It never touches the real-money `decisions` table.
+
+### Profile build
+
+The build command chooses `marketStructure` deterministically from Kalshi's strike types
+(any `between` present = `band`; only `greater`/`greater_or_equal`/`less` = `threshold`;
+a single market with no strike type = `binary`; anything else = `capture`), and asks
+Sonnet for `magnitudeUnit` and `maxMagnitude`, which the validator checks are a non-empty
+string and a positive finite number.
 
 ## Benchmark findings (mini-mac, 2026-10-07)
 
