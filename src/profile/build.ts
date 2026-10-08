@@ -111,6 +111,46 @@ function isLiveLedger(target: string, live: string): boolean {
   }
 }
 
+/**
+ * Best-effort recovery at the start of a build: if the target dir is missing but a
+ * `.old-<name>-*` exists (a swap that died between its two renames), restore it; then
+ * remove stale `.old-<name>-*` / `.build-<name>-*` dirs for THIS profile only.
+ */
+function sweepStaleDirs(
+  tradesRoot: string,
+  name: string,
+  rename: typeof fs.renameSync,
+  tryRm: (p: string) => void
+): void {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(tradesRoot);
+  } catch {
+    return; // no trades dir yet
+  }
+  const stale = new RegExp(`^\\.(old|build)-${name}-[0-9a-f]{8}$`);
+  const mine = entries.filter((e) => stale.test(e)).sort();
+  const target = path.join(tradesRoot, name);
+  let restored = false;
+  if (!fs.existsSync(target)) {
+    const candidate = mine.find((e) => e.startsWith('.old-'));
+    if (candidate) {
+      try {
+        rename(path.join(tradesRoot, candidate), target);
+        restored = true;
+        console.warn(`[build-trade] restored previous profile ${name} from ${candidate} (an earlier build was interrupted)`);
+      } catch (err) {
+        console.warn(`[build-trade] could not restore ${candidate}: ${(err as Error).message}`);
+        return; // leave everything in place for a human
+      }
+    }
+  }
+  for (const e of mine) {
+    if (restored && !fs.existsSync(path.join(tradesRoot, e))) continue;
+    tryRm(path.join(tradesRoot, e));
+  }
+}
+
 export interface BuildOptions {
   seriesTicker: string;
   directSources: string[];
@@ -125,10 +165,19 @@ export interface BuildOptions {
 
 export async function buildTradeProfile(
   opts: BuildOptions,
-  deps: { client: Anthropic; fetchImpl?: typeof fetch; now?: () => Date; rename?: typeof fs.renameSync }
+  deps: { client: Anthropic; fetchImpl?: typeof fetch; now?: () => Date; rename?: typeof fs.renameSync; rm?: typeof fs.rmSync }
 ): Promise<{ dir: string; profile: TradeProfile }> {
   const now = deps.now ?? (() => new Date());
   const rename = deps.rename ?? fs.renameSync;
+  const rm = deps.rm ?? fs.rmSync;
+  // Cleanup must never change the build's outcome: a leftover dir is reported, not thrown.
+  const tryRm = (p: string): void => {
+    try {
+      rm(p, { recursive: true, force: true });
+    } catch (err) {
+      console.warn(`[build-trade] could not remove ${p} (safe to delete by hand): ${(err as Error).message}`);
+    }
+  };
   const name = opts.seriesTicker.toLowerCase();
   const tradesRoot = opts.tradesRoot ?? TRADES_ROOT;
   const repoRoot = opts.repoRoot ?? path.resolve(tradesRoot, '..');
@@ -155,6 +204,8 @@ export async function buildTradeProfile(
       `refusing to open the live ledger ${LIVE_LEDGER_PATH} (as ${ledgerPath}) for build logging; pass --allow-live-ledger to write the build ai_calls rows into it`
     );
   }
+
+  sweepStaleDirs(tradesRoot, name, rename, tryRm);
 
   const spec = await fetchSeriesSpec(opts.seriesTicker, deps.fetchImpl);
   const structure = deriveStructure(spec.strikeTypes, spec.marketCount);
@@ -277,8 +328,8 @@ export async function buildTradeProfile(
         throw err;
       }
     } finally {
-      fs.rmSync(staged, { recursive: true, force: true });
-      if (!keepOld) fs.rmSync(old, { recursive: true, force: true });
+      tryRm(staged);
+      if (!keepOld) tryRm(old);
     }
     return { dir, profile };
   } finally {

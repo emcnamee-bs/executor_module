@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -383,5 +383,45 @@ describe('parseBuildArgs', () => {
     [['--series', 'KXA', '--allow-live-ledger', 'yes']],
   ])('rejects %j', (argv) => {
     expect(() => parseBuildArgs(argv as string[])).toThrow();
+  });
+});
+
+describe('cleanup never masks the build result, and stale dirs are swept', () => {
+  let root: string;
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'build-')); });
+  afterEach(() => { vi.restoreAllMocks(); fs.rmSync(root, { recursive: true, force: true }); });
+  const opts = (over = {}) => ({ seriesTicker: 'KXAAAGASW', directSources: ['aaa_national_average'], tradesRoot: path.join(root, 'trades'), repoRoot: root, ...over });
+  const trades = () => path.join(root, 'trades');
+
+  it('an rm failure after a successful swap only warns: the build resolves and the new profile is live', async () => {
+    await buildTradeProfile(opts(), { client: fakeClient().client, fetchImpl: fakeFetch() });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const rm = (() => { throw new Error('EACCES'); }) as unknown as typeof fs.rmSync;
+    const { dir } = await buildTradeProfile(opts(), { client: fakeClient({ keyphrases: Array.from({ length: 250 }, (_, i) => `fresh phrase ${i}`) }).client, fetchImpl: fakeFetch(), rm });
+    expect(loadProfile('kxaaagasw', trades()).keyphrases).toHaveLength(250);
+    expect(dir).toBe(path.join(trades(), 'kxaaagasw'));
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/\.old-kxaaagasw-/);
+  });
+
+  it('a failure-path rm error does not replace the original error', async () => {
+    const rm = (() => { throw new Error('EACCES from rm'); }) as unknown as typeof fs.rmSync;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(buildTradeProfile(opts(), { client: fakeClient({ keyphrases: ['one phrase'] }).client, fetchImpl: fakeFetch(), rm })).rejects.toThrow(/at least 150/);
+  });
+
+  it('sweeps stale staging/old dirs for this profile only, leaving other profiles alone', async () => {
+    await buildTradeProfile(opts(), { client: fakeClient().client, fetchImpl: fakeFetch() });
+    for (const d of ['.old-kxaaagasw-deadbeef', '.build-kxaaagasw-cafef00d', '.old-kxaaagasw-2-deadbeef', '.build-other-cafef00d']) fs.mkdirSync(path.join(trades(), d));
+    await buildTradeProfile(opts(), { client: fakeClient().client, fetchImpl: fakeFetch() });
+    expect(names(trades())).toEqual(['.build-other-cafef00d', '.old-kxaaagasw-2-deadbeef', 'kxaaagasw']);
+  });
+
+  it('restores an .old dir when the target is missing (a crashed swap), then rebuilds', async () => {
+    const first = await buildTradeProfile(opts(), { client: fakeClient().client, fetchImpl: fakeFetch() });
+    const before = snapshot(first.dir);
+    fs.renameSync(first.dir, path.join(trades(), '.old-kxaaagasw-deadbeef'));
+    await expect(buildTradeProfile(opts(), { client: fakeClient({ keyphrases: ['one phrase'] }).client, fetchImpl: fakeFetch() })).rejects.toThrow(/at least 150/);
+    expect(snapshot(first.dir)).toEqual(before);
+    expect(names(trades())).toEqual(['kxaaagasw']);
   });
 });
