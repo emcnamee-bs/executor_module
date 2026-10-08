@@ -64,7 +64,7 @@ A profile is a directory, `trades/<name>/`, committed to git:
 
 | File | Contents |
 |---|---|
-| `profile.json` | `name`, `seriesTicker`, `title` (one line), `settlement` (how it resolves, 1-3 sentences, from Kalshi's own rules text), `gateModel`, `gateKeepAlive`, `decideContext` (what Sonnet should estimate), `directSources` (iip source ids that ARE this market's resolution data; see section 11), `marketStructure` (`band` \| `threshold` \| `binary` \| `capture`; section 12), `magnitudeUnit` (for example `pts`, `%`, `USD/gal`, `transit calls`), `maxMagnitude` (the sanity ceiling that replaces the hard-coded 10), `generatedAt`, `generatorModel` |
+| `profile.json` | `name`, `seriesTicker`, `title` (one line), `settlement` (how it resolves, 1-3 sentences, from Kalshi's own rules text), `gateModel`, `gateKeepAlive`, `decideContext` (what Sonnet should estimate), `directSources` (iip source ids that ARE this market's resolution data; see section 11), `ledgerPath` (default `data/<name>/decisions.db`), `consumerGroup` (default `execmod-<name>`), `marketStructure` (`band` \| `threshold` \| `binary` \| `capture`; section 12), `magnitudeUnit` (for example `pts`, `%`, `USD/gal`, `transit calls`), `maxMagnitude` (the sanity ceiling that replaces the hard-coded 10), `generatedAt`, `generatorModel` |
 | `keyphrases.json` | the keyphrase list (the 330-phrase style list from the generator) |
 | `bank.md` | the knowledge bank, <= ~500 tokens |
 | `bank.meta.json` | sha256 of `bank.md`, token estimate, `generatedAt`, source rules text hash |
@@ -75,7 +75,10 @@ existing required env vars). There is no default trade.
 
 Isolation per trade: ledger at `data/<name>/decisions.db`, Redis consumer group
 `execmod-<name>` (so two trade processes each see every stream item), and its own
-caps/kill switch. Exposure caps are per ledger, so running two trades does **not**
+caps/kill switch. Both are profile fields so the existing live approval trade can pin its
+current ledger (`data/decisions.db`) and group (`execmod`), preserving its history and
+its stream position; every other group is created at the stream tail (`$`) so a new trade
+does not replay the archived stream. Exposure caps are per ledger, so running two trades does **not**
 share a budget; the operator sizes each trade's caps deliberately.
 
 What moves out of code and into the profile: `KALSHI_SERIES_TICKER` in `pipeline.ts`,
