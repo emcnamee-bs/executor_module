@@ -77,10 +77,39 @@ export async function assertOllamaModelAvailable(
   }
 }
 
+/**
+ * Explicit deadline on every Ollama chat request (final review I5). With stream:false
+ * Ollama sends nothing until generation ends, and on a shared CPU-only box a call can
+ * queue behind other processes' calls; without this the only bound is undici's implicit
+ * 300 s headers timeout. 240 s sits under that, so this deadline (and its message) is
+ * the one that fires. A timeout is an ordinary Ollama failure: recorded in ollama_errors
+ * on THIS process's ledger (breakers are per ledger) and as a failed ai_calls row.
+ */
+export const DEFAULT_OLLAMA_REQUEST_TIMEOUT_MS = 240_000;
+
+export function resolveOllamaTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.OLLAMA_REQUEST_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_OLLAMA_REQUEST_TIMEOUT_MS;
+  const n = Number(raw);
+  if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(n) || n <= 0) {
+    throw new Error(`OLLAMA_REQUEST_TIMEOUT_MS must be a positive whole number of milliseconds, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
+
+function isTimeout(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'TimeoutError' || name === 'AbortError';
+}
+
 export function createOllamaClient(
   baseUrl: string = process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
-  db?: Database.Database
+  db?: Database.Database,
+  clientOptions: { timeoutMs?: number } = {}
 ): OllamaClient {
+  const timeoutMs = clientOptions.timeoutMs ?? resolveOllamaTimeoutMs();
+  const timedOut = (model: string): string =>
+    `Ollama request to ${baseUrl} for model ${model} timed out after ${timeoutMs} ms (OLLAMA_REQUEST_TIMEOUT_MS)`;
   async function chatDetailed(
     model: string,
     prompt: string,
@@ -111,14 +140,22 @@ export function createOllamaClient(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      const message = `Ollama request to ${baseUrl} for model ${model} failed to connect: ${(err as Error).message}`;
+      const message = isTimeout(err)
+        ? timedOut(model)
+        : `Ollama request to ${baseUrl} for model ${model} failed to connect: ${(err as Error).message}`;
       if (db) recordOllamaError(db, model, message);
       throw new Error(message);
     }
     if (!res.ok) {
-      const text = await res.text();
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (err) {
+        text = isTimeout(err) ? '(body read timed out)' : '(body unreadable)';
+      }
       const message = `Ollama request for model ${model} failed: ${res.status} ${text}`;
       if (db) recordOllamaError(db, model, message);
       throw new Error(message);
@@ -127,7 +164,9 @@ export function createOllamaClient(
     try {
       data = (await res.json()) as OllamaChatResponse;
     } catch (err) {
-      const message = `Ollama returned a non-JSON response body for model ${model}: ${(err as Error).message}`;
+      const message = isTimeout(err)
+        ? timedOut(model)
+        : `Ollama returned a non-JSON response body for model ${model}: ${(err as Error).message}`;
       if (db) recordOllamaError(db, model, message);
       throw new Error(message);
     }
