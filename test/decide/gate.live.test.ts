@@ -28,6 +28,7 @@ describe.skipIf(process.env.RUN_LIVE_GATE !== '1')('live gate smoke test (real O
     writeProfile(dir, 'kxaaagasw');
     const loaded = loadProfile('kxaaagasw', dir);
     const ollama = createOllamaClient(process.env.OLLAMA_BASE_URL, db);
+    try {
     const verdicts: Record<string, boolean> = {};
     for (const s of STORIES) {
       const r = await runGate({ ollama, db, profile: loaded }, { itemId: s.id, excerptText: s.text, excerptSource: 'page' });
@@ -36,7 +37,9 @@ describe.skipIf(process.env.RUN_LIVE_GATE !== '1')('live gate smoke test (real O
     const falseAlarms = STORIES.filter((s) => !s.relevant && verdicts[s.id]).length;
     expect(verdicts.s10).toBe(true);
     expect(falseAlarms).toBeLessThanOrEqual(1);
-    db.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    } finally {
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }, 30 * 60 * 1000);
 });
