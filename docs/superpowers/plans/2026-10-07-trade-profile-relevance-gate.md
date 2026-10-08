@@ -2763,6 +2763,7 @@ Expected: all PASS (the full existing `sizing.test.ts` still passes: `caps` is o
 ```bash
 git add src/decide/sizing.ts src/paper/paper.ts test/decide/sizingCaps.test.ts test/paper/paper.test.ts
 git commit -m "feat(sizing): optional cap overrides and a separate paper bankroll"
+```
 
 ---
 
