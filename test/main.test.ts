@@ -12,8 +12,11 @@ import { openLedger, recordPendingDecision, recordPendingOrder } from '../src/de
 import { reconcilePendingOrders } from '../src/execute/order.js';
 import * as orderModule from '../src/execute/order.js';
 import type { ActiveLadder } from '../src/decide/kalshi.js';
-import * as synopsisModule from '../src/decide/synopsis.js';
-import * as verifyModule from '../src/decide/verify.js';
+import * as gateModule from '../src/decide/gate.js';
+import * as triageModule from '../src/decide/triage.js';
+import { loadProfile } from '../src/profile/profile.js';
+import { writeProfile } from './profile/fixtures.js';
+import { parseItemFields } from '../src/item.js';
 import * as decideModule from '../src/decide/decide.js';
 import type { RedisClientType } from 'redis';
 
@@ -443,6 +446,8 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
   let groupName: string;
   let dir: string;
   let db: ReturnType<typeof openLedger>;
+  let profileRoot: string;
+  let profile: ReturnType<typeof loadProfile>;
 
   beforeEach(async () => {
     client = createRedisClient();
@@ -453,8 +458,17 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
     db = openLedger(path.join(dir, 'test.db'));
     delete process.env.EXECUTOR_TRADING_HALTED;
 
-    vi.spyOn(synopsisModule, 'synopsize').mockResolvedValue('The unemployment rate fell to 3.9%.');
-    vi.spyOn(verifyModule, 'verifySynopsis').mockResolvedValue({ supported: true, note: 'faithful' });
+    profileRoot = mkdtempSync(path.join(tmpdir(), 'main-wiring-profile-'));
+    writeProfile(profileRoot, 'kxaprpotus', {
+      profile: {
+        seriesTicker: 'KXAPRPOTUS', marketStructure: 'band', magnitudeUnit: 'pts', maxMagnitude: 10,
+        title: "Will the President's approval rating be above the strike according to RealClearPolitics?",
+        decideContext: "You are assessing a news item for its likely effect on the U.S. President's approval rating, as measured by RealClearPolitics's polling average.",
+      },
+    });
+    profile = loadProfile('kxaprpotus', profileRoot);
+    vi.spyOn(gateModule, 'runGate').mockResolvedValue({ relevant: true, reason: 'relevant' });
+    vi.spyOn(triageModule, 'triageItem').mockResolvedValue({ verdict: 'escalate', reason: 'meaningful' });
     vi.spyOn(decideModule, 'decideTrade').mockResolvedValue({
       direction: 'up',
       magnitudePts: 0.3,
@@ -485,6 +499,7 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
     await client.quit();
     db.close();
     rmSync(dir, { recursive: true, force: true });
+    rmSync(profileRoot, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
@@ -502,6 +517,8 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       db,
       fetchLadder,
       kalshiClient: stubKalshiClient(),
+      profile,
+      fetchArticle: async () => null,
     });
 
     const controller = new AbortController();
@@ -555,6 +572,8 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       db,
       fetchLadder,
       kalshiClient: stubKalshiClient(),
+      profile,
+      fetchArticle: async () => null,
     });
 
     const controller = new AbortController();
@@ -569,8 +588,20 @@ describe('makeOnItem wiring (real Redis entry -> decision pipeline -> real ledge
       controller.signal
     );
 
-    expect(synopsisModule.synopsize).not.toHaveBeenCalled();
+    expect(gateModule.runGate).not.toHaveBeenCalled();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM decisions`).get()).toEqual({ n: 0 });
+  });
+
+  it('routes an entry from a direct source to the pipeline even though no keyphrase matched', async () => {
+    const direct = { ...profile, profile: { ...profile.profile, directSources: ['bbc_world'] } };
+    const calls: string[] = [];
+    vi.spyOn(triageModule, 'triageItem').mockImplementation(async () => { calls.push('triage'); return { verdict: 'skip', reason: 'test' }; });
+    const parsed = parseItemFields({ json: JSON.stringify(realisticPayload({ source_id: 'bbc_world' })) });
+    if (!parsed.ok) throw new Error('fixture payload must parse');
+    const onItem = makeOnItem({ anthropicClient: new Anthropic({ apiKey: 'x' }), ollamaClient: createOllamaClient(), db, fetchLadder: async () => stubLadder(), kalshiClient: {} as any, profile: direct, fetchArticle: async () => null });
+    await onItem({ ok: true, entry: { id: '1-0', fields: {} }, item: parsed.item, matchedPhrases: [] });
+    expect(calls).toEqual(['triage']);
+    expect(gateModule.runGate).not.toHaveBeenCalled();
   });
 
   /**
