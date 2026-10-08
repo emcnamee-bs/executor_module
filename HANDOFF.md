@@ -525,11 +525,12 @@ fail the boot.
 
 One limitation of that durable state itself: `process_lifecycle` is a single
 global row with no per-instance identity, so unclean-exit detection assumes ONE
-process instance per `data/decisions.db` — an assumption nothing currently
-enforces (`EXECMOD_CONSUMER_NAME` exists precisely because a second consumer is
-at least contemplated). If two processes ever share one ledger file, one
-process's clean shutdown can mask the other's crash, and one process's crash can
-fire a false unclean-exit alert on an unrelated instance's next boot.
+process instance per ledger. That assumption is now enforced: each process
+holds `<ledger>.lock` for its lifetime, and a second process on the same ledger
+refuses to start (§5a.5, "One process per ledger"). Were two processes ever to share
+one ledger file anyway, one process's clean shutdown could mask the other's crash,
+and one process's crash could fire a false unclean-exit alert on the other's next
+boot.
 
 ### 5a.2c Trade pacing limit (added in slice 9)
 

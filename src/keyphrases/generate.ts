@@ -167,11 +167,11 @@ export async function runGenerator(
   return { success: true, count: refined.length };
 }
 
-// Intended schedule (NOT installed by this slice -- see
-// docs/superpowers/specs/2026-08-24-keyphrase-matching-design.md):
-//   Daily via cron, e.g.:
-//     0 6 * * * cd /path/to/executor_module && npm run generate-keyphrases >> logs/keyphrases.log 2>&1
-//   Or an equivalent systemd timer unit calling the same command once a day.
+// Legacy entry point for the pre-profile keyphrase list (data/keyphrases.json). The
+// `generate-keyphrases` npm script was removed: no runtime path reads that file any more
+// (the live trade's list is the committed trades/kxaprpotus/keyphrases.json, and new
+// profiles get theirs from `npm run build-trade`). Running this module directly still
+// rewrites data/keyphrases.json; test/profile/livePinned.test.ts would then flag the drift.
 async function main(): Promise<void> {
   const client = new Anthropic();
   const result = await runGenerator(client, DEFAULT_KEYPHRASES_PATH);
