@@ -15,7 +15,8 @@ import {
 import { sendAlert } from './alert.js';
 import { fetchActiveLadder } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
-import { createOllamaClient, type OllamaClient } from './decide/ollamaClient.js';
+import type { OllamaClient } from './decide/ollamaClient.js';
+import { buildGateClient } from './decide/gateProvider.js';
 import { KalshiClient } from './execute/kalshiClient.js';
 import { reconcilePendingOrders } from './execute/order.js';
 import { startReconciliationTimer } from './execute/reconcileOpenPositions.js';
@@ -90,6 +91,8 @@ export interface OnItemDeps {
   fetchArticle: typeof fetchArticle;
   /** From prepareStartup (resolvePaperLowTier); the pipeline re-checks dry-run per item. */
   paperLowTier?: boolean;
+  gateProvider?: 'ollama' | 'anthropic';
+  gateModel?: string;
 }
 
 /**
@@ -135,7 +138,7 @@ export async function main(): Promise<void> {
 
   const anthropicClient = new Anthropic();
   const db = openLedger(ledgerPath);
-  const ollamaClient = createOllamaClient(undefined, db);
+  const gateWiring = buildGateClient(startup.gate, anthropicClient, db);
   // Isolated like every other auxiliary/observability write in this codebase
   // (checkFailedOrdersSignal, checkDivergencesSignal, recordKalshiError): a
   // diagnostic marker failing to write must never stop the whole system from
@@ -185,7 +188,7 @@ export async function main(): Promise<void> {
     startup.consumerOptions,
     startup.compiledPhrases,
     makeOnItem({
-      anthropicClient, ollamaClient, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle,
+      anthropicClient, ollamaClient: gateWiring.client, gateProvider: gateWiring.provider, gateModel: gateWiring.model, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle,
       paperLowTier: startup.paperLowTier,
     }),
     controller.signal

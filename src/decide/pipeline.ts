@@ -46,6 +46,9 @@ export interface PipelineDeps {
    * below, so a live-capable process can never relax even if startup were bypassed.
    */
   paperLowTier?: boolean;
+  /** Which provider/model backs ollamaClient (see buildGateClient). Unset = the profile's local gate. */
+  gateProvider?: 'ollama' | 'anthropic';
+  gateModel?: string;
 }
 
 /**
@@ -182,7 +185,7 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       let gate;
       try {
         gate = await runGate(
-          { ollama: ollamaClient, db, profile: loaded },
+          { ollama: ollamaClient, db, profile: loaded, provider: deps.gateProvider, model: deps.gateModel },
           { itemId: item.item_id, excerptText: articleText, excerptSource, tripwireHit }
         );
       } catch (err) {

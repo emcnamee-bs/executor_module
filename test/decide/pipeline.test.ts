@@ -826,6 +826,20 @@ describe('runDecisionPipeline', () => {
     expect(gateInput.excerptText).toContain('BLS reports unemployment rate fell to 3.9%');
   });
 
+  it('hands no gate provider or model to runGate by default, i.e. the profile local gate', async () => {
+    await runDecisionPipeline(baseItem({ item_id: 'gate-default' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient() });
+    const [gateDeps] = (gateModule.runGate as any).mock.calls[0];
+    expect(gateDeps.provider).toBeUndefined();
+    expect(gateDeps.model).toBeUndefined();
+  });
+
+  it('hands the gate provider and model from the pipeline deps to runGate', async () => {
+    await runDecisionPipeline(baseItem({ item_id: 'gate-haiku' }), { anthropicClient: client, ollamaClient, db, fetchLadder: vi.fn().mockResolvedValue(stubLadder()), profile: TEST_PROFILE, fetchArticle: stubFetchArticle, kalshiClient: stubKalshiClient(), gateProvider: 'anthropic', gateModel: 'claude-haiku-5-5' });
+    const [gateDeps] = (gateModule.runGate as any).mock.calls[0];
+    expect(gateDeps.provider).toBe('anthropic');
+    expect(gateDeps.model).toBe('claude-haiku-5-5');
+  });
+
   it('records a skip carrying the triage reason when Sonnet triage says skip, before the ladder fetch', async () => {
     vi.spyOn(triageModule, 'triageItem').mockResolvedValue({ verdict: 'skip', reason: 'priced in' });
     const fetchLadder = vi.fn().mockResolvedValue(stubLadder());

@@ -264,6 +264,34 @@ describe('prepareStartup (main() startup wiring)', () => {
     });
   });
 
+  describe('gate provider (GATE_PROVIDER)', () => {
+    beforeEach(() => writeProfile(trades, 'kxaaagasw'));
+    const neverFetch = (async () => { throw new Error('Ollama must not be asked'); }) as unknown as typeof fetch;
+
+    it('defaults to the local Ollama gate and still checks the model is pulled', async () => {
+      const s = await start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true' });
+      expect(s.gate.provider).toBe('ollama');
+      await expect(
+        start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true' }, tagsFetch(['other']))
+      ).rejects.toThrow(/gate model .* is not available/);
+    });
+
+    it('GATE_PROVIDER=anthropic does not need Ollama at all, and returns the Claude gate config', async () => {
+      const s = await start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', GATE_PROVIDER: 'anthropic' }, neverFetch);
+      expect(s.gate).toMatchObject({ provider: 'anthropic', anthropicModel: 'claude-haiku-5-5' });
+      expect(s.gate.dailyUsdCap).toBeGreaterThan(0);
+    });
+
+    it('refuses an unknown provider before anything else runs', async () => {
+      await expect(start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', GATE_PROVIDER: 'openai' })).rejects.toThrow(/GATE_PROVIDER/);
+    });
+
+    it('logs which provider and model the gate runs on, so a mis-set env is visible at start', async () => {
+      await start({ EXECUTOR_TRADE: 'kxaaagasw', KALSHI_DRY_RUN: 'true', GATE_PROVIDER: 'anthropic' }, neverFetch);
+      expect(logs.join('\n')).toMatch(/gateProvider=anthropic gateModel=claude-haiku-5-5/);
+    });
+  });
+
   describe('single instance per ledger (I2)', () => {
     it('a second start on the same ledger is refused while the first holds it, and allowed after release', async () => {
       writeProfile(trades, 'kxaaagasw');

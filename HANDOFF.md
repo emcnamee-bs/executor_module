@@ -656,6 +656,27 @@ true` on materially distorted synopses). That is why the local model only ever s
 items **in**. Its "relevant" verdict passes an item to Sonnet triage and is never a
 reason to trade.
 
+### 5a.4a Claude-backed gate (`GATE_PROVIDER=anthropic`, optional)
+
+The relevance gate can run on Claude Haiku 5.5 instead of local Ollama. Default is still the local
+gate; a unit opts in with its own env (drop-in `deploy/mini-mac/executor-module@.service.d/haiku-gate.conf.example`),
+so the live unit is untouched until someone does it on purpose.
+
+- **Why:** the 2026-10-11 replay of 241 real gate items (`~/gate-bench/bench_haiku.cjs`, results
+  `haiku55-*.jsonl`): median 1.5 s vs 158 s on mini-mac CPU, 0 errors vs 13% timeouts, kept 85/86 items Sonnet later
+  escalated, held 10/10 prompt-injection probes, passes ~73% of items vs qwen's 55% (so more Sonnet triage calls).
+  Cost ~$0.0002 per call (~1,475 input tokens).
+- **Env:** `GATE_PROVIDER` (`ollama` default | `anthropic`), `GATE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`; must have
+  a price in `anthropicGateClient.ts`), `GATE_DAILY_USD_CAP` (default 0.50 per trade per UTC day).
+- **No `temperature`:** Haiku 5.5 rejects non-default sampling, so the local gate's `temperature: 0` is not forwarded;
+  the call uses `effort: medium` and a JSON-schema `output_config` (same as the Sonnet stages).
+- **Failure handling is unchanged:** an API error, a refusal or a truncation is recorded in `ollama_errors` (the same
+  five-in-15-minutes breaker). Over the daily spend cap the client stops calling, trips that same breaker with a
+  `gate daily spend cap reached` reason (Slack alert) and the item is skipped as `gate error:`. Clear with
+  `npm run clear-breaker` after raising the cap or at the next UTC day.
+- **Ledger:** gate rows are written with `provider='anthropic'` and the real model and token counts.
+- **Roll back:** delete the unit's `haiku-gate.conf`, `systemctl --user daemon-reload`, restart. Nothing else to undo.
+
 ### 5a.5 Trade profiles and paper trading
 
 **What a profile is.** Everything market-specific lives in `trades/<name>/` (profile,

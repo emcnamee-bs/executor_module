@@ -12,6 +12,7 @@ import {
 } from './profile/profile.js';
 import { loadIipSourceIds, assertDirectSourcesKnown } from './profile/iipSources.js';
 import { assertOllamaModelAvailable, DEFAULT_OLLAMA_BASE_URL } from './decide/ollamaClient.js';
+import { resolveGateConfig, type GateConfig } from './decide/anthropicGateClient.js';
 import { acquireLedgerLock, type LedgerLock } from './decide/ledgerLock.js';
 import { setAlertTrade } from './alert.js';
 
@@ -117,6 +118,8 @@ export interface Startup {
   halted: boolean;
   /** EXECUTOR_PAPER_LOW_TIER, resolved and validated by resolvePaperLowTier. */
   paperLowTier: boolean;
+  /** GATE_PROVIDER and friends, resolved and validated by resolveGateConfig (default: the local Ollama gate). */
+  gate: GateConfig;
   lock: LedgerLock;
 }
 
@@ -153,6 +156,7 @@ export async function prepareStartup(
   assertLiveTradeIdentity(profile, env);
   assertLiveLedgerOwnership(profile, env);
   const paperLowTier = resolvePaperLowTier(profile, env);
+  const gate = resolveGateConfig(env);
   const ledgerPath = resolveLedgerPath(profile, repoRoot);
   // Refuses a LIVE start on a ledger file that does not exist (mis-pinned profile guard).
   assertLedgerStartAllowed(ledgerPath, env, deps.exists ?? fs.existsSync);
@@ -166,7 +170,10 @@ export async function prepareStartup(
     consumerName: env.EXECMOD_CONSUMER_NAME ?? `${profile.consumerGroup}-primary`,
     startId: '$',
   };
-  await assertOllamaModelAvailable(env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL, profile.gateModel, deps.fetchImpl);
+  // A Claude-backed gate needs no Ollama, so the model-pulled check applies only to the local gate.
+  if (gate.provider === 'ollama') {
+    await assertOllamaModelAvailable(env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL, profile.gateModel, deps.fetchImpl);
+  }
 
   // Last, after every refusal: a refused start leaves no lock behind.
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
@@ -178,7 +185,7 @@ export async function prepareStartup(
   // shared env file is indistinguishable at runtime from a healthy quiet pipeline.
   log(
     `[profile] trade=${profile.name} series=${profile.seriesTicker} ` +
-      `structure=${profile.marketStructure} gateModel=${profile.gateModel} ` +
+      `structure=${profile.marketStructure} gateProvider=${gate.provider} gateModel=${gate.provider === 'anthropic' ? gate.anthropicModel : profile.gateModel} ` +
       `ledger=${ledgerPath} group=${profile.consumerGroup} ` +
       `bankSha=${loaded.bankSha.slice(0, 12)} keyphrases=${loaded.keyphrases.length} ` +
       `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted} lowTier=${paperLowTier}`
@@ -192,5 +199,5 @@ export async function prepareStartup(
     );
   }
 
-  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, lock };
+  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, gate, lock };
 }
