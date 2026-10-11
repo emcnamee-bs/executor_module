@@ -1,0 +1,17 @@
+{
+  "name": "kxtrumpufc",
+  "seriesTicker": "KXTRUMPUFC",
+  "title": "Will Donald Trump attend the next scheduled UFC event?",
+  "settlement": "The market resolves YES if Donald Trump attends the specified UFC event, with attendance confirmed by any Source Agency reporting (including his own social media posts); brief or partial appearances count as attendance. If no such confirmation occurs, the market resolves NO.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability (in percentage points) that Donald Trump will be confirmed as attending a specific upcoming UFC event; the market settles YES if any credible source (including his own social media) reports him present, even briefly, and NO otherwise.",
+  "directSources": [],
+  "marketStructure": "binary",
+  "magnitudeUnit": "pts",
+  "maxMagnitude": 100,
+  "ledgerPath": "data/kxtrumpufc/decisions.db",
+  "consumerGroup": "execmod-kxtrumpufc",
+  "generatedAt": "2026-10-11T22:34:49.002Z",
+  "generatorModel": "claude-sonnet-5"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "kxeoweek",
+  "seriesTicker": "KXEOWEEK",
+  "title": "How many Executive Orders will Trump sign this week?",
+  "settlement": "The market resolves YES if the President signs more than a given number of Executive Orders during the specified weekly period, as recorded by signing date in the Federal Register. All numbered, published Executive Orders count, including those later revoked or amended.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the count of numbered Executive Orders Trump signs during the current weekly window, as determined by the Federal Register signing date. Resolution depends solely on official EO count for that week, not on policy content or impact.",
+  "directSources": [
+    "whitehouse_presidential_actions"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "count",
+  "maxMagnitude": 10,
+  "ledgerPath": "data/kxeoweek/decisions.db",
+  "consumerGroup": "execmod-kxeoweek",
+  "generatedAt": "2026-10-11T22:31:31.860Z",
+  "generatorModel": "claude-sonnet-5"
+}

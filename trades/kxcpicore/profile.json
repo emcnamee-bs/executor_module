@@ -1,19 +1,19 @@
 {
   "name": "kxcpicore",
   "seriesTicker": "KXCPICORE",
-  "title": "Will September 2026 core CPI (seasonally adjusted, m/m) increase above the threshold?",
-  "settlement": "Resolves YES if the seasonally adjusted CPI for All Urban Consumers: All Items Less Food and Energy for September 2026, as published by BLS, increases by above the stated threshold (e.g., 1.0%, 0.9%, etc.). The value used is the single-decimal month-over-month percent change reported by BLS; a government shutdown delaying the release extends the expiration date.",
+  "title": "Will core CPI (month-over-month) for the reference month come in above a given threshold?",
+  "settlement": "Resolves YES if the seasonally adjusted Consumer Price Index for All Urban Consumers: All Items less Food and Energy for the reference month, as published by the Bureau of Labor Statistics, increases by more than the stated threshold versus the prior month. The Underlying value used is the single-decimal percentage change reported by BLS. If a federal government shutdown delays the data, the expiration is extended to the earlier of the actual release date or six months after the shutdown ends.",
   "gateModel": "qwen2.5:7b-instruct-q4_K_M",
   "gateKeepAlive": "10m",
-  "decideContext": "You are estimating how a news item shifts expectations for the seasonally adjusted month-over-month percent change in core CPI (all items less food & energy) for September 2026, as it will be reported by BLS to one decimal place; the market resolves YES if that printed value is above the strike threshold.",
+  "decideContext": "You are estimating how a news item shifts expectations for the BLS core CPI (All Items less Food and Energy) seasonally adjusted month-over-month percentage change for the reference month; the market resolves YES if that single-decimal print exceeds the strike threshold, so focus on signals about inflation momentum excluding food and energy, not headline CPI.",
   "directSources": [
     "bls_releases"
   ],
   "marketStructure": "threshold",
-  "magnitudeUnit": "% (monthly pts)",
+  "magnitudeUnit": "%",
   "maxMagnitude": 0.5,
   "ledgerPath": "data/kxcpicore/decisions.db",
   "consumerGroup": "execmod-kxcpicore",
-  "generatedAt": "2026-10-11T22:14:13.747Z",
+  "generatedAt": "2026-10-11T22:31:31.830Z",
   "generatorModel": "claude-sonnet-5"
 }

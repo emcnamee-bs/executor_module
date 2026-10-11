@@ -1,13 +1,13 @@
-TRADE: Whether September 2026 core CPI (seasonally adjusted, month-over-month) prints above a given threshold (e.g. 0.3%, 0.5%, 1.0%).
-SETTLES ON: BLS's seasonally adjusted CPI-U less food & energy, month-over-month % change for September 2026, reported to one decimal place; market resolves YES if that figure is above the strike.
+TRADE: Monthly core CPI (seasonally adjusted, m/m % change) coming in above a stated threshold.
+SETTLES ON: BLS Consumer Price Index release for the reference month; single-decimal seasonally adjusted m/m % change for All Items less Food and Energy; YES if above the listed strike.
 MOVES THE PRICE:
-- Shelter/rent costs: owners' equivalent rent trends, apartment vacancy rates, rent growth deceleration/acceleration reports
-- Services inflation: wage growth data, healthcare cost indices, insurance premium changes, airfare and travel service prices
-- Goods prices ex food/energy: vehicle prices (new/used), apparel, furniture, tariff-driven import cost pass-through
-- Monetary policy and Fed commentary: Fed rate decisions, FOMC statements on inflation outlook, quantitative tightening pace
-- Scheduled data releases: prior CPI reports, PCE inflation data, PPI releases, employment cost index, average hourly earnings
-- Supply chain/geopolitical shocks: tariffs, trade war escalation, shipping disruptions, commodity input costs affecting core goods
-- Consumer demand indicators: retail sales strength, consumer spending surveys, credit card spending data
-- Government shutdown risk: BLS funding/staffing disruptions that could delay data collection or release timing
-SETTLEMENT-SENSITIVE FACTS: BLS rounds to one decimal place so a print of 0.35% rounds to 0.3% or 0.4% depending on underlying precision, revisions to prior months' seasonal factors can shift the reported month-over-month change, BLS may revise methodology or weights annually (e.g. January updates) affecting comparability, government shutdowns can delay or suspend data collection entirely pushing the release date and extending market expiration, seasonal adjustment factors for September can cause volatility distinct from raw unadjusted trends.
-IGNORE: headline CPI (includes food/energy) distinct from core, year-over-year CPI figures (not the m/m measure used here), PCE price index (different inflation gauge the Fed prefers), stock market reactions to CPI prints (market sentiment, not the data itself), unemployment rate or jobs reports unless directly tied to wage-driven core inflation components.
+- Shelter/housing costs: owners' equivalent rent trends, rent growth deceleration/acceleration, housing vacancy data
+- Services inflation: wage growth, labor cost pass-through, healthcare services prices, insurance costs, airfares
+- Goods prices: tariffs on imported goods, supply chain disruptions, auto prices (new/used), apparel costs, semiconductor/tech component costs
+- Monetary policy and Fed signals: Fed rate decisions, FOMC statements on inflation outlook, quantitative tightening pace
+- Prior CPI/PCE releases and trend momentum: recent core CPI prints, core PCE readings, inflation expectations surveys (University of Michigan, NY Fed)
+- Scheduled data releases: BLS release calendar, PPI releases (upstream cost pressure), employment cost index, average hourly earnings
+- Geopolitics/trade policy: new tariff announcements, trade deal changes, import restrictions, supply chain reshoring costs
+- Government shutdown risk: data collection disruption, BLS staffing/funding issues affecting survey completeness or release timing
+SETTLEMENT-SENSITIVE FACTS: BLS rounds to one decimal place so close calls near a threshold boundary are rounding-sensitive, core CPI excludes volatile food and energy categories so oil/gas price swings and grocery price shocks do NOT directly move this number, BLS occasionally revises seasonal adjustment factors which can shift prior-month comparisons, shutdown-related delays push the resolution window out rather than invalidating the market, methodology changes (e.g., OER imputation updates) can cause one-time jumps unrelated to current economic conditions.
+IGNORE: headline CPI driven by gasoline/energy price swings, food/grocery price spikes from weather or agricultural supply shocks, crude oil price moves and OPEC decisions, stock market volatility and equity earnings reports, unemployment rate changes absent wage/cost pass-through implications.
