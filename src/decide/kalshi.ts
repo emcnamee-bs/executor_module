@@ -23,7 +23,8 @@ export interface BandMarket {
 
 export interface ActiveLadder {
   eventTicker: string;
-  strikeDate: string;
+  /** Null when Kalshi leaves strike_date empty (weekly/rolling series); only echoed into the decision prompt. */
+  strikeDate: string | null;
   bands: BandMarket[];
 }
 
@@ -34,7 +35,7 @@ export interface MarketStatus {
 
 interface KalshiEvent {
   event_ticker: string;
-  strike_date: string;
+  strike_date?: string | null;
 }
 
 interface KalshiEventsResponse {
@@ -88,7 +89,8 @@ export async function fetchActiveLadder(seriesTicker: string, db?: Database.Data
       return null;
     }
 
-    const active = [...eventsBody.events].sort((a, b) => a.strike_date.localeCompare(b.strike_date))[0];
+    // Kalshi leaves strike_date null on many weekly/rolling series; an undated event must sort, not throw.
+    const active = [...eventsBody.events].sort((a, b) => (a.strike_date ?? '').localeCompare(b.strike_date ?? ''))[0];
 
     const marketsUrl = `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(active.event_ticker)}&status=open`;
     const marketsRes = await fetch(marketsUrl);
@@ -109,7 +111,7 @@ export async function fetchActiveLadder(seriesTicker: string, db?: Database.Data
       yesBidSizeContracts: sizeContracts(m.yes_bid_size_fp),
     }));
 
-    return { eventTicker: active.event_ticker, strikeDate: active.strike_date, bands };
+    return { eventTicker: active.event_ticker, strikeDate: active.strike_date ?? null, bands };
   } catch (err) {
     if (db) {
       const message = err instanceof Error ? err.message : String(err);
