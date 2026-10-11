@@ -1,0 +1,17 @@
+{
+  "name": "kxinsurrection",
+  "seriesTicker": "KXINSURRECTION",
+  "title": "Will Trump invoke the Insurrection Act before the deadline?",
+  "settlement": "This market resolves to Yes if the President of the United States has invoked the Insurrection Act to deploy the U.S. military and/or the federalized National Guard within the United States before the stated deadline date. It resolves No if no such invocation occurs before that date.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating how much a news item shifts the implied probability (in percentage points) that Trump will formally invoke the Insurrection Act before the market's deadline. Resolution requires an actual legal invocation triggering military/National Guard domestic deployment, not just threats or unrelated deployments.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "percentage points",
+  "maxMagnitude": 40,
+  "ledgerPath": "data/kxinsurrection/decisions.db",
+  "consumerGroup": "execmod-kxinsurrection",
+  "generatedAt": "2026-10-11T22:14:19.890Z",
+  "generatorModel": "claude-sonnet-5"
+}

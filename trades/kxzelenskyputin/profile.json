@@ -1,0 +1,17 @@
+{
+  "name": "kxzelenskyputin",
+  "seriesTicker": "KXZELENSKYPUTIN",
+  "title": "Will Zelenskyy and Putin speak (meet or call) before the deadline?",
+  "settlement": "If Volodymyr Zelenskyy and Vladimir Putin meet or speak directly in real time (in person or by call) before the deadline date, the market resolves Yes. Mere presence at the same event without direct interaction, written correspondence, intermediaries, or cancelled/near-miss meetings do not count.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability (in percentage points) that a direct real-time Zelenskyy-Putin meeting or call happens before the stated deadline; the market resolves YES only on a confirmed direct interaction, not proximity, intermediary talks, or cancelled plans.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "points",
+  "maxMagnitude": 35,
+  "ledgerPath": "data/kxzelenskyputin/decisions.db",
+  "consumerGroup": "execmod-kxzelenskyputin",
+  "generatedAt": "2026-10-11T22:20:03.845Z",
+  "generatorModel": "claude-sonnet-5"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "kxusppiyoy",
+  "seriesTicker": "KXUSPPIYOY",
+  "title": "Will PPI YoY (final demand) for September 2026 be above X%?",
+  "settlement": "If the year-over-year percent change in the US Producer Price Index for final demand for September 2026 is above the threshold, the market resolves Yes. Settlement is based on the official BLS PPI release for September 2026.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Analyst is estimating the likely year-over-year percent change in the headline PPI for final demand (not core, not MoM) for September 2026, as reported by the Bureau of Labor Statistics in its monthly PPI release (typically published in mid-October 2026); news should be assessed for how it shifts expectations for this specific YoY figure versus the listed threshold.",
+  "directSources": [
+    "bls_releases"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "%",
+  "maxMagnitude": 1.5,
+  "ledgerPath": "data/kxusppiyoy/decisions.db",
+  "consumerGroup": "execmod-kxusppiyoy",
+  "generatedAt": "2026-10-11T22:15:11.070Z",
+  "generatorModel": "claude-sonnet-5"
+}

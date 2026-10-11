@@ -1,0 +1,19 @@
+{
+  "name": "kxnatgasmon",
+  "seriesTicker": "KXNATGASMON",
+  "title": "Natural gas price on October 30, 2026 at 5:00 PM EDT?",
+  "settlement": "If the close price of the 1-minute candlestick for natural gas on October 30, 2026 at 5:00 PM EDT is above the strike (e.g. 5.899 USD/MMBtu), the market resolves Yes. Settlement uses the price at the end of the 4:59-5:00 PM EDT candle, rounded to 3 decimals; if unavailable, the most recent published price is used.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Estimate the effect of the news on the near-term natural gas futures price (USD/MMBtu) at the specific 5:00 PM EDT snapshot on October 30, 2026; the market resolves based on whether that single price point is above or below each listed strike.",
+  "directSources": [
+    "eia_today_in_energy"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "USD/MMBtu",
+  "maxMagnitude": 0.5,
+  "ledgerPath": "data/kxnatgasmon/decisions.db",
+  "consumerGroup": "execmod-kxnatgasmon",
+  "generatedAt": "2026-10-11T22:12:24.751Z",
+  "generatorModel": "claude-sonnet-5"
+}
