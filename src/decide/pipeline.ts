@@ -25,11 +25,26 @@ import { evaluateSizing, evaluateBinarySizing, type SizingResult } from './sizin
 import { triageItem } from './triage.js';
 import { decideTrade } from './decide.js';
 import { makePrepare, type PreparedItem } from './prepare.js';
+import { runExitReview, type ExitReviewDeps } from './exitPipeline.js';
+import { hasSellTrigger } from '../paper/exits.js';
 import { placeOrder, deriveClientOrderId } from '../execute/order.js';
 import { positionForTicker, type KalshiClient } from '../execute/kalshiClient.js';
 import { fetchArticle } from '../fetch/excerpt.js';
 import { recordPaperPosition, hasPaperPosition, paperExposureCents, PAPER_CAPS } from '../paper/paper.js';
 import type { LoadedProfile } from '../profile/profile.js';
+
+export type ExitWiring = Pick<
+  ExitReviewDeps,
+  'model' | 'exitFeeCents' | 'dailyUsdCap' | 'fetchLadderForEvent' | 'fetchTrajectory' | 'onFill' | 'now' | 'alert'
+>;
+
+/**
+ * Defence in depth, like lowTierRelaxationAllowed: the startup flag alone is never enough. The
+ * exit path needs KALSHI_DRY_RUN exactly "true" and EXECUTOR_LIVE_TRADE absent, read here at call time.
+ */
+function exitReviewAllowed(deps: Pick<PipelineDeps, 'exit'>): boolean {
+  return deps.exit !== undefined && process.env.KALSHI_DRY_RUN === 'true' && process.env.EXECUTOR_LIVE_TRADE === undefined;
+}
 
 export interface PipelineDeps {
   anthropicClient: Anthropic;
@@ -48,6 +63,8 @@ export interface PipelineDeps {
   /** Which provider/model backs ollamaClient (see buildGateClient). Unset = the profile's local gate. */
   gateProvider?: 'ollama' | 'anthropic';
   gateModel?: string;
+  /** Exit-review wiring. Undefined = off. Honoured only on a dry-run, non-live process (re-checked per item). */
+  exit?: ExitWiring;
 }
 
 /**
@@ -95,7 +112,22 @@ function skipRecord(
 
 export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promise<void> {
   const isDirect = deps.profile.profile.directSources.includes(item.source_id);
-  await runEntryPipeline(item, deps, makePrepare(item, deps, isDirect));
+  const prep = makePrepare(item, deps, isDirect);
+  // The exit review starts at once and runs IN PARALLEL with the entry path. Entry-only blockers
+  // (kill switch, circuit breaker, rumor rung, rate limit, "story already has a position") stop new
+  // entries inside runEntryPipeline; they must never stop a risk-reducing review. A redelivered
+  // item (already has a decision row) was fully processed once, so it is not reviewed again.
+  const exitRun =
+    exitReviewAllowed(deps) && !hasDecisionForItem(deps.db, item.item_id)
+      ? runExitReview(item, { anthropicClient: deps.anthropicClient, db: deps.db, profile: deps.profile, ...deps.exit }, prep).catch((err) =>
+          console.error(`[exit-review] error processing item=${item.item_id}:`, err)
+        )
+      : Promise.resolve();
+  try {
+    await runEntryPipeline(item, deps, prep);
+  } finally {
+    await exitRun;
+  }
 }
 
 async function runEntryPipeline(item: Item, deps: PipelineDeps, prep: () => Promise<PreparedItem>): Promise<void> {
@@ -295,6 +327,15 @@ async function runEntryPipeline(item: Item, deps: PipelineDeps, prep: () => Prom
     const paperSizing = paper
       ? evaluateSizing({ ...sizingBase, currentTotalExposureCents: paperExposureCents(db, ladder.eventTicker), caps: PAPER_CAPS })
       : null;
+    // A position in this market has already had an exit trigger: do not buy it back on paper.
+    if (paperSizing?.wouldTrade && paperSizing.marketTicker !== null && hasSellTrigger(db, paperSizing.marketTicker)) {
+      record(
+        skipRecord(item, `exit trigger already fired on ${paperSizing.marketTicker}; not re-entering`, {
+          rung, eventTicker: ladder.eventTicker, direction: decision.direction, magnitudePts: decision.magnitudePts, orderStatus: 'resolved',
+        })
+      );
+      return;
+    }
     if (paperSizing?.wouldTrade) paperRecord(paperSizing);
 
     // A low-tier-relaxed item is research data only: it stops at the paper row and
