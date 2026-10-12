@@ -90,6 +90,24 @@ describe('pending exits', () => {
     expect(await runPendingExits({ db, fetchLadderForEvent: ladderOf() })).toBe(1);
   });
 
+  it('startExitTimer keeps running passes each interval until stopped, and stop() really stops them', async () => {
+    vi.useFakeTimers();
+    triggered('p1');
+    const noBid = thresholdBands(1);
+    noBid[2] = thr(94, 50, 1, { yesBidCents: null }); // never fills, so every pass fetches again
+    const f = vi.fn(ladderOf(noBid));
+    const t = startExitTimer({ db, fetchLadderForEvent: f }, 1000);
+    await vi.advanceTimersByTimeAsync(2000);
+    const running = f.mock.calls.length;
+    expect(running).toBeGreaterThanOrEqual(2); // the timer is running: a pass per interval
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(f.mock.calls.length).toBeGreaterThan(running);
+    t.stop();
+    const atStop = f.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(f.mock.calls.length).toBe(atStop); // no pass after stop()
+  });
+
   it('startExitTimer runs a pass each interval, never overlaps, and stops', async () => {
     vi.useFakeTimers();
     triggered('p1');
