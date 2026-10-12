@@ -234,6 +234,41 @@ CREATE TABLE IF NOT EXISTS paper_positions (
   pnl_cents INTEGER,                 -- GROSS of fees, per project convention
   CHECK (side IS NULL OR (market_ticker IS NOT NULL AND contracts > 0 AND entry_price_cents IS NOT NULL))
 );
+
+-- Exit review (paper only, see docs/superpowers/specs/2026-10-12-exit-review-design.md).
+-- One row per (news item, held position) review, whether the verdict is sell, hold or error.
+CREATE TABLE IF NOT EXISTS paper_exit_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  trade TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  position_id INTEGER NOT NULL REFERENCES paper_positions(id),
+  shift REAL, confidence REAL, reason TEXT,
+  mid_cents REAL, fair_after_cents REAL, loss_cents REAL, exit_cost_cents REAL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('sell','hold','error')),
+  verdict_reason TEXT,
+  lag_json TEXT,
+  UNIQUE (item_id, position_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_exit_reviews_position ON paper_exit_reviews(position_id);
+
+-- Simulated exit fills and exit-state markers. A fill (filled/partial) has contracts > 0 and a
+-- price; unsellable / held_to_settlement are markers (contracts 0, no price, pnl 0).
+CREATE TABLE IF NOT EXISTS paper_exits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  position_id INTEGER NOT NULL REFERENCES paper_positions(id),
+  review_id INTEGER NOT NULL REFERENCES paper_exit_reviews(id),
+  contracts INTEGER NOT NULL DEFAULT 0 CHECK (contracts >= 0),
+  price_cents INTEGER CHECK (price_cents IS NULL OR (price_cents > 0 AND price_cents <= 100)),
+  pnl_cents INTEGER NOT NULL DEFAULT 0,   -- GROSS of fees
+  status TEXT NOT NULL CHECK (status IN ('filled','partial','unsellable','held_to_settlement')),
+  filled_at TEXT,
+  late INTEGER,
+  late_json TEXT,
+  CHECK ((status IN ('filled','partial')) = (contracts > 0 AND price_cents IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_paper_exits_position ON paper_exits(position_id);
 `;
 
 /**

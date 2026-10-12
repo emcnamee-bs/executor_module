@@ -1,0 +1,17 @@
+{
+  "name": "kxbalancepowercombo",
+  "seriesTicker": "KXBALANCEPOWERCOMBO",
+  "title": "Will Republicans control both the House and Senate after the 2026 midterms?",
+  "settlement": "This market resolves YES only if Republicans win control of both the House and the Senate in the 2026 midterm elections, per Kalshi's CONTROL rulesets for each chamber. If either chamber's control resolves No or becomes impossible, the whole contract resolves No.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Estimate the probability that Republicans achieve a full Congressional sweep (House + Senate) in the 2026 midterms; price moves with polling, special election results, redistricting, retirements, fundraising, and macro/political conditions affecting the generic ballot.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "¢",
+  "maxMagnitude": 15,
+  "ledgerPath": "data/kxbalancepowercombo/decisions.db",
+  "consumerGroup": "execmod-kxbalancepowercombo",
+  "generatedAt": "2026-10-11T22:20:03.858Z",
+  "generatorModel": "claude-sonnet-5"
+}

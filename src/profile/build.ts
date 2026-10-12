@@ -42,35 +42,86 @@ const PROFILE_SCHEMA = {
 
 export interface SeriesSpec {
   seriesTicker: string;
+  /** The event the profile is built for (see pickActiveEvent). */
+  eventTicker: string;
   title: string;
   rulesText: string;
   strikeTypes: Array<string | null>;
   marketCount: number;
   sampleSubtitles: string[];
+  /** Set when the event's markets are separate outcomes of one question (custom strikes): tells Sonnet to write for the whole question. */
+  outcomeNote?: string;
+  /** Set when the series has several open events (weeks, months, cards): tells Sonnet to write for the recurring question, not one period. */
+  recurringNote?: string;
 }
 
-export async function fetchSeriesSpec(seriesTicker: string, fetchImpl: typeof fetch = fetch): Promise<SeriesSpec> {
+// A custom-strike event with at least this many markets is a "who/which" question with one market per outcome.
+const MULTI_OUTCOME_MIN_MARKETS = 3;
+const MAX_NOTE_EVENT_TITLES = 4;
+
+/**
+ * Which open event a series profile is built for: the one whose NEXT market close is soonest and
+ * still in the future. Kalshi leaves strike_date empty on most events, so sorting on it alone just
+ * returned whichever event the API listed first (an already-played UFC card, last week's count).
+ * Events without nested market close times keep the old strike_date ordering, which is also the
+ * fallback when every event has already closed.
+ */
+function pickActiveEvent(events: any[], now: Date): any {
+  const nowMs = now.getTime();
+  const nextClose = (e: any): number | null => {
+    const upcoming = ((e.markets ?? []) as any[])
+      .map((m) => Date.parse(m?.close_time))
+      .filter((t) => Number.isFinite(t) && t >= nowMs);
+    return upcoming.length > 0 ? Math.min(...upcoming) : null;
+  };
+  const scored = events.map((e) => ({ e, close: nextClose(e) })).filter((x) => x.close !== null) as Array<{ e: any; close: number }>;
+  if (scored.length > 0) return scored.sort((a, b) => a.close - b.close)[0].e;
+  return [...events].sort((a: any, b: any) => (a.strike_date ?? '').localeCompare(b.strike_date ?? ''))[0];
+}
+
+export async function fetchSeriesSpec(
+  seriesTicker: string,
+  fetchImpl: typeof fetch = fetch,
+  now: () => Date = () => new Date()
+): Promise<SeriesSpec> {
   const get = async (url: string): Promise<any> => {
     const res = await fetchImpl(url);
     if (!res.ok) throw new Error(`Kalshi fetch failed: ${res.status} ${url}`);
     return res.json();
   };
-  const events = await get(`${KALSHI_API_BASE}/events?series_ticker=${encodeURIComponent(seriesTicker)}&status=open`);
+  const events = await get(`${KALSHI_API_BASE}/events?series_ticker=${encodeURIComponent(seriesTicker)}&status=open&with_nested_markets=true`);
   if (!events.events || events.events.length === 0) {
     throw new Error(`no open event for series ${seriesTicker}`);
   }
-  const active = [...events.events].sort((a: any, b: any) => (a.strike_date ?? '').localeCompare(b.strike_date ?? ''))[0];
+  const active = pickActiveEvent(events.events, now());
   const markets = await get(`${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(active.event_ticker)}&status=open&limit=1000`);
   const list: any[] = markets.markets ?? [];
   if (list.length === 0) throw new Error(`event ${active.event_ticker} has no open markets`);
   const withRules = list.find((m) => m.rules_primary) ?? list[0];
+  const strikeTypes = list.map((m) => (m.strike_type ?? null) as string | null);
+  const title = active.title ?? seriesTicker;
+  const multiOutcome = list.length >= MULTI_OUTCOME_MIN_MARKETS && strikeTypes.includes('custom');
   return {
     seriesTicker,
-    title: active.title ?? seriesTicker,
+    eventTicker: active.event_ticker,
+    title,
     rulesText: [withRules.rules_primary, withRules.rules_secondary].filter(Boolean).join(' ').slice(0, 1500),
-    strikeTypes: list.map((m) => (m.strike_type ?? null) as string | null),
+    strikeTypes,
     marketCount: list.length,
     sampleSubtitles: list.slice(0, 6).map((m) => String(m.yes_sub_title ?? m.ticker)),
+    ...(events.events.length >= 2
+      ? {
+          recurringNote: `This series has ${events.events.length} open events (${(events.events as any[]).slice(0, MAX_NOTE_EVENT_TITLES).map((e) => `"${e.title}"`).join('; ')}). ` +
+            `The title, settlement and bank must describe the recurring question in general (for example "this week" or "the next one"), not hard-code the dates, numbers or names of one event; the profile is reused as each event rolls over.`,
+        }
+      : {}),
+    ...(multiOutcome
+      ? {
+          outcomeNote:
+            `This event's ${list.length} markets are separate outcomes of ONE question ("${title}"); the rules text and subtitles below are only a sample of them. ` +
+            `Write the title, settlement, bank and keyphrases for the question as a whole, never for a single outcome, and do not tell the screener to ignore the other outcomes.`,
+        }
+      : {}),
   };
 }
 
@@ -270,7 +321,7 @@ export async function buildTradeProfile(
     checkOlds();
   }
 
-  const spec = await fetchSeriesSpec(opts.seriesTicker, deps.fetchImpl);
+  const spec = await fetchSeriesSpec(opts.seriesTicker, deps.fetchImpl, now);
   const structure = deriveStructure(spec.strikeTypes, spec.marketCount);
 
   const absLedger = path.resolve(repoRoot, ledgerPath);

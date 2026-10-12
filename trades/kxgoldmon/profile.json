@@ -1,0 +1,17 @@
+{
+  "name": "kxgoldmon",
+  "seriesTicker": "KXGOLDMON",
+  "title": "Gold price on October 30, 2026 at 5:00 PM EDT?",
+  "settlement": "Resolves YES if the close price of the 1-minute candlestick for gold on October 30, 2026 at 5:00 PM EDT is above 4912.99 USD/t.oz. The 5:00 PM candle close reflects trading from 4:59:00-4:59:59 PM. If no data is published, the most recently available data is used.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the effect of a news item on the spot/futures price of gold (USD per troy ounce) at the specific 1-minute close timestamp of 5:00 PM EDT on October 30, 2026. The market resolves YES if that price is above the strike level; focus on whether the news plausibly pushes gold's price up or down and by roughly how much before that snapshot.",
+  "directSources": [],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "USD/t.oz",
+  "maxMagnitude": 80,
+  "ledgerPath": "data/kxgoldmon/decisions.db",
+  "consumerGroup": "execmod-kxgoldmon",
+  "generatedAt": "2026-10-11T22:13:30.041Z",
+  "generatorModel": "claude-sonnet-5"
+}

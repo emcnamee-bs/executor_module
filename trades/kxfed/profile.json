@@ -1,0 +1,21 @@
+{
+  "name": "kxfed",
+  "seriesTicker": "KXFED",
+  "title": "Fed funds rate (upper bound) after Oct 28, 2026 FOMC meeting?",
+  "settlement": "If the upper bound of the target federal funds rate published on the Federal Reserve's official website is greater than the stated strike level following the Federal Reserve's Oct 28, 2026 meeting, the market resolves Yes. Expires the first 2:05 PM ET following release of the Fed statement for that meeting, or one week after the last day of the meeting.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "Estimate the effect of the news on the expected upper bound of the Fed funds target range after the Oct 28, 2026 FOMC decision; resolution is based on the official rate published on the Federal Reserve's website at/after that meeting.",
+  "directSources": [
+    "federal_reserve_monetary",
+    "federal_reserve_press",
+    "federal_reserve_speeches"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "bps",
+  "maxMagnitude": 50,
+  "ledgerPath": "data/kxfed/decisions.db",
+  "consumerGroup": "execmod-kxfed",
+  "generatedAt": "2026-10-08T21:47:11.721Z",
+  "generatorModel": "claude-sonnet-5"
+}

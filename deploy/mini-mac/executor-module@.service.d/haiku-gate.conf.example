@@ -1,0 +1,19 @@
+# GATE_PROVIDER=anthropic drop-in: run ONE paper trade's relevance gate on Claude Haiku 5.5
+# instead of the local Ollama model (benchmark: 1.5 s median vs 158 s, 0 timeouts, 85/86 of
+# Sonnet's "escalate" items kept, 10/10 injection probes held; ~$0.0002 per call).
+# Enable on a paper unit by copying this file (without .example) to
+#   ~/.config/systemd/user/executor-module@<name>.service.d/haiku-gate.conf
+# then: systemctl --user daemon-reload && systemctl --user restart executor-module@<name>
+# ROLL BACK: delete that haiku-gate.conf, then daemon-reload and restart. The code default is
+# the local Ollama gate, so removing this file is the whole rollback.
+# The live unit (executor-module.service) is deliberately NOT covered: switch it on purpose,
+# by hand, after the paper trades have run clean.
+[Service]
+Environment=GATE_PROVIDER=anthropic
+# Per-trade cap on Claude gate spend per UTC day. Over it, the gate stops calling the API,
+# the ollama-errors breaker trips and alerts, and new decisions on this trade halt until a
+# human clears it (npm run clear-breaker). Default 0.50 (about 2,600 calls).
+#Environment=GATE_DAILY_USD_CAP=0.50
+# This unit no longer uses Ollama, so drop the template's "wait up to 60 s for Ollama" probe
+# (an empty ExecStartPre= resets the list inherited from the template).
+ExecStartPre=

@@ -1,0 +1,11 @@
+TRADE: Whether Reza Pahlavi becomes head of state/government of Iran before Jan 1, 2027.
+SETTLES ON: Resolves Yes if Reza Pahlavi is appointed, elected, named, designated, or succeeds to the position of Iran's head of state or government before Jan 1, 2027; otherwise No. Requires actual installation into power, not symbolic recognition or foreign backing alone.
+MOVES THE PRICE:
+- Regime stability: mass protests in Iran, crackdowns, strikes, internal security force defections, IRGC loyalty signals.
+- Regime change dynamics: collapse or ousting of the current Supreme Leader/government, military coup attempts, assassination or death of Khamenei, succession crisis within clerical establishment.
+- Foreign intervention: US or Israeli military strikes on Iran, regime-change rhetoric from Western leaders, covert support for opposition groups, sanctions escalation aimed at destabilizing the government.
+- Opposition coordination: Pahlavi forming alliances with other exile/opposition factions, diaspora rallies, statements of support from former Iranian military or political figures, recognition by foreign governments as legitimate leader.
+- Pahlavi's own actions: public declarations of intent to return, meetings with world leaders, explicit roadmap or transition plan announcements, health or legal issues affecting his candidacy.
+- Geopolitical shocks: war involving Iran, nuclear negotiation collapse, major terrorist attack altering regime legitimacy, economic collapse triggering uprising.
+SETTLEMENT-SENSITIVE FACTS: Resolution requires formal installation into the role, not just popularity or foreign endorsement; constitutional monarchy restoration would need an actual governing transition recognized internally; exile commentary, interviews, or symbolic 'crown prince' framing alone do not trigger Yes; any interim or transitional government naming him as leader could count if widely reported as him holding the position.
+IGNORE: General Iran-Israel conflict news unrelated to leadership succession, Iranian economic data (inflation, currency) without political context, unrelated opposition figures' statements, historical retrospectives on the former Shah or monarchy, cultural or diaspora events not tied to political transition, routine Iranian elections for parliament or judiciary unrelated to top leadership.

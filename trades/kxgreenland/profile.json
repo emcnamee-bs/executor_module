@@ -1,0 +1,17 @@
+{
+  "name": "kxgreenland",
+  "seriesTicker": "KXGREENLAND",
+  "title": "Will Trump buy at least part of Greenland?",
+  "settlement": "If the United States purchases at least part of Greenland from Denmark before the market's deadline (Jan 1, 2027 or Jan 20, 2029 depending on contract), the market resolves Yes. Otherwise it resolves No.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability that a formal US purchase/acquisition of part or all of Greenland from Denmark occurs before the deadline; resolution requires an actual completed or agreed purchase transaction, not just talk, proposals, or military/basing deals.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "probability points",
+  "maxMagnitude": 40,
+  "ledgerPath": "data/kxgreenland/decisions.db",
+  "consumerGroup": "execmod-kxgreenland",
+  "generatedAt": "2026-10-11T22:18:42.006Z",
+  "generatorModel": "claude-sonnet-5"
+}

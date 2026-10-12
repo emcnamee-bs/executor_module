@@ -656,6 +656,27 @@ true` on materially distorted synopses). That is why the local model only ever s
 items **in**. Its "relevant" verdict passes an item to Sonnet triage and is never a
 reason to trade.
 
+### 5a.4a Claude-backed gate (`GATE_PROVIDER=anthropic`, optional)
+
+The relevance gate can run on Claude Haiku 5.5 instead of local Ollama. Default is still the local
+gate; a unit opts in with its own env (drop-in `deploy/mini-mac/executor-module@.service.d/haiku-gate.conf.example`),
+so the live unit is untouched until someone does it on purpose.
+
+- **Why:** the 2026-10-11 replay of 241 real gate items (`~/gate-bench/bench_haiku.cjs`, results
+  `haiku55-*.jsonl`): median 1.5 s vs 158 s on mini-mac CPU, 0 errors vs 13% timeouts, kept 85/86 items Sonnet later
+  escalated, held 10/10 prompt-injection probes, passes ~73% of items vs qwen's 55% (so more Sonnet triage calls).
+  Cost ~$0.0002 per call (~1,475 input tokens).
+- **Env:** `GATE_PROVIDER` (`ollama` default | `anthropic`), `GATE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`; must have
+  a price in `anthropicGateClient.ts`), `GATE_DAILY_USD_CAP` (default 0.50 per trade per UTC day).
+- **No `temperature`:** Haiku 5.5 rejects non-default sampling, so the local gate's `temperature: 0` is not forwarded;
+  the call uses `effort: medium` and a JSON-schema `output_config` (same as the Sonnet stages).
+- **Failure handling is unchanged:** an API error, a refusal or a truncation is recorded in `ollama_errors` (the same
+  five-in-15-minutes breaker). Over the daily spend cap the client stops calling, trips that same breaker with a
+  `gate daily spend cap reached` reason (Slack alert) and the item is skipped as `gate error:`. Clear with
+  `npm run clear-breaker` after raising the cap or at the next UTC day.
+- **Ledger:** gate rows are written with `provider='anthropic'` and the real model and token counts.
+- **Roll back:** delete the unit's `haiku-gate.conf`, `systemctl --user daemon-reload`, restart. Nothing else to undo.
+
 ### 5a.5 Trade profiles and paper trading
 
 **What a profile is.** Everything market-specific lives in `trades/<name>/` (profile,
@@ -812,6 +833,79 @@ switch it off when the test window ends.
   `SELECT COUNT(*) FROM decisions WHERE reason LIKE '[low-tier relaxed:%';`
 
 ---
+
+### 5a.6 Validating a trade's keyphrases against the news archive (`validate-bank`)
+
+`build-trade` writes a keyphrase list but never checks it against the stream it will run on. Replaying the 41-day iip archive
+over every list (2026-10-12) found: one over-broad phrase producing most of a bank's hits (gold: "sanctions on Russia" 70%;
+gasoline: "sanctions on Russian oil" 73%; Hormuz weekly: "Strait of Hormuz" 95%), entity phrases that fire on unrelated posts
+("Tren de Aragua" for a Venezuela-leadership trade), and banks with no hits at all because no ingested source covers the topic.
+
+- **What it does:** replays a trade's keyphrases over the iip archive (opened read-only; quarantined items excluded because iip
+  withholds them from the stream), takes the phrases with at least `--min-hits` hits, samples `--sample` of each phrase's hits
+  (spread across sources) and has a strict audit judge rate them: "is this a substantive, on-topic report a trader would want?"
+  A phrase whose sampled hits pass less than `--max-pass-rate` (default 20%) is recommended for removal. Thin evidence (under 8
+  judged) is never removed, and a phrase whose every word comes from the trade's own title/settlement text (its subject, e.g.
+  `diesel export ban`) is never auto-removed: it is flagged for review. `--keep-phrases "a;b"` protects named phrases (semicolon-separated).
+- **Why a separate judge:** the live gate and the triage stage are deliberately lenient (pass anything plausible, let Sonnet's
+  decide decline it), so they pass most hits of even a noisy phrase. Measuring keyphrase quality needs a precision question.
+  The judge runs on Haiku 5.5 through the same Claude client as the live gate, against a throwaway ledger (no real ledger, spend
+  cap or breaker is touched); about $0.0002 per call, `--max-calls` (default 1500) caps a trade.
+- **Run it:** `npm run validate-bank -- --trade kxgoldmon` (report only), `--all --exclude kxaprpotus` for the fleet, add
+  `--apply` to trim. `build-trade --validate` runs the same check right after a build and trims the new list. The old list is
+  backed up to `~/trade-profile-backups/<trade>/keyphrases.json.bak-<ts>` (outside the repo); a list is never trimmed below
+  `--floor` (default 150) phrases; the hand-pinned live profile is never edited, even with `--apply`.
+- **Read the report before `--apply`:** the tool measures precision only. It cannot see recall (a trade can lose real news by
+  dropping a key entity phrase whose sampled hits happened to be noise), so check any entity or name phrase it proposes to remove.
+- **Limits:** the judge sees the headline and snippet (no page body); the archive is dominated by one tier-4 Bluesky firehose, so
+  the tool tells you a phrase is noisy on that stream, not that it is useless on better sources.
+
+### 5a.7 Retired paper trades
+
+Retired 2026-10-12 (units stopped and disabled; profiles and ledgers are kept; removed from the wall grid). Reason: nothing left to
+trade or no way to feed them.
+
+| Trade | Why |
+|---|---|
+| `kxcabillionairetax` | priced 97.5-98.9c (the measure is on the Nov 3 ballot): no uncertainty left |
+| `kxredistricting` | Kalshi restructured the series into "which states redistrict" markets; the Arizona profile is stale and no live process exists |
+| `kxflycancjfk` | ~1c tail event (>=50% of JFK flights cancelled on a day) and no free per-airport cancellation source |
+| `kxretirepelosi` | 1-2c; she announced her retirement in 2025, so a resignation is not expected |
+
+To revive one: `systemctl --user enable --now executor-module@<name>`, put it back in `TRADES` in `~/wall/paper-grid-publish.py`
+(the wall publishers are not in this repo), and if its series changed, rebuild its profile first (`npm run build-trade -- --series
+<SERIES> --validate`).
+
+Wall publisher (`~/wall/paper-grid-publish.py`, not in this repo): it counts `paper_exits` (open partial = realized exit P&L + marked remainder; fully exited = 'exited', result NULL).
+
+### 5a.8 Exit review (paper): operator notes
+
+The exit review is the paper-only feature in `docs/superpowers/specs/2026-10-12-exit-review-design.md`: for each relevant news item
+it reviews the positions a paper trade holds and simulates a sell at the touch when the expected loss from that item beats
+`max(2% of cost, the cost of exiting)`. It is **off by default** and never touches a real order.
+
+- **Enable per paper unit:** copy `deploy/mini-mac/executor-module@.service.d/exit-review.conf.example` to
+  `~/.config/systemd/user/executor-module@<name>.service.d/exit-review.conf`, then
+  `systemctl --user daemon-reload && systemctl --user restart executor-module@<name>`. **Roll back** by deleting that file, then
+  `daemon-reload` and restart (the code default is off).
+- **Start guard:** with `EXIT_REVIEW=on` the process refuses to start on the live unit (`EXECUTOR_LIVE_TRADE` set), in a non-dry-run
+  process (`KALSHI_DRY_RUN` not `true`), or on the live ledger / live consumer group. Any value other than `on` or `off` also refuses.
+  The startup `[profile]` line ends with `exitReview=on|off`; check it after every restart.
+- **Settings** (all optional, set in the drop-in): `EXIT_REVIEW_MODEL` (default `claude-sonnet-5`; `claude-haiku-5-5` is cheaper),
+  `EXIT_FEE_CENTS` (default 0; P&L is gross of fees), `EXIT_RETRY_MS` (default 20000, whole ms >= 1000; retry of a sale that could
+  not fully fill), `EXIT_DAILY_USD_CAP` (default 5; one Slack alert per UTC day, reviews are never stopped).
+- **Ledger** (each trade's `data/<name>/decisions.db`): `paper_exit_reviews` has one row per (item, position) review whether the verdict
+  is `sell`, `hold` or `error`, with `lag_json` holding the publish-to-fill timings; `paper_exits` has the simulated fills
+  (`filled` / `partial`) and the markers (`unsellable` / `held_to_settlement`, contracts 0, no price), plus `late` / `late_json`;
+  model calls are in `ai_calls` with `stage='exit_review'`. A fully sold position is closed by setting `settled_at`, leaving `result`
+  NULL and setting `pnl_cents` to the sum of its exit P&L.
+- **Logs to grep** (`journalctl --user -u executor-module@<name>`): `[EXIT TRIGGER]`, `[EXIT FILL]`, `[EXIT UNSELLABLE]`,
+  `[EXIT HELD_TO_SETTLEMENT]`, `[EXIT LATE]`, `[EXIT LAG]`, and the Slack alerts `[EXIT-REVIEW ERROR]` and `[EXIT-REVIEW BUDGET]` (these two go to Slack; they reach the journal only when `SLACK_WEBHOOK_URL` is unset or the Slack POST fails).
+- **Backtest:** `npm run backtest-exit -- --trade <name> [--data ~/executor_module/data] [--run]`. It is a **dry run** by default (counts
+  the planned model calls, spends nothing); `--run` calls the API (about $0.01 per Sonnet call). It opens the real ledger read-only.
+  Other flags: `--model`, `--max-items` (default 80 per position), `--fee`, `--out` (default `~/exit-backtest`, one `<name>-<date>.md`
+  report per run). It prints settled-only and all-positions summaries and a warning when review calls failed (an unreliable run).
+- **Wall:** the publisher (`~/wall/paper-grid-publish.py`, not in git) counts the exits; its backups are `*.bak-pre-exits-*`.
 
 ## 6. Instructions for whoever picks this up
 

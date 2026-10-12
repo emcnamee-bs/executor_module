@@ -1,0 +1,19 @@
+{
+  "name": "kxbrentmon",
+  "seriesTicker": "KXBRENTMON",
+  "title": "Will Brent crude oil price be above $X on October 30, 2026 at 5:00 PM EDT?",
+  "settlement": "If the close price of the 1-minute candlestick for Brent crude oil at 5:00 PM EDT on October 30, 2026 is above the strike price, the market resolves to Yes. If no data is published at that time, the most recently available published data is used.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the effect of news on the spot/futures price of Brent crude oil (USD/Bbl), which will be read at a specific 1-minute candlestick close on October 30, 2026 at 5:00 PM EDT; assess how far news could move the Brent price level by that date.",
+  "directSources": [
+    "eia_today_in_energy"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "USD/Bbl",
+  "maxMagnitude": 8,
+  "ledgerPath": "data/kxbrentmon/decisions.db",
+  "consumerGroup": "execmod-kxbrentmon",
+  "generatedAt": "2026-10-11T22:18:46.964Z",
+  "generatorModel": "claude-sonnet-5"
+}

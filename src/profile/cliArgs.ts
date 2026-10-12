@@ -6,6 +6,8 @@ export interface BuildCliArgs {
   consumerGroup?: string;
   gateModel?: string;
   allowLiveLedger: boolean;
+  /** Present (true) only when --validate was given: replay the keyphrases over the iip archive after building. */
+  validate?: true;
 }
 
 const VALUE_FLAGS: Record<string, 'seriesTicker' | 'direct' | 'reuseKeyphrasesFile' | 'ledgerPath' | 'consumerGroup' | 'gateModel'> = {
@@ -26,11 +28,17 @@ const VALUE_FLAGS: Record<string, 'seriesTicker' | 'direct' | 'reuseKeyphrasesFi
 export function parseBuildArgs(argv: string[]): BuildCliArgs {
   const values: Partial<Record<string, string>> = {};
   let allowLiveLedger = false;
+  let validate = false;
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === '--allow-live-ledger') {
       if (allowLiveLedger) throw new Error('duplicate flag --allow-live-ledger');
       allowLiveLedger = true;
+      continue;
+    }
+    if (flag === '--validate') {
+      if (validate) throw new Error('duplicate flag --validate');
+      validate = true;
       continue;
     }
     const key = VALUE_FLAGS[flag];
@@ -52,5 +60,6 @@ export function parseBuildArgs(argv: string[]): BuildCliArgs {
     consumerGroup: values.consumerGroup,
     gateModel: values.gateModel,
     allowLiveLedger,
+    ...(validate ? { validate: true as const } : {}),
   };
 }

@@ -1,0 +1,17 @@
+{
+  "name": "kxguilfoyleout",
+  "seriesTicker": "KXGUILFOYLEOUT",
+  "title": "Kimberly Guilfoyle out as US Ambassador to Greece?",
+  "settlement": "The market resolves YES if Kimberly Guilfoyle leaves her role as US Ambassador to Greece before the stated deadline, with an actual departure date on which she vacates the position. Leaving includes resignation, retirement, removal, expulsion, non-renewal of term, recall, or any other means by which she permanently ceases to hold the office; temporary leave, suspension, or recusal does not count.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability (in percentage points, 0-100) that Kimberly Guilfoyle will have left the US Ambassador to Greece post before the relevant deadline. The market resolves YES only if there is a confirmed, permanent departure (resignation, removal, recall, non-renewal, etc.) with an actual departure date; temporary absences do not count.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "pts",
+  "maxMagnitude": 40,
+  "ledgerPath": "data/kxguilfoyleout/decisions.db",
+  "consumerGroup": "execmod-kxguilfoyleout",
+  "generatedAt": "2026-10-11T22:13:28.639Z",
+  "generatorModel": "claude-sonnet-5"
+}

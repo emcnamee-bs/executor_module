@@ -53,11 +53,20 @@ Reply only as JSON: {"reason": "<=30 words naming the specific link to the trade
 }
 
 export async function runGate(
-  deps: { ollama: OllamaClient; db: Database.Database; profile: LoadedProfile },
+  // `ollama` is the chat client in use whichever provider backs it (kept under this name so
+  // existing callers are unchanged); `provider` and `model` default to the profile's local gate.
+  deps: {
+    ollama: OllamaClient;
+    db: Database.Database;
+    profile: LoadedProfile;
+    provider?: 'ollama' | 'anthropic';
+    model?: string;
+  },
   input: { itemId: string; excerptText: string; excerptSource: 'page' | 'snippet'; tripwireHit?: boolean }
 ): Promise<GateResult> {
   const { ollama, db, profile: loaded } = deps;
-  const model = loaded.profile.gateModel;
+  const provider = deps.provider ?? 'ollama';
+  const model = deps.model ?? loaded.profile.gateModel;
   const system = buildGateSystem(loaded);
   const user = wrapUntrusted(input.excerptText, GATE_EXCERPT_CHARS);
   const options = {
@@ -73,7 +82,7 @@ export async function runGate(
     trade: loaded.profile.name,
     itemId: input.itemId,
     stage: 'gate' as const,
-    provider: 'ollama' as const,
+    provider,
     model,
     promptSha: sha12(system),
     requestJson: JSON.stringify({ system, user, options }),

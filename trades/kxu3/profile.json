@@ -1,0 +1,19 @@
+{
+  "name": "kxu3",
+  "seriesTicker": "KXU3",
+  "title": "Will the October 2026 U-3 unemployment rate be above a given threshold?",
+  "settlement": "If the seasonally adjusted U-3 unemployment rate reported by the Bureau of Labor Statistics in the October 2026 Employment Situation Report is above the stated threshold, the market resolves to Yes. The BLS release (typically published the first Friday of the following month) is the sole data source.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the likely effect of a news item on the seasonally adjusted U-3 unemployment rate for October 2026, as it will be reported by the BLS; the market resolves Yes if that reported rate is above a given percentage threshold.",
+  "directSources": [
+    "bls_releases"
+  ],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "percentage points",
+  "maxMagnitude": 0.5,
+  "ledgerPath": "data/kxu3/decisions.db",
+  "consumerGroup": "execmod-kxu3",
+  "generatedAt": "2026-10-08T21:48:00.252Z",
+  "generatorModel": "claude-sonnet-5"
+}

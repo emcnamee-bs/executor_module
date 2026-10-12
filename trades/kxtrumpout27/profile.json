@@ -1,0 +1,17 @@
+{
+  "name": "kxtrumpout27",
+  "seriesTicker": "KXTRUMPOUT27",
+  "title": "Will Donald Trump announce departure as President before January 20, 2029?",
+  "settlement": "Resolves YES if Donald Trump leaves office before January 20, 2029, including any announcement that he will leave within the next year. An acknowledgement that he will leave solely due to the scheduled expiration of his constitutional term limit does not count. If he dies in office, the market settles based on the last traded price before death.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating how a news item shifts the market-implied probability (in percentage points) that Trump will leave office or announce his departure before Jan 20, 2029, excluding ordinary end-of-term departure. The market resolves YES on resignation, removal, incapacitation-driven exit, or a credible announcement of early departure within a year.",
+  "directSources": [],
+  "marketStructure": "capture",
+  "magnitudeUnit": "pts",
+  "maxMagnitude": 20,
+  "ledgerPath": "data/kxtrumpout27/decisions.db",
+  "consumerGroup": "execmod-kxtrumpout27",
+  "generatedAt": "2026-10-11T22:16:34.701Z",
+  "generatorModel": "claude-sonnet-5"
+}

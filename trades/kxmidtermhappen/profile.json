@@ -1,0 +1,17 @@
+{
+  "name": "kxmidtermhappen",
+  "seriesTicker": "KXMIDTERMHAPPEN",
+  "title": "Will the 2026 midterm elections happen on time in all 50 states?",
+  "settlement": "Resolves YES if the 2026 U.S. House general election is conducted on time in all 50 states on the federally prescribed Election Day, meaning ballots are lawfully accepted in every congressional district in every state. Localized disruptions (late openings, machine malfunctions, local outages) don't disqualify a district as long as ballots are accepted somewhere within it; but if no ballots are accepted anywhere in a district, that state fails.",
+  "gateModel": "qwen2.5:7b-instruct-q4_K_M",
+  "gateKeepAlive": "10m",
+  "decideContext": "You are estimating the probability (in percentage points) that the 2026 midterm elections will be conducted on time nationwide, as defined by the resolution criteria; the market resolves YES/NO based on whether every state's congressional districts lawfully accept ballots on the prescribed Election Day.",
+  "directSources": [],
+  "marketStructure": "threshold",
+  "magnitudeUnit": "pts",
+  "maxMagnitude": 15,
+  "ledgerPath": "data/kxmidtermhappen/decisions.db",
+  "consumerGroup": "execmod-kxmidtermhappen",
+  "generatedAt": "2026-10-11T22:10:31.226Z",
+  "generatorModel": "claude-sonnet-5"
+}

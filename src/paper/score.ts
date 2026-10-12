@@ -21,6 +21,9 @@ interface OpenRow {
   side: 'yes' | 'no';
   contracts: number;
   entry_price_cents: number;
+  /** Contracts already sold by exit fills, and what they earned (gross). */
+  exited_contracts: number;
+  exit_pnl_cents: number;
 }
 
 /**
@@ -28,6 +31,7 @@ interface OpenRow {
  * side (capture rows) or a market ticker are never touched. A per-row fetch error is
  * skipped, never thrown: one flaky lookup must not stop the others, and the row simply
  * stays unsettled for the next pass. Returns the number of rows settled.
+ * Contracts already sold by exits are not re-scored: P&L is the exit fills plus the settlement of what remains.
  */
 export async function settlePaperRows(
   db: Database.Database,
@@ -35,9 +39,11 @@ export async function settlePaperRows(
 ): Promise<number> {
   const rows = db
     .prepare(
-      `SELECT id, market_ticker, side, contracts, entry_price_cents
-         FROM paper_positions
-        WHERE settled_at IS NULL AND market_ticker IS NOT NULL AND side IS NOT NULL`
+      `SELECT p.id, p.market_ticker, p.side, p.contracts, p.entry_price_cents,
+              COALESCE((SELECT SUM(e.contracts) FROM paper_exits e WHERE e.position_id = p.id), 0) AS exited_contracts,
+              COALESCE((SELECT SUM(e.pnl_cents) FROM paper_exits e WHERE e.position_id = p.id), 0) AS exit_pnl_cents
+         FROM paper_positions p
+        WHERE p.settled_at IS NULL AND p.market_ticker IS NOT NULL AND p.side IS NOT NULL`
     )
     .all() as OpenRow[];
 
@@ -57,7 +63,9 @@ export async function settlePaperRows(
     }
     if (outcome.status !== 'finalized' && outcome.status !== 'settled') continue;
     if (outcome.result !== 'yes' && outcome.result !== 'no') continue;
-    const pnl = pnlCents(row.side, row.contracts, row.entry_price_cents, outcome.result);
+    const remaining = row.contracts - row.exited_contracts;
+    if (remaining <= 0) continue; // fully exited rows are closed by recordExitFill and should not reach here
+    const pnl = row.exit_pnl_cents + pnlCents(row.side, remaining, row.entry_price_cents, outcome.result);
     const info = settle.run({ id: row.id, result: outcome.result, pnl });
     if (info.changes > 0) settled += 1;
   }

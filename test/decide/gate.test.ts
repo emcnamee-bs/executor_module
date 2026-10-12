@@ -109,6 +109,13 @@ describe('runGate', () => {
     expect(req.user).toContain('barges delayed');
   });
 
+  it('logs the provider and model actually used when the gate is backed by Claude', async () => {
+    const { ollama, calls } = fakeOllama('{"reason":"x","relevant":true}');
+    await runGate({ ollama, db, profile: loaded, provider: 'anthropic', model: 'claude-haiku-5-5' }, input);
+    expect(calls[0].model).toBe('claude-haiku-5-5');
+    expect(db.prepare('SELECT provider, model FROM ai_calls').get()).toEqual({ provider: 'anthropic', model: 'claude-haiku-5-5' });
+  });
+
   it('throws GateError on unparseable output and logs the error with the raw text', async () => {
     const { ollama } = fakeOllama('not json at all');
     await expect(runGate({ ollama, db, profile: loaded }, input)).rejects.toBeInstanceOf(GateError);

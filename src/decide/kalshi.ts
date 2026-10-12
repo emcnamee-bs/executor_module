@@ -23,7 +23,8 @@ export interface BandMarket {
 
 export interface ActiveLadder {
   eventTicker: string;
-  strikeDate: string;
+  /** Null when Kalshi leaves strike_date empty (weekly/rolling series); only echoed into the decision prompt. */
+  strikeDate: string | null;
   bands: BandMarket[];
 }
 
@@ -34,7 +35,7 @@ export interface MarketStatus {
 
 interface KalshiEvent {
   event_ticker: string;
-  strike_date: string;
+  strike_date?: string | null;
 }
 
 interface KalshiEventsResponse {
@@ -76,6 +77,30 @@ function sizeContracts(raw: string): number {
   return Number.isFinite(parsed) ? Math.floor(parsed) : 0;
 }
 
+/** Ceiling on the open-markets fetch (Node's fetch has no default timeout). */
+const EVENT_MARKETS_TIMEOUT_MS = 10_000;
+
+/** Open markets of one event as bands; throws on an HTTP failure. Records nothing. */
+async function fetchEventBands(eventTicker: string): Promise<BandMarket[]> {
+  const marketsUrl = `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(eventTicker)}&status=open`;
+  const marketsRes = await fetch(marketsUrl, { signal: AbortSignal.timeout(EVENT_MARKETS_TIMEOUT_MS) });
+  if (!marketsRes.ok) {
+    throw new Error(`Kalshi markets fetch failed: ${marketsRes.status} ${marketsRes.statusText}`);
+  }
+  const marketsBody = (await marketsRes.json()) as KalshiMarketsResponse;
+  return marketsBody.markets.map((m) => ({
+    ticker: m.ticker,
+    floorStrike: m.floor_strike ?? null,
+    capStrike: m.cap_strike ?? null,
+    strikeType: m.strike_type ?? null,
+    status: m.status,
+    yesAskCents: priceCentsOrNull(m.yes_ask_dollars),
+    yesBidCents: priceCentsOrNull(m.yes_bid_dollars),
+    yesAskSizeContracts: sizeContracts(m.yes_ask_size_fp),
+    yesBidSizeContracts: sizeContracts(m.yes_bid_size_fp),
+  }));
+}
+
 export async function fetchActiveLadder(seriesTicker: string, db?: Database.Database): Promise<ActiveLadder | null> {
   try {
     const eventsUrl = `${KALSHI_API_BASE}/events?series_ticker=${encodeURIComponent(seriesTicker)}&status=open`;
@@ -88,32 +113,37 @@ export async function fetchActiveLadder(seriesTicker: string, db?: Database.Data
       return null;
     }
 
-    const active = [...eventsBody.events].sort((a, b) => a.strike_date.localeCompare(b.strike_date))[0];
+    // Kalshi leaves strike_date null on many weekly/rolling series; an undated event must sort, not throw.
+    const active = [...eventsBody.events].sort((a, b) => (a.strike_date ?? '').localeCompare(b.strike_date ?? ''))[0];
 
-    const marketsUrl = `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(active.event_ticker)}&status=open`;
-    const marketsRes = await fetch(marketsUrl);
-    if (!marketsRes.ok) {
-      throw new Error(`Kalshi markets fetch failed: ${marketsRes.status} ${marketsRes.statusText}`);
-    }
-    const marketsBody = (await marketsRes.json()) as KalshiMarketsResponse;
+    const bands = await fetchEventBands(active.event_ticker);
 
-    const bands: BandMarket[] = marketsBody.markets.map((m) => ({
-      ticker: m.ticker,
-      floorStrike: m.floor_strike ?? null,
-      capStrike: m.cap_strike ?? null,
-      strikeType: m.strike_type ?? null,
-      status: m.status,
-      yesAskCents: priceCentsOrNull(m.yes_ask_dollars),
-      yesBidCents: priceCentsOrNull(m.yes_bid_dollars),
-      yesAskSizeContracts: sizeContracts(m.yes_ask_size_fp),
-      yesBidSizeContracts: sizeContracts(m.yes_bid_size_fp),
-    }));
-
-    return { eventTicker: active.event_ticker, strikeDate: active.strike_date, bands };
+    return { eventTicker: active.event_ticker, strikeDate: active.strike_date ?? null, bands };
   } catch (err) {
     if (db) {
       const message = err instanceof Error ? err.message : String(err);
       recordKalshiError(db, 'fetchActiveLadder', message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * The ladder of ONE named event (open markets only), for positions held on an event that is no
+ * longer the series' soonest one. Throws on an HTTP failure. Pass `db` only from paths whose
+ * Kalshi failures may feed the circuit breaker; the exit-review path deliberately omits it.
+ */
+export async function fetchLadderForEvent(
+  eventTicker: string,
+  db?: Database.Database,
+  strikeDate: string | null = null
+): Promise<ActiveLadder> {
+  try {
+    return { eventTicker, strikeDate, bands: await fetchEventBands(eventTicker) };
+  } catch (err) {
+    if (db) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordKalshiError(db, 'fetchLadderForEvent', message);
     }
     throw err;
   }

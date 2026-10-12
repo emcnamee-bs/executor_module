@@ -7,10 +7,12 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "build-trade": "tsx scripts/build-trade.ts",
+    "validate-bank": "tsx scripts/validate-bank.ts",
     "smoke": "tsx scripts/smoke.ts",
     "clear-block": "tsx scripts/clear-market-block.ts",
     "clear-breaker": "tsx scripts/clear-breaker.ts",
     "score-paper": "tsx scripts/score-paper.ts",
+    "backtest-exit": "tsx scripts/backtest-exit.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
