@@ -17,6 +17,7 @@ import { fetchActiveLadder, fetchLadderForEvent } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
 import type { ExitWiring } from './decide/pipeline.js';
 import { startExitTimer } from './paper/exitTimer.js';
+import { sweepLateness } from './paper/lateness.js';
 import type { OllamaClient } from './decide/ollamaClient.js';
 import { buildGateClient } from './decide/gateProvider.js';
 import { KalshiClient } from './execute/kalshiClient.js';
@@ -185,7 +186,10 @@ export async function main(): Promise<void> {
   // Paper exit review (EXIT_REVIEW=on only): the timer finishes sales the news path could not complete.
   const exitCfg = startup.exitReview;
   const exitTimer = exitCfg.enabled
-    ? startExitTimer({ db, fetchLadderForEvent }, exitCfg.retryMs)
+    ? startExitTimer(
+        { db, fetchLadderForEvent, afterPass: () => sweepLateness(db, loaded.profile.seriesTicker) },
+        exitCfg.retryMs
+      )
     : null;
 
   const controller = new AbortController();

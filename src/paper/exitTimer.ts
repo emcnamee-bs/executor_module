@@ -13,6 +13,8 @@ export interface ExitTimerDeps {
   db: Database.Database;
   fetchLadderForEvent: typeof fetchLadderForEvent;
   onFill?: (info: ExitFillInfo) => void;
+  /** Runs after every pass (the lateness sweep uses it); its failures are logged and never stop the timer. */
+  afterPass?: () => Promise<unknown> | void;
 }
 
 /** One pass. Returns the number of fills. A failed ladder fetch skips that event until the next pass. */
@@ -52,9 +54,18 @@ export function startExitTimer(deps: ExitTimerDeps, intervalMs: number): { stop:
   const timer = setInterval(() => {
     if (inProgress) return; // a slow pass skips the next tick, never overlaps
     inProgress = true;
-    runPendingExits(deps)
-      .catch((err) => console.error('[exit-timer] pass failed:', err))
-      .finally(() => { inProgress = false; });
+    (async () => {
+      try {
+        await runPendingExits(deps);
+      } catch (err) {
+        console.error('[exit-timer] pass failed:', err);
+      }
+      try {
+        await deps.afterPass?.();
+      } catch (err) {
+        console.error('[exit-timer] afterPass failed:', err);
+      }
+    })().finally(() => { inProgress = false; });
   }, intervalMs);
   return { stop: () => clearInterval(timer) };
 }
