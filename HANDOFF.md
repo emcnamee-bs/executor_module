@@ -878,6 +878,35 @@ To revive one: `systemctl --user enable --now executor-module@<name>`, put it ba
 
 Wall publisher (`~/wall/paper-grid-publish.py`, not in this repo): it counts `paper_exits` (open partial = realized exit P&L + marked remainder; fully exited = 'exited', result NULL).
 
+### 5a.8 Exit review (paper): operator notes
+
+The exit review is the paper-only feature in `docs/superpowers/specs/2026-10-12-exit-review-design.md`: for each relevant news item
+it reviews the positions a paper trade holds and simulates a sell at the touch when the expected loss from that item beats
+`max(2% of cost, the cost of exiting)`. It is **off by default** and never touches a real order.
+
+- **Enable per paper unit:** copy `deploy/mini-mac/executor-module@.service.d/exit-review.conf.example` to
+  `~/.config/systemd/user/executor-module@<name>.service.d/exit-review.conf`, then
+  `systemctl --user daemon-reload && systemctl --user restart executor-module@<name>`. **Roll back** by deleting that file, then
+  `daemon-reload` and restart (the code default is off).
+- **Start guard:** with `EXIT_REVIEW=on` the process refuses to start on the live unit (`EXECUTOR_LIVE_TRADE` set), in a non-dry-run
+  process (`KALSHI_DRY_RUN` not `true`), or on the live ledger / live consumer group. Any value other than `on` or `off` also refuses.
+  The startup `[profile]` line ends with `exitReview=on|off`; check it after every restart.
+- **Settings** (all optional, set in the drop-in): `EXIT_REVIEW_MODEL` (default `claude-sonnet-5`; `claude-haiku-5-5` is cheaper),
+  `EXIT_FEE_CENTS` (default 0; P&L is gross of fees), `EXIT_RETRY_MS` (default 20000, whole ms >= 1000; retry of a sale that could
+  not fully fill), `EXIT_DAILY_USD_CAP` (default 5; one Slack alert per UTC day, reviews are never stopped).
+- **Ledger** (each trade's `data/<name>/decisions.db`): `paper_exit_reviews` has one row per (item, position) review whether the verdict
+  is `sell`, `hold` or `error`, with `lag_json` holding the publish-to-fill timings; `paper_exits` has the simulated fills
+  (`filled` / `partial`) and the markers (`unsellable` / `held_to_settlement`, contracts 0, no price), plus `late` / `late_json`;
+  model calls are in `ai_calls` with `stage='exit_review'`. A fully sold position is closed by setting `settled_at`, leaving `result`
+  NULL and setting `pnl_cents` to the sum of its exit P&L.
+- **Logs to grep** (`journalctl --user -u executor-module@<name>`): `[EXIT TRIGGER]`, `[EXIT FILL]`, `[EXIT UNSELLABLE]`,
+  `[EXIT HELD_TO_SETTLEMENT]`, `[EXIT LATE]`, `[EXIT LAG]`, and the Slack alerts `[EXIT-REVIEW ERROR]` and `[EXIT-REVIEW BUDGET]`.
+- **Backtest:** `npm run backtest-exit -- --trade <name> [--data ~/executor_module/data] [--run]`. It is a **dry run** by default (counts
+  the planned model calls, spends nothing); `--run` calls the API (about $0.01 per Sonnet call). It opens the real ledger read-only.
+  Other flags: `--model`, `--max-items` (default 80 per position), `--fee`, `--out` (default `~/exit-backtest`, one `<name>-<date>.md`
+  report per run). It prints settled-only and all-positions summaries and a warning when review calls failed (an unreliable run).
+- **Wall:** the publisher (`~/wall/paper-grid-publish.py`, not in git) counts the exits; its backups are `*.bak-pre-exits-*`.
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.
