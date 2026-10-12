@@ -169,6 +169,29 @@ describe('runExitReview', () => {
     expect(parseCalls).toHaveLength(0);
   });
 
+  it('a failing ladder fetch alerts once per event, not once per position', async () => {
+    position('p1');
+    position('p2', { marketTicker: 'T-95' });
+    const failing = async (): Promise<ActiveLadder> => { throw new Error('Kalshi 500'); };
+    await runExitReview(makeItem(), { ...deps, fetchLadderForEvent: failing }, prepared());
+    expect(reviews().map((r) => [r.verdict, r.verdict_reason])).toEqual([
+      ['error', 'could not fetch the ladder for EV'], ['error', 'could not fetch the ladder for EV'],
+    ]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain('[EXIT-REVIEW ERROR]');
+    expect(alerts[0]).toContain('EV');
+    expect(parseCalls).toHaveLength(0);
+  });
+
+  it('two positions on two different failing events alert once each', async () => {
+    position('p1');
+    position('p2', { eventTicker: 'EV2', marketTicker: 'T2-94' });
+    await runExitReview(makeItem(), { ...deps, fetchLadderForEvent: async () => { throw new Error('Kalshi 500'); } }, prepared());
+    expect(reviews().map((r) => r.verdict)).toEqual(['error', 'error']);
+    expect(alerts).toHaveLength(2);
+    expect(parseCalls).toHaveLength(0);
+  });
+
   it('a position whose market is no longer open holds without a model call', async () => {
     position('p1', { marketTicker: 'T-GONE' });
     await runExitReview(makeItem(), deps, prepared());

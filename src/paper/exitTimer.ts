@@ -35,15 +35,20 @@ export async function runPendingExits(deps: ExitTimerDeps): Promise<number> {
     }
     const ladder = ladders.get(position.eventTicker)!;
     if (ladder === 'failed') continue;
-    const market = ladder.bands.find((b) => b.ticker === position.marketTicker) ?? null;
-    const attempt = attemptExitFill(deps.db, { position, reviewId, market });
-    logExitFill(position, attempt);
-    if (attempt.contracts > 0 && attempt.exitId !== null && attempt.priceCents !== null && attempt.filledAt !== null) {
-      fills += 1;
-      deps.onFill?.({
-        positionId: position.id, reviewId, exitId: attempt.exitId, contracts: attempt.contracts,
-        priceCents: attempt.priceCents, remaining: attempt.remaining, filledAt: attempt.filledAt,
-      });
+    try {
+      const market = ladder.bands.find((b) => b.ticker === position.marketTicker) ?? null;
+      const attempt = attemptExitFill(deps.db, { position, reviewId, market });
+      logExitFill(position, attempt);
+      if (attempt.contracts > 0 && attempt.exitId !== null && attempt.priceCents !== null && attempt.filledAt !== null) {
+        fills += 1;
+        deps.onFill?.({
+          positionId: position.id, reviewId, exitId: attempt.exitId, contracts: attempt.contracts,
+          priceCents: attempt.priceCents, remaining: attempt.remaining, filledAt: attempt.filledAt,
+        });
+      }
+    } catch (err) {
+      // One position's failure must not abort the rest of this pass.
+      console.error(`[exit-timer] position ${position.id} (${position.marketTicker}) failed:`, err);
     }
   }
   return fills;

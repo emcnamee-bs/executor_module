@@ -900,7 +900,7 @@ it reviews the positions a paper trade holds and simulates a sell at the touch w
   model calls are in `ai_calls` with `stage='exit_review'`. A fully sold position is closed by setting `settled_at`, leaving `result`
   NULL and setting `pnl_cents` to the sum of its exit P&L.
 - **Logs to grep** (`journalctl --user -u executor-module@<name>`): `[EXIT TRIGGER]`, `[EXIT FILL]`, `[EXIT UNSELLABLE]`,
-  `[EXIT HELD_TO_SETTLEMENT]`, `[EXIT LATE]`, `[EXIT LAG]`, and the Slack alerts `[EXIT-REVIEW ERROR]` and `[EXIT-REVIEW BUDGET]`.
+  `[EXIT HELD_TO_SETTLEMENT]`, `[EXIT LATE]`, `[EXIT LAG]`, and the Slack alerts `[EXIT-REVIEW ERROR]` and `[EXIT-REVIEW BUDGET]` (these two go to Slack; they reach the journal only when `SLACK_WEBHOOK_URL` is unset or the Slack POST fails).
 - **Backtest:** `npm run backtest-exit -- --trade <name> [--data ~/executor_module/data] [--run]`. It is a **dry run** by default (counts
   the planned model calls, spends nothing); `--run` calls the API (about $0.01 per Sonnet call). It opens the real ledger read-only.
   Other flags: `--model`, `--max-items` (default 80 per position), `--fee`, `--out` (default `~/exit-backtest`, one `<name>-<date>.md`

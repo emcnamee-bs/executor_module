@@ -65,7 +65,10 @@ export async function runExitReview(item: Item, deps: ExitReviewDeps, prepare: (
     if (p === undefined) {
       // No db argument: a failing exit-path Kalshi call must never feed the circuit breaker.
       p = fetchLadder(event).catch((err) => {
-        console.warn(`[exit-review] ladder fetch for ${event} failed: ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[exit-review] ladder fetch for ${event} failed: ${msg}`);
+        // One alert per failed event per item (this memoized promise), not one per position on it.
+        alert(`[EXIT-REVIEW ERROR] ${trade} ladder for ${event} failed: ${msg}`);
         return null;
       });
       ladders.set(event, p);
@@ -74,16 +77,17 @@ export async function runExitReview(item: Item, deps: ExitReviewDeps, prepare: (
   };
 
   const reviewOne = async (position: OpenPaperPosition): Promise<void> => {
-    const errorRow = (why: string): void => {
+    const errorRow = (why: string, silent = false): void => {
       recordExitReview(db, {
         trade, itemId: item.item_id, positionId: position.id, shift: null, confidence: null, reason: null, midCents: null,
         fairAfterCents: null, lossCents: null, exitCostCents: null, verdict: 'error', verdictReason: why, lagJson: null,
       });
-      alert(`[EXIT-REVIEW ERROR] ${trade} ${position.marketTicker}: ${why}`);
+      if (!silent) alert(`[EXIT-REVIEW ERROR] ${trade} ${position.marketTicker}: ${why}`);
     };
 
     const ladder = await ladderFor(position.eventTicker);
-    if (ladder === null) return errorRow(`could not fetch the ladder for ${position.eventTicker}`);
+    // Silent: ladderFor already sent the one alert for this event.
+    if (ladder === null) return errorRow(`could not fetch the ladder for ${position.eventTicker}`, true);
     const market = ladder.bands.find((b) => b.ticker === position.marketTicker);
     if (market === undefined) {
       recordExitReview(db, {
