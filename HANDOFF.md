@@ -860,6 +860,22 @@ gasoline: "sanctions on Russian oil" 73%; Hormuz weekly: "Strait of Hormuz" 95%)
 - **Limits:** the judge sees the headline and snippet (no page body); the archive is dominated by one tier-4 Bluesky firehose, so
   the tool tells you a phrase is noisy on that stream, not that it is useless on better sources.
 
+### 5a.7 Retired paper trades
+
+Retired 2026-10-12 (units stopped and disabled; profiles and ledgers are kept; removed from the wall grid). Reason: nothing left to
+trade or no way to feed them.
+
+| Trade | Why |
+|---|---|
+| `kxcabillionairetax` | priced 97.5-98.9c (the measure is on the Nov 3 ballot): no uncertainty left |
+| `kxredistricting` | Kalshi restructured the series into "which states redistrict" markets; the Arizona profile is stale and no live process exists |
+| `kxflycancjfk` | ~1c tail event (>=50% of JFK flights cancelled on a day) and no free per-airport cancellation source |
+| `kxretirepelosi` | 1-2c; she announced her retirement in 2025, so a resignation is not expected |
+
+To revive one: `systemctl --user enable --now executor-module@<name>`, put it back in `TRADES` in `~/wall/paper-grid-publish.py`
+(the wall publishers are not in this repo), and if its series changed, rebuild its profile first (`npm run build-trade -- --series
+<SERIES> --validate`).
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.
