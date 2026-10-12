@@ -50,22 +50,23 @@ export async function runPendingExits(deps: ExitTimerDeps): Promise<number> {
 }
 
 export function startExitTimer(deps: ExitTimerDeps, intervalMs: number): { stop: () => void } {
-  let inProgress = false;
+  // Two independent overlap guards: afterPass (the lateness sweep, which can be slow on a sluggish
+  // candlestick API) must never hold up the pending-exit pass that is trying to finish a sale.
+  let passInProgress = false;
+  let afterPassInProgress = false;
   const timer = setInterval(() => {
-    if (inProgress) return; // a slow pass skips the next tick, never overlaps
-    inProgress = true;
-    (async () => {
-      try {
-        await runPendingExits(deps);
-      } catch (err) {
-        console.error('[exit-timer] pass failed:', err);
-      }
-      try {
-        await deps.afterPass?.();
-      } catch (err) {
-        console.error('[exit-timer] afterPass failed:', err);
-      }
-    })().finally(() => { inProgress = false; });
+    if (!passInProgress) { // a slow pass skips the next tick, never overlaps
+      passInProgress = true;
+      runPendingExits(deps)
+        .catch((err) => console.error('[exit-timer] pass failed:', err))
+        .finally(() => { passInProgress = false; });
+    }
+    if (deps.afterPass && !afterPassInProgress) {
+      afterPassInProgress = true;
+      (async () => deps.afterPass?.())() // wrapped so a synchronous throw is a rejection too
+        .catch((err) => console.error('[exit-timer] afterPass failed:', err))
+        .finally(() => { afterPassInProgress = false; });
+    }
   }, intervalMs);
   return { stop: () => clearInterval(timer) };
 }
