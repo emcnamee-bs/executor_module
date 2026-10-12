@@ -13,8 +13,10 @@ import {
   recordProcessStoppedCleanly,
 } from './decide/ledger.js';
 import { sendAlert } from './alert.js';
-import { fetchActiveLadder } from './decide/kalshi.js';
+import { fetchActiveLadder, fetchLadderForEvent } from './decide/kalshi.js';
 import { runDecisionPipeline } from './decide/pipeline.js';
+import type { ExitWiring } from './decide/pipeline.js';
+import { startExitTimer } from './paper/exitTimer.js';
 import type { OllamaClient } from './decide/ollamaClient.js';
 import { buildGateClient } from './decide/gateProvider.js';
 import { KalshiClient } from './execute/kalshiClient.js';
@@ -93,6 +95,7 @@ export interface OnItemDeps {
   paperLowTier?: boolean;
   gateProvider?: 'ollama' | 'anthropic';
   gateModel?: string;
+  exit?: ExitWiring;
 }
 
 /**
@@ -179,6 +182,12 @@ export async function main(): Promise<void> {
     RECONCILE_OPEN_POSITIONS_INTERVAL_MS
   );
 
+  // Paper exit review (EXIT_REVIEW=on only): the timer finishes sales the news path could not complete.
+  const exitCfg = startup.exitReview;
+  const exitTimer = exitCfg.enabled
+    ? startExitTimer({ db, fetchLadderForEvent }, exitCfg.retryMs)
+    : null;
+
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
@@ -190,6 +199,7 @@ export async function main(): Promise<void> {
     makeOnItem({
       anthropicClient, ollamaClient: gateWiring.client, gateProvider: gateWiring.provider, gateModel: gateWiring.model, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle,
       paperLowTier: startup.paperLowTier,
+      exit: exitCfg.enabled ? { model: exitCfg.model, exitFeeCents: exitCfg.exitFeeCents, dailyUsdCap: exitCfg.dailyUsdCap } : undefined,
     }),
     controller.signal
   );
@@ -206,6 +216,7 @@ export async function main(): Promise<void> {
     console.error('[lifecycle] failed to record clean shutdown (not fatal):', err);
   }
   reconciliationTimer.stop();
+  exitTimer?.stop();
   await client.quit();
   db.close();
   startup.lock.release();

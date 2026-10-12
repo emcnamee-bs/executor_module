@@ -1,0 +1,18 @@
+# EXIT_REVIEW=on drop-in: let ONE paper trade review every relevant news item against the positions it
+# holds and simulate a sell at the touch when the expected loss from that item beats max(2% of cost,
+# the cost of exiting). Design: docs/superpowers/specs/2026-10-12-exit-review-design.md. Paper only:
+# the process refuses to start with this set on the live unit, a non-dry-run process or the live ledger.
+# Enable on a paper unit by copying this file (without .example) to
+#   ~/.config/systemd/user/executor-module@<name>.service.d/exit-review.conf
+# then: systemctl --user daemon-reload && systemctl --user restart executor-module@<name>
+# ROLL BACK: delete that exit-review.conf, then daemon-reload and restart. The code default is off.
+[Service]
+Environment=EXIT_REVIEW=on
+# Model for the exit review call (default claude-sonnet-5). claude-haiku-5-5 is faster and cheaper.
+#Environment=EXIT_REVIEW_MODEL=claude-sonnet-5
+# Cents added to the cost of leaving a position (P&L is gross of fees, so default 0).
+#Environment=EXIT_FEE_CENTS=0
+# How often a sale that could not fully fill is retried, in milliseconds (default 20000).
+#Environment=EXIT_RETRY_MS=20000
+# Estimated daily spend (USD, UTC day) above which ONE Slack alert fires. Reviews are never stopped.
+#Environment=EXIT_DAILY_USD_CAP=5

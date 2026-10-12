@@ -109,6 +109,55 @@ export function resolvePaperLowTier(
   return true;
 }
 
+export interface ExitReviewConfig {
+  enabled: boolean;
+  /** EXIT_REVIEW_MODEL; undefined = the default (Sonnet). */
+  model: string | undefined;
+  exitFeeCents: number;
+  retryMs: number;
+  dailyUsdCap: number;
+}
+
+/**
+ * EXIT_REVIEW=on enables the paper exit review (docs/superpowers/specs/2026-10-12-exit-review-design.md).
+ * Like resolvePaperLowTier it must be impossible to engage on a live-capable process: it refuses to
+ * start unless KALSHI_DRY_RUN is exactly "true", EXECUTOR_LIVE_TRADE is absent, and the profile is
+ * not on the live ledger or consumer group. Unset, empty or "off" means off; anything else fails closed.
+ */
+export function resolveExitReview(
+  profile: Pick<TradeProfile, 'name' | 'ledgerPath' | 'consumerGroup'>,
+  env: NodeJS.ProcessEnv
+): ExitReviewConfig {
+  const off: ExitReviewConfig = { enabled: false, model: undefined, exitFeeCents: 0, retryMs: 20_000, dailyUsdCap: 5 };
+  const value = env.EXIT_REVIEW;
+  if (value === undefined || value === '' || value === 'off') return off;
+  const refuse = (why: string) =>
+    new Error(
+      `start refused for trade ${profile.name}: EXIT_REVIEW is set, but ${why}. Exit review is paper-only, enabled per paper unit ` +
+        `via its exit-review.conf drop-in; the live unit must never set it.`
+    );
+  if (value !== 'on') throw refuse(`its value ${JSON.stringify(value)} is not "on" or "off"`);
+  if (env.KALSHI_DRY_RUN !== 'true') throw refuse('KALSHI_DRY_RUN is not "true" (this would be a live process)');
+  if (env.EXECUTOR_LIVE_TRADE !== undefined) throw refuse('EXECUTOR_LIVE_TRADE is set, so this is the live unit');
+  if (profile.ledgerPath.toLowerCase() === LIVE_LEDGER_PATH || profile.consumerGroup === LIVE_CONSUMER_GROUP) {
+    throw refuse(`the profile uses the live ledger ${LIVE_LEDGER_PATH} or live consumer group ${LIVE_CONSUMER_GROUP}`);
+  }
+  const num = (name: string, fallback: number, ok: (n: number) => boolean, rule: string): number => {
+    const raw = env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || !ok(n)) throw new Error(`${name} must be ${rule}, got ${JSON.stringify(raw)}`);
+    return n;
+  };
+  return {
+    enabled: true,
+    model: env.EXIT_REVIEW_MODEL === undefined || env.EXIT_REVIEW_MODEL === '' ? undefined : env.EXIT_REVIEW_MODEL,
+    exitFeeCents: num('EXIT_FEE_CENTS', 0, (n) => n >= 0, 'a number of cents >= 0'),
+    retryMs: num('EXIT_RETRY_MS', 20_000, (n) => Number.isInteger(n) && n >= 1000, 'a whole number of milliseconds >= 1000'),
+    dailyUsdCap: num('EXIT_DAILY_USD_CAP', 5, (n) => n > 0, 'a positive number of US dollars'),
+  };
+}
+
 export interface Startup {
   loaded: LoadedProfile;
   ledgerPath: string;
@@ -118,6 +167,8 @@ export interface Startup {
   halted: boolean;
   /** EXECUTOR_PAPER_LOW_TIER, resolved and validated by resolvePaperLowTier. */
   paperLowTier: boolean;
+  /** EXIT_REVIEW and friends, resolved and validated by resolveExitReview. */
+  exitReview: ExitReviewConfig;
   /** GATE_PROVIDER and friends, resolved and validated by resolveGateConfig (default: the local Ollama gate). */
   gate: GateConfig;
   lock: LedgerLock;
@@ -156,6 +207,7 @@ export async function prepareStartup(
   assertLiveTradeIdentity(profile, env);
   assertLiveLedgerOwnership(profile, env);
   const paperLowTier = resolvePaperLowTier(profile, env);
+  const exitReview = resolveExitReview(profile, env);
   const gate = resolveGateConfig(env);
   const ledgerPath = resolveLedgerPath(profile, repoRoot);
   // Refuses a LIVE start on a ledger file that does not exist (mis-pinned profile guard).
@@ -188,7 +240,7 @@ export async function prepareStartup(
       `structure=${profile.marketStructure} gateProvider=${gate.provider} gateModel=${gate.provider === 'anthropic' ? gate.anthropicModel : profile.gateModel} ` +
       `ledger=${ledgerPath} group=${profile.consumerGroup} ` +
       `bankSha=${loaded.bankSha.slice(0, 12)} keyphrases=${loaded.keyphrases.length} ` +
-      `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted} lowTier=${paperLowTier}`
+      `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted} lowTier=${paperLowTier} exitReview=${exitReview.enabled ? 'on' : 'off'}`
   );
 
   if (!dryRun && !halted) {
@@ -199,5 +251,5 @@ export async function prepareStartup(
     );
   }
 
-  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, gate, lock };
+  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, exitReview, gate, lock };
 }
