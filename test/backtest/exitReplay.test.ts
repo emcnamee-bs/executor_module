@@ -2,7 +2,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   extractArticleText, parseLadderJson, bandsAt, trajectoryAt, replayPosition, summarizeReplay,
-  type CandleMap, type ReplayItem, type ReplayPosition, type ReviewFn,
+  summarizeSkips, reviewReliability, sampleSkipReasons,
+  type CandleMap, type ReplayRow, type ReplayItem, type ReplayPosition, type ReviewFn,
 } from '../../src/backtest/exitReplay.js';
 import type { Candle } from '../../src/decide/kalshiHistory.js';
 import type { BandMarket } from '../../src/decide/kalshi.js';
@@ -165,5 +166,34 @@ describe('summarizeReplay', () => {
       { ...base, positionId: 4, reviewed: 1, sold: null, actualPnlCents: null, deltaCents: null },
     ]);
     expect(s).toEqual({ positions: 4, reviewed: 7, sells: 2, regretSells: 1, hypPnlCents: -10 + -10 + -20, actualPnlCents: -50 + 50 + -20, deltaCents: 40 + -60 + 0 });
+  });
+});
+
+describe('summarizeSkips / reviewReliability / sampleSkipReasons', () => {
+  const row = (verdict: ReplayRow['verdict'], reason: string): ReplayRow => ({ itemId: 'x', atSec: 1, verdict, reason, shift: null, confidence: null, lossCents: null });
+  const rows: ReplayRow[] = [
+    row('hold', 'ok'), row('hold', 'ok'), row('sell', 'loss'),
+    row('skip', 'no quote for the held market at that time'), row('skip', 'no quote for the held market at that time'),
+    row('skip', 'review failed: API 529'), row('skip', 'review failed: API 529'), row('skip', 'review failed: 401 bad key'),
+    row('skip', 'sell triggered but there was no bid at that time'),
+    row('skip', 'something else'),
+  ];
+
+  it('classifies every row exactly once by verdict and reason', () => {
+    expect(summarizeSkips(rows)).toEqual({ noQuote: 2, reviewFailed: 3, noBid: 1, otherSkip: 1, holds: 2, sells: 1 });
+    expect(summarizeSkips([])).toEqual({ noQuote: 0, reviewFailed: 0, noBid: 0, otherSkip: 0, holds: 0, sells: 0 });
+  });
+
+  it('flags a position whose reviews mostly or entirely failed', () => {
+    expect(reviewReliability(rows, 7)).toEqual({ failed: 3, calls: 7, mostlyFailed: false, allFailed: false });
+    expect(reviewReliability(rows, 6)).toEqual({ failed: 3, calls: 6, mostlyFailed: true, allFailed: false });
+    const allBad = [row('skip', 'review failed: x'), row('skip', 'review failed: y')];
+    expect(reviewReliability(allBad, 2)).toEqual({ failed: 2, calls: 2, mostlyFailed: true, allFailed: true });
+    expect(reviewReliability([row('skip', 'no quote for the held market at that time')], 0)).toEqual({ failed: 0, calls: 0, mostlyFailed: false, allFailed: false });
+  });
+
+  it('lists up to n distinct skip reasons in order', () => {
+    expect(sampleSkipReasons(rows, 3)).toEqual(['no quote for the held market at that time', 'review failed: API 529', 'review failed: 401 bad key']);
+    expect(sampleSkipReasons([row('hold', 'ok')], 5)).toEqual([]);
   });
 });

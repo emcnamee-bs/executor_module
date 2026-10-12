@@ -183,6 +183,37 @@ export async function replayPosition(
   };
 }
 
+/** Classifies replay rows so a run of failed reviews or missing quotes is distinguishable from "the model held". */
+export function summarizeSkips(rows: ReplayRow[]): { noQuote: number; reviewFailed: number; noBid: number; otherSkip: number; holds: number; sells: number } {
+  const s = { noQuote: 0, reviewFailed: 0, noBid: 0, otherSkip: 0, holds: 0, sells: 0 };
+  for (const r of rows) {
+    if (r.verdict === 'hold') s.holds += 1;
+    else if (r.verdict === 'sell') s.sells += 1;
+    else if (r.reason.startsWith('no quote')) s.noQuote += 1;
+    else if (r.reason.startsWith('review failed:')) s.reviewFailed += 1;
+    else if (r.reason.includes('no bid')) s.noBid += 1;
+    else s.otherSkip += 1;
+  }
+  return s;
+}
+
+/** `calls` is the model calls made (ReplayResult.reviewed, which counts failed calls too). */
+export function reviewReliability(rows: ReplayRow[], calls: number): { failed: number; calls: number; mostlyFailed: boolean; allFailed: boolean } {
+  const failed = summarizeSkips(rows).reviewFailed;
+  return { failed, calls, mostlyFailed: failed > 0 && failed * 2 >= calls, allFailed: calls > 0 && failed >= calls };
+}
+
+/** Up to n distinct skip reasons, in row order. */
+export function sampleSkipReasons(rows: ReplayRow[], n: number): string[] {
+  const out: string[] = [];
+  for (const r of rows) {
+    if (r.verdict !== 'skip' || out.includes(r.reason)) continue;
+    out.push(r.reason);
+    if (out.length >= n) break;
+  }
+  return out;
+}
+
 export function summarizeReplay(results: ReplayResult[]): {
   positions: number; reviewed: number; sells: number; regretSells: number; hypPnlCents: number; actualPnlCents: number; deltaCents: number;
 } {

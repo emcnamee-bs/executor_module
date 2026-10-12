@@ -16,7 +16,7 @@ import { loadProfile } from '../src/profile/profile.js';
 import { fetchCandles, type Candle } from '../src/decide/kalshiHistory.js';
 import { reviewForExit } from '../src/decide/exitReview.js';
 import {
-  extractArticleText, parseLadderJson, replayPosition, summarizeReplay,
+  extractArticleText, parseLadderJson, replayPosition, summarizeReplay, summarizeSkips, reviewReliability, sampleSkipReasons,
   type CandleMap, type ReplayItem, type ReplayPosition, type ReviewFn, type ReplayResult,
 } from '../src/backtest/exitReplay.js';
 
@@ -124,14 +124,17 @@ async function main(): Promise<void> {
       candles.set(band.ticker, await candlesForRange(series, band.ticker, start, end));
     }
   }
+  const markTag = new Map<number, string>(); // open positions only: their "actual" is an interim mark, not an outcome
   for (const p of positions) {
     if (p.actualPnlCents === null) { // still open: use the last candle's held-side mark
       const cs = candles.get(p.marketTicker) ?? [];
       const last = cs[cs.length - 1];
       const mark = last === undefined ? null : p.side === 'yes' ? last.yesBidCents : last.yesAskCents === null ? null : 100 - last.yesAskCents;
       p.actualPnlCents = mark === null ? null : p.contracts * (mark - p.entryPriceCents);
+      markTag.set(p.id, last === undefined || mark === null ? 'open, no mark available' : `open-mark @${new Date(last.endTs * 1000).toISOString()}`);
     }
   }
+  const pnlTag = (id: number): string => markTag.get(id) ?? 'settled';
 
   const client = new Anthropic();
   const scratch = openLedger(':memory:');
@@ -147,11 +150,28 @@ async function main(): Promise<void> {
   for (const p of positions) {
     const r = await replayPosition(p, items, candles, review, { exitFeeCents: args.fee, maxItems: args.maxItems });
     results.push(r);
-    console.log(`  position ${p.id} ${p.side.toUpperCase()} ${p.marketTicker} x${p.contracts}@${p.entryPriceCents}: reviewed ${r.reviewed}, ` +
-      (r.sold ? `SELL at ${new Date(r.sold.atSec * 1000).toISOString()} @${r.sold.priceCents}c (hyp ${r.sold.hypPnlCents}c vs actual ${r.actualPnlCents}c)` : `no sell (actual ${r.actualPnlCents}c)`));
+    const k = summarizeSkips(r.rows);
+    const breakdown = `holds ${k.holds}, no-quote ${k.noQuote}, review-failed ${k.reviewFailed}, no-bid ${k.noBid}` + (k.otherSkip > 0 ? `, other-skip ${k.otherSkip}` : '');
+    const rel = reviewReliability(r.rows, r.reviewed);
+    console.log(`  position ${p.id} ${p.side.toUpperCase()} ${p.marketTicker} x${p.contracts}@${p.entryPriceCents}: reviewed ${r.reviewed} (${breakdown}), ` +
+      (r.sold ? `SELL at ${new Date(r.sold.atSec * 1000).toISOString()} @${r.sold.priceCents}c (hyp ${r.sold.hypPnlCents}c vs actual ${r.actualPnlCents}c [${pnlTag(p.id)}])` : `no sell (actual ${r.actualPnlCents}c [${pnlTag(p.id)}])`) +
+      (rel.mostlyFailed ? `  <-- UNRELIABLE: ${rel.failed} of ${rel.calls} reviews failed` : ''));
   }
+  const settledResults = results.filter((r) => !markTag.has(r.positionId));
   const summary = summarizeReplay(results);
-  console.log('[backtest-exit] summary', JSON.stringify(summary));
+  const settledSummary = summarizeReplay(settledResults);
+  console.log('[backtest-exit] summary, settled positions only (outcomes)', JSON.stringify(settledSummary));
+  console.log(`[backtest-exit] summary, all positions (${markTag.size} open positions use an interim mark, not an outcome)`, JSON.stringify(summary));
+
+  const totalCalls = results.reduce((n, r) => n + r.reviewed, 0);
+  const totalFailed = results.reduce((n, r) => n + summarizeSkips(r.rows).reviewFailed, 0);
+  const totalNoQuote = results.reduce((n, r) => n + summarizeSkips(r.rows).noQuote, 0);
+  const totalsLine = `Review failures: ${totalFailed} of ${totalCalls} model calls; quote gaps: ${totalNoQuote} items`;
+  const warnings: string[] = [];
+  if (totalFailed > 0) warnings.push(`WARNING: ${totalFailed} review calls failed - this run is NOT reliable evidence`);
+  if (totalCalls > 0 && totalFailed >= totalCalls) warnings.push('WARNING: EVERY model call failed - "never sold" below means nothing; check the API key, credit and rate limits and re-run');
+  console.log(`[backtest-exit] ${totalsLine}`);
+  for (const w of warnings) console.warn(`[backtest-exit] ${w}`);
 
   fs.mkdirSync(args.out, { recursive: true });
   const file = path.join(args.out, `${args.trade}-${new Date().toISOString().slice(0, 10)}.md`);
@@ -159,13 +179,21 @@ async function main(): Promise<void> {
     `# Exit-review backtest: ${args.trade}`, '',
     `Run ${new Date().toISOString()}; model ${args.model ?? 'claude-sonnet-5 (default)'}; fee ${args.fee}c; max ${args.maxItems} items per position.`,
     `Gated items with text: ${items.length}. Positions replayed: ${positions.length}. Skipped: ${skipped.length}.`, '',
-    '## Summary', '```', JSON.stringify(summary, null, 2), '```', '',
+    totalsLine, '',
+    ...warnings.flatMap((w) => [`**${w}**`, '']),
+    '## Summary, settled positions only (outcomes)', '```', JSON.stringify(settledSummary, null, 2), '```', '',
+    `## Summary, all positions (${markTag.size} of ${results.length} are open)`, '```', JSON.stringify(summary, null, 2), '```', '',
+    'Positions tagged `open-mark` have not settled: their "actual" P&L is the held-side mark of the last candle at run time, an interim value and NOT an outcome, so delta and regretSells for them compare a sell against an interim price.',
     'Positive delta = selling at the trigger would have beaten holding. Profiles for dated weekly markets may be stale; fills assume the touch absorbs the order (candles carry no depth).', '',
     '## Positions',
   ];
   for (const r of results) {
+    const k = summarizeSkips(r.rows);
+    const rel = reviewReliability(r.rows, r.reviewed);
     lines.push(`### position ${r.positionId} ${r.side.toUpperCase()} ${r.marketTicker} x${r.contracts} @${r.entryPriceCents}c`);
-    lines.push(`reviewed ${r.reviewed}; actual ${r.actualPnlCents}c; ` + (r.sold ? `SOLD ${new Date(r.sold.atSec * 1000).toISOString()} @${r.sold.priceCents}c = ${r.sold.hypPnlCents}c (delta ${r.deltaCents}c)` : 'never sold'));
+    lines.push(`reviewed ${r.reviewed}; actual ${r.actualPnlCents}c [${pnlTag(r.positionId)}]; ` + (r.sold ? `SOLD ${new Date(r.sold.atSec * 1000).toISOString()} @${r.sold.priceCents}c = ${r.sold.hypPnlCents}c (delta ${r.deltaCents}c)` : 'never sold'));
+    lines.push(`rows: holds ${k.holds}, no-quote ${k.noQuote}, review-failed ${k.reviewFailed}, no-bid ${k.noBid}, other-skip ${k.otherSkip}` + (rel.mostlyFailed ? `  **UNRELIABLE: ${rel.failed} of ${rel.calls} reviews failed**` : ''));
+    for (const reason of sampleSkipReasons(r.rows, 5)) lines.push(`- skip reason: ${reason}`);
     for (const row of r.rows.filter((x) => x.verdict !== 'skip').slice(0, 40)) {
       lines.push(`- ${new Date(row.atSec * 1000).toISOString()} ${row.verdict.toUpperCase()} shift=${row.shift} conf=${row.confidence} loss=${row.lossCents?.toFixed(2)}c :: ${row.reason}`);
     }
