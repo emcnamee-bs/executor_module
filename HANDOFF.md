@@ -876,6 +876,8 @@ To revive one: `systemctl --user enable --now executor-module@<name>`, put it ba
 (the wall publishers are not in this repo), and if its series changed, rebuild its profile first (`npm run build-trade -- --series
 <SERIES> --validate`).
 
+Wall publisher (`~/wall/paper-grid-publish.py`, not in this repo): it counts `paper_exits` (open partial = realized exit P&L + marked remainder; fully exited = 'exited', result NULL).
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.
