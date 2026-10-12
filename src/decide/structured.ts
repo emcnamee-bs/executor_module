@@ -16,6 +16,8 @@ export interface StructuredCall {
   schema: object;
   excerptSource: 'page' | 'snippet' | null;
   tripwireHit: boolean;
+  /** Defaults to SONNET_MODEL; recorded in ai_calls.model. */
+  model?: string;
   summarize: (parsed: unknown) => { verdict: string; reasoning: string | null };
 }
 
@@ -40,6 +42,7 @@ function recordFailure(db: Database.Database, stage: AiStage, rec: AiCallRow): v
 }
 
 export async function callStructured(call: StructuredCall): Promise<unknown> {
+  const model = call.model ?? SONNET_MODEL;
   const messages = [{ role: 'user' as const, content: call.user }];
   const requestJson = JSON.stringify({
     system: call.system,
@@ -52,7 +55,7 @@ export async function callStructured(call: StructuredCall): Promise<unknown> {
     itemId: call.itemId,
     stage: call.stage,
     provider: 'anthropic' as const,
-    model: SONNET_MODEL,
+    model,
     promptSha: sha12(call.system),
     requestJson,
     excerptSource: call.excerptSource,
@@ -64,7 +67,7 @@ export async function callStructured(call: StructuredCall): Promise<unknown> {
   let response: any;
   try {
     response = await call.client.messages.parse({
-      model: SONNET_MODEL,
+      model,
       max_tokens: call.maxTokens,
       ...(call.system ? { system: call.system } : {}),
       messages,
