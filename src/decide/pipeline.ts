@@ -22,13 +22,12 @@ import {
   type DecisionRecord,
 } from './ledger.js';
 import { evaluateSizing, evaluateBinarySizing, type SizingResult } from './sizing.js';
-import { runGate } from './gate.js';
 import { triageItem } from './triage.js';
 import { decideTrade } from './decide.js';
+import { makePrepare, type PreparedItem } from './prepare.js';
 import { placeOrder, deriveClientOrderId } from '../execute/order.js';
 import { positionForTicker, type KalshiClient } from '../execute/kalshiClient.js';
-import { fetchArticle, articleToText, snippetArticle } from '../fetch/excerpt.js';
-import { detectInjection, MAX_SOURCE_CHARS } from '../guard/untrusted.js';
+import { fetchArticle } from '../fetch/excerpt.js';
 import { recordPaperPosition, hasPaperPosition, paperExposureCents, PAPER_CAPS } from '../paper/paper.js';
 import type { LoadedProfile } from '../profile/profile.js';
 
@@ -95,6 +94,11 @@ function skipRecord(
 }
 
 export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promise<void> {
+  const isDirect = deps.profile.profile.directSources.includes(item.source_id);
+  await runEntryPipeline(item, deps, makePrepare(item, deps, isDirect));
+}
+
+async function runEntryPipeline(item: Item, deps: PipelineDeps, prep: () => Promise<PreparedItem>): Promise<void> {
   const { anthropicClient, ollamaClient, db, fetchLadder, kalshiClient, profile: loaded } = deps;
   const trade = loaded.profile.name;
   const structure = loaded.profile.marketStructure;
@@ -161,48 +165,19 @@ export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promi
       return;
     }
 
-    // One fetch, capped at the per-source ceiling. Gate and triage see the first 800
-    // characters of it (capped again inside their wrappers); the decision sees all of
-    // it. A direct source IS the resolution data, so its own snippet is the article.
-    const fetchedRaw = isDirect ? null : await deps.fetchArticle(item.url, { maxChars: MAX_SOURCE_CHARS });
-    // A page that fetched but yielded no text (e.g. JS-rendered) is no article at all:
-    // fall back to the headline+snippet rather than feed the models an empty 'page'.
-    const fetched = fetchedRaw !== null && articleToText(fetchedRaw).trim() !== '' ? fetchedRaw : null;
-    const article = fetched ?? snippetArticle(item.headline, item.snippet, MAX_SOURCE_CHARS);
-    const excerptSource: 'page' | 'snippet' = fetched ? 'page' : 'snippet';
-    const articleText = articleToText(article);
-
-    // Deterministic injection tripwire over everything a model will read. A hit never
-    // drops the item: it bypasses the (flippable) local gate and goes to Sonnet with a
-    // warning, because a model that can be talked out of "relevant" is the harmful case.
-    const tripwireHit = detectInjection(articleText).length > 0;
-    if (tripwireHit) {
-      console.warn(`[TRIPWIRE] item=${item.item_id} source=${item.source_id} text contains instruction-like content; bypassing the local gate`);
+    const prepared = await prep();
+    if (prepared.gate.kind === 'error') {
+      // Recorded with the spec's `gate error:` prefix (final review M2) so analysis queries can
+      // find it; no pending row exists yet, so a plain skip is correct.
+      record(skipRecord(item, `gate error: ${prepared.gate.reason}`, { rung, orderStatus: 'resolved' }));
+      return;
     }
-
-    let gateReason: string | null = null;
-    if (!isDirect && !tripwireHit) {
-      let gate;
-      try {
-        gate = await runGate(
-          { ollama: ollamaClient, db, profile: loaded, provider: deps.gateProvider, model: deps.gateModel },
-          { itemId: item.item_id, excerptText: articleText, excerptSource, tripwireHit }
-        );
-      } catch (err) {
-        // Malformed output (GateError) or an Ollama failure, including a timeout: the
-        // gate's own ai_calls row is already written. Recorded with the spec's
-        // `gate error:` prefix (final review M2) so analysis queries can find it; no
-        // pending row exists yet, so a plain skip is correct.
-        const message = err instanceof Error ? err.message : String(err);
-        record(skipRecord(item, `gate error: ${message}`, { rung, orderStatus: 'resolved' }));
-        return;
-      }
-      if (!gate.relevant) {
-        record(skipRecord(item, `gate: not relevant: ${gate.reason}`, { rung, orderStatus: 'resolved' }));
-        return;
-      }
-      gateReason = gate.reason;
+    if (prepared.gate.kind === 'irrelevant') {
+      record(skipRecord(item, `gate: not relevant: ${prepared.gate.reason}`, { rung, orderStatus: 'resolved' }));
+      return;
     }
+    const { articleText, excerptSource, tripwireHit } = prepared;
+    const gateReason: string | null = prepared.gate.reason;
 
     const triage = await triageItem(anthropicClient, db, {
       loaded, itemId: item.item_id, excerptText: articleText, excerptSource, gateReason, tripwireHit,
