@@ -834,6 +834,32 @@ switch it off when the test window ends.
 
 ---
 
+### 5a.6 Validating a trade's keyphrases against the news archive (`validate-bank`)
+
+`build-trade` writes a keyphrase list but never checks it against the stream it will run on. Replaying the 41-day iip archive
+over every list (2026-10-12) found: one over-broad phrase producing most of a bank's hits (gold: "sanctions on Russia" 70%;
+gasoline: "sanctions on Russian oil" 73%; Hormuz weekly: "Strait of Hormuz" 95%), entity phrases that fire on unrelated posts
+("Tren de Aragua" for a Venezuela-leadership trade), and banks with no hits at all because no ingested source covers the topic.
+
+- **What it does:** replays a trade's keyphrases over the iip archive (opened read-only; quarantined items excluded because iip
+  withholds them from the stream), takes the phrases with at least `--min-hits` hits, samples `--sample` of each phrase's hits
+  (spread across sources) and has a strict audit judge rate them: "is this a substantive, on-topic report a trader would want?"
+  A phrase whose sampled hits pass less than `--max-pass-rate` (default 20%) is recommended for removal. Thin evidence (under 8
+  judged) is never removed, and a phrase whose every word comes from the trade's own title/settlement text (its subject, e.g.
+  `diesel export ban`) is never auto-removed: it is flagged for review. `--keep-phrases "a;b"` protects named phrases (semicolon-separated).
+- **Why a separate judge:** the live gate and the triage stage are deliberately lenient (pass anything plausible, let Sonnet's
+  decide decline it), so they pass most hits of even a noisy phrase. Measuring keyphrase quality needs a precision question.
+  The judge runs on Haiku 5.5 through the same Claude client as the live gate, against a throwaway ledger (no real ledger, spend
+  cap or breaker is touched); about $0.0002 per call, `--max-calls` (default 1500) caps a trade.
+- **Run it:** `npm run validate-bank -- --trade kxgoldmon` (report only), `--all --exclude kxaprpotus` for the fleet, add
+  `--apply` to trim. `build-trade --validate` runs the same check right after a build and trims the new list. The old list is
+  backed up to `~/trade-profile-backups/<trade>/keyphrases.json.bak-<ts>` (outside the repo); a list is never trimmed below
+  `--floor` (default 150) phrases; the hand-pinned live profile is never edited, even with `--apply`.
+- **Read the report before `--apply`:** the tool measures precision only. It cannot see recall (a trade can lose real news by
+  dropping a key entity phrase whose sampled hits happened to be noise), so check any entity or name phrase it proposes to remove.
+- **Limits:** the judge sees the headline and snippet (no page body); the archive is dominated by one tier-4 Bluesky firehose, so
+  the tool tells you a phrase is noisy on that stream, not that it is useless on better sources.
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.
