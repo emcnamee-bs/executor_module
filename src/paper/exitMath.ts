@@ -65,6 +65,7 @@ export function evaluateExit(input: ExitMathInput): ExitMathResult {
   const heldMid = side === 'yes' ? yesMid : 100 - yesMid;
   const heldBid = side === 'yes' ? market.yesBidCents : market.yesAskCents === null ? null : 100 - market.yesAskCents;
   const quoted = { midCents: heldMid, bidCents: heldBid };
+  if (!Number.isFinite(input.shift) || !Number.isFinite(input.confidence)) return hold('non-finite shift or confidence from the model', quoted);
 
   let fairAfter: number;
   if (input.structure === 'binary') {
@@ -93,6 +94,7 @@ export function evaluateExit(input: ExitMathInput): ExitMathResult {
   const triggerTotal = EXIT_LOSS_FRACTION * input.contracts * input.entryPriceCents;
   const numbers = { ...quoted, fairAfterCents: fairAfter, lossCents: lossPerContract, exitCostCents: exitCost };
 
+  if (!Number.isFinite(lossPerContract)) return hold('expected loss is not a finite number', quoted);
   if (totalLoss <= triggerTotal) {
     return { sell: false, reason: `expected loss ${totalLoss.toFixed(2)}c is not above 2% of cost (${triggerTotal.toFixed(2)}c)`, ...numbers };
   }

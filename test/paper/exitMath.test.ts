@@ -136,3 +136,32 @@ describe('evaluateExit (band ladder)', () => {
     expect(r).toMatchObject({ sell: true, midCents: 50, fairAfterCents: 30, lossCents: 20 });
   });
 });
+
+describe('evaluateExit (non-finite model output never sells)', () => {
+  const binMarket: BandMarket = {
+    ticker: 'B', floorStrike: null, capStrike: null, strikeType: null, status: 'active',
+    yesAskCents: 61, yesBidCents: 59, yesAskSizeContracts: 100, yesBidSizeContracts: 100,
+  };
+  const binary = (over: Partial<ExitMathInput> = {}): ExitMathInput => ({
+    structure: 'binary', side: 'yes', contracts: 2, remaining: 2, entryPriceCents: 60,
+    market: binMarket, bands: [binMarket], shift: -20, confidence: 1, ...over,
+  });
+  const cases: Array<[string, Partial<ExitMathInput>]> = [
+    ['NaN shift', { shift: Number.NaN }],
+    ['Infinity shift', { shift: Number.POSITIVE_INFINITY }],
+    ['-Infinity shift', { shift: Number.NEGATIVE_INFINITY }],
+    ['NaN confidence', { confidence: Number.NaN }],
+  ];
+
+  it.each(cases)('threshold ladder: %s holds with a reason', (_name, over) => {
+    const r = evaluateExit(input(over));
+    expect(r.sell).toBe(false);
+    expect(r.reason).toMatch(/non-finite/);
+  });
+
+  it.each(cases)('binary market: %s holds with a reason', (_name, over) => {
+    const r = evaluateExit(binary(over));
+    expect(r.sell).toBe(false);
+    expect(r.reason).toMatch(/non-finite/);
+  });
+});
