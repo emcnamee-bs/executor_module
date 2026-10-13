@@ -60,7 +60,7 @@ describe('callStructured', () => {
     const { client, calls } = fakeClient(ok);
     const out = await callStructured(base(client));
     expect(out).toEqual(ok.parsed_output);
-    expect(calls[0].model).toBe('claude-sonnet-5');
+    expect(calls[0].model).toBe('claude-sonnet-5-5');
     expect(calls[0].system).toBe('SYSTEM TEXT');
     expect(calls[0].messages).toEqual([{ role: 'user', content: 'USER TEXT' }]);
     expect(calls[0].max_tokens).toBe(1024);
@@ -73,7 +73,7 @@ describe('callStructured', () => {
     const rows = db.prepare('SELECT * FROM ai_calls').all() as any[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      trade: 'kxaaagasw', item_id: 'item-1', stage: 'triage', provider: 'anthropic', model: 'claude-sonnet-5',
+      trade: 'kxaaagasw', item_id: 'item-1', stage: 'triage', provider: 'anthropic', model: 'claude-sonnet-5-5',
       verdict: 'escalate', reasoning: 'supply chain link', excerpt_source: 'page', tripwire_hit: 1,
       prompt_tokens: 321, output_tokens: 17, stop_reason: 'end_turn', error: null,
     });

@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3';
 const PRICES: Record<string, { inUsdPerMTok: number; outUsdPerMTok: number }> = {
   'claude-haiku-5-5': { inUsdPerMTok: 0.1, outUsdPerMTok: 0.5 },
   'claude-sonnet-5': { inUsdPerMTok: 3, outUsdPerMTok: 15 },
+  'claude-sonnet-5-5': { inUsdPerMTok: 2, outUsdPerMTok: 10 },
 };
 const UNKNOWN_MODEL_PRICE = { inUsdPerMTok: 3, outUsdPerMTok: 15 };
 

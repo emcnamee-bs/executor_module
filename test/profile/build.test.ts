@@ -99,7 +99,7 @@ describe('buildTradeProfile', () => {
     expect(loaded.profile).toMatchObject({
       name: 'kxaaagasw', seriesTicker: 'KXAAAGASW', marketStructure: 'threshold', magnitudeUnit: 'USD/gal', maxMagnitude: 0.5,
       directSources: ['aaa_national_average'], gateModel: 'qwen2.5:7b-instruct-q4_K_M', gateKeepAlive: '10m',
-      ledgerPath: 'data/kxaaagasw/decisions.db', consumerGroup: 'execmod-kxaaagasw', generatedAt: '2026-10-08T12:00:00.000Z', generatorModel: 'claude-sonnet-5',
+      ledgerPath: 'data/kxaaagasw/decisions.db', consumerGroup: 'execmod-kxaaagasw', generatedAt: '2026-10-08T12:00:00.000Z', generatorModel: 'claude-sonnet-5-5',
     });
     expect(loaded.keyphrases).toHaveLength(200);
     expect(profile.name).toBe('kxaaagasw');

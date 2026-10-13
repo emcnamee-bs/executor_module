@@ -8,8 +8,8 @@
 # ROLL BACK: delete that exit-review.conf, then daemon-reload and restart. The code default is off.
 [Service]
 Environment=EXIT_REVIEW=on
-# Model for the exit review call (default claude-sonnet-5). claude-haiku-5-5 is faster and cheaper.
-#Environment=EXIT_REVIEW_MODEL=claude-sonnet-5
+# Model for the exit review call (default claude-sonnet-5-5). claude-haiku-5-5 is faster and cheaper.
+#Environment=EXIT_REVIEW_MODEL=claude-sonnet-5-5
 # Cents added to the cost of leaving a position (P&L is gross of fees, so default 0).
 #Environment=EXIT_FEE_CENTS=0
 # How often a sale that could not fully fill is retried, in milliseconds (default 20000).

@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
 import { recordAiCall, sha12, type AiStage } from '../ailog/aiLog.js';
 
-export const SONNET_MODEL = 'claude-sonnet-5';
+export const SONNET_MODEL = 'claude-sonnet-5-5';
 
 export interface StructuredCall {
   client: Anthropic;

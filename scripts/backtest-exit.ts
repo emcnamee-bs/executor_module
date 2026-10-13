@@ -177,7 +177,7 @@ async function main(): Promise<void> {
   const file = path.join(args.out, `${args.trade}-${new Date().toISOString().slice(0, 10)}.md`);
   const lines: string[] = [
     `# Exit-review backtest: ${args.trade}`, '',
-    `Run ${new Date().toISOString()}; model ${args.model ?? 'claude-sonnet-5 (default)'}; fee ${args.fee}c; max ${args.maxItems} items per position.`,
+    `Run ${new Date().toISOString()}; model ${args.model ?? 'claude-sonnet-5-5 (default)'}; fee ${args.fee}c; max ${args.maxItems} items per position.`,
     `Gated items with text: ${items.length}. Positions replayed: ${positions.length}. Skipped: ${skipped.length}.`, '',
     totalsLine, '',
     ...warnings.flatMap((w) => [`**${w}**`, '']),

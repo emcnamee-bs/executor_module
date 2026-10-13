@@ -75,9 +75,9 @@ describe('reviewForExit (fake client, offline)', () => {
       expect(r).toEqual({ shift: -2, confidence: 0.6, reason: 'waiver is bearish for WTI' });
       const row = db.prepare('SELECT stage, model, verdict, reasoning FROM ai_calls').get() as any;
       expect(row.stage).toBe('exit_review');
-      expect(row.model).toBe('claude-sonnet-5');
+      expect(row.model).toBe('claude-sonnet-5-5');
       expect(row.verdict).toBe('shift:-2 conf:0.6');
-      expect(calls[0].model).toBe('claude-sonnet-5');
+      expect(calls[0].model).toBe('claude-sonnet-5-5');
     }));
 
   it('a model override reaches the API call and the ai_calls row', () =>

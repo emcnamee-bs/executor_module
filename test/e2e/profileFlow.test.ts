@@ -138,7 +138,7 @@ describe('profile flow, end to end through makeOnItem', () => {
     expect(fakes.ollamaCalls[0].options).toMatchObject({ temperature: 0, numCtx: 3072, numPredict: 200, keepAlive: '10m' });
     expect(fakes.ollamaCalls[0].options.format).toMatchObject({ type: 'object' });
     // decide: model id, and the article excerpt reached the decision prompt
-    expect(fakes.anthropicCalls[1].model).toBe('claude-sonnet-5');
+    expect(fakes.anthropicCalls[1].model).toBe('claude-sonnet-5-5');
     expect(fakes.anthropicCalls[1].messages[0].content).toContain('Petroleum-product barges headed to Midwest terminals face delays.');
     // sizing: the threshold ladder (series from the profile) produced a paper position
     const paper = db.prepare('SELECT * FROM paper_positions').all() as any[];
