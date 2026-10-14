@@ -21,6 +21,7 @@ import { runPerpGate, type ModelDeps } from './model/gate.js';
 import { extractImpact } from './model/impact.js';
 import { createBroker, resolveMode } from './startup.js';
 import { appendJournal, getState, openPerpDb, setState } from './store/db.js';
+import { createTickLoop } from './tickLoop.js';
 import type { MacroPoint } from './types.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -120,12 +121,7 @@ export async function main(): Promise<void> {
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
 
-  let ticking = false;
-  const tickTimer = setInterval(() => {
-    if (ticking) return;
-    ticking = true;
-    engine.tick().finally(() => { ticking = false; });
-  }, tickMs);
+  const tickLoop = createTickLoop(engine, tickMs);
 
   let lastCoverageAlertDay: string | null = null;
   const heartbeat = setInterval(() => {
@@ -148,8 +144,8 @@ export async function main(): Promise<void> {
       await intake.handleEntry(entry); // never rejects
     }, controller.signal);
   } finally {
-    clearInterval(tickTimer);
     clearInterval(heartbeat);
+    await tickLoop.stop(); // wait for an in-flight tick before the connections and the db close
     await redis.quit().catch(() => undefined);
     db.close();
   }
