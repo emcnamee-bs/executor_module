@@ -16,6 +16,7 @@ import { collectPerp } from './collectors/perpMarket.js';
 import { loadPerpConfig } from './config.js';
 import { PerpEngine, type Collected } from './engine/engine.js';
 import { NewsIntake } from './intake/newsIntake.js';
+import { checkSilence } from './intake/silence.js';
 import { ensureModelCallsTable } from './model/callJson.js';
 import { runPerpGate, type ModelDeps } from './model/gate.js';
 import { extractImpact } from './model/impact.js';
@@ -124,9 +125,18 @@ export async function main(): Promise<void> {
   const tickLoop = createTickLoop(engine, tickMs);
 
   let lastCoverageAlertDay: string | null = null;
+  const intakeStartedAtMs = Date.now();
+  let silence = { alerted: false };
   const heartbeat = setInterval(() => {
     const now = Date.now();
     appendJournal(db, { tsMs: now, kind: 'heartbeat', payload: { status: engine.status(), intake: intake.counters } });
+    const quiet = checkSilence(silence, now, intake.lastEntryAtMs, intakeStartedAtMs);
+    silence = quiet.state;
+    if (quiet.alert) {
+      void alert(
+        `[PERP] no IIP items for ${Math.round(quiet.silentForMs / 60_000)} minutes: news-driven action is impaired; open positions stay protected by the exchange-side stop`
+      );
+    }
     const day = new Date(now).toISOString().slice(0, 10);
     if (lastCoverageAlertDay !== day) {
       lastCoverageAlertDay = day;

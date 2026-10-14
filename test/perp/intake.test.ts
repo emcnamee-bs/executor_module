@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Item } from '../../src/item.js';
 import { NewsIntake } from '../../src/perp/intake/newsIntake.js';
+import { checkSilence } from '../../src/perp/intake/silence.js';
 import { SpendCapError } from '../../src/perp/model/callJson.js';
 import { listJournal, openPerpDb } from '../../src/perp/store/db.js';
 import type { ImpactAssessment } from '../../src/perp/types.js';
@@ -270,5 +271,45 @@ describe('NewsIntake', () => {
       expect(sent).toHaveLength(1);
       errSpy.mockRestore();
     });
+  });
+});
+
+describe('IIP silence (W3)', () => {
+  it('lastEntryAtMs is null before any entry and is stamped at the start of every handleEntry, even unparseable ones', async () => {
+    let now = NOW;
+    const { intake } = mk({ now: () => now });
+    expect(intake.lastEntryAtMs).toBeNull();
+    now = NOW + 1000;
+    await intake.handleEntry({ id: '1-0', fields: {} }); // parse_error
+    expect(intake.lastEntryAtMs).toBe(NOW + 1000);
+    now = NOW + 2000;
+    const entry = { id: '9-0', get fields(): Record<string, string> { throw new Error('boom'); } };
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await intake.handleEntry(entry)).toBe('error');
+    errSpy.mockRestore();
+    expect(intake.lastEntryAtMs).toBe(NOW + 2000);
+  });
+});
+
+describe('checkSilence (W3)', () => {
+  const T = 30 * 60_000;
+  it('does not alert within the threshold, counting from the later of the last entry and the start', () => {
+    expect(checkSilence({ alerted: false }, NOW + T, null, NOW).alert).toBe(false);
+    expect(checkSilence({ alerted: false }, NOW + T + 1, NOW + 1000, NOW).alert).toBe(false);
+    expect(checkSilence({ alerted: false }, NOW + 10 * T, NOW + 9 * T + 1, NOW).alert).toBe(false);
+  });
+  it('alerts once past the threshold, then stays quiet until an entry re-arms it', () => {
+    const first = checkSilence({ alerted: false }, NOW + T + 1, null, NOW);
+    expect(first).toEqual({ alert: true, silentForMs: T + 1, state: { alerted: true } });
+    const second = checkSilence(first.state, NOW + 2 * T, null, NOW);
+    expect(second.alert).toBe(false);
+    expect(second.state.alerted).toBe(true);
+    const rearmed = checkSilence(second.state, NOW + 2 * T + 1000, NOW + 2 * T, NOW);
+    expect(rearmed).toMatchObject({ alert: false, state: { alerted: false } });
+    expect(checkSilence(rearmed.state, NOW + 3 * T + 1, NOW + 2 * T, NOW).alert).toBe(true);
+  });
+  it('uses the default 30 minute threshold', () => {
+    expect(checkSilence({ alerted: false }, NOW + T, NOW, 0).alert).toBe(false);
+    expect(checkSilence({ alerted: false }, NOW + T + 1, NOW, 0).alert).toBe(true);
   });
 });

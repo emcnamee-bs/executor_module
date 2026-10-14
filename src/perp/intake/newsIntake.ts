@@ -34,6 +34,7 @@ export class NewsIntake {
   private capAlertDay: string | null = null;
   private outageAlertDay: string | null = null;
   private consecutiveErrors = 0;
+  private lastEntryAt: number | null = null;
   readonly counters = Object.fromEntries(RESULTS.map((r) => [r, 0])) as Record<IntakeResult, number>;
 
   constructor(private readonly d: IntakeDeps) {}
@@ -64,8 +65,14 @@ export class NewsIntake {
     return this.safe(`journal ${kind}`, () => appendJournal(this.d.db, { tsMs, kind, payload }));
   }
 
+  /** When the last stream entry of any kind (even an unparseable one) arrived; null before the first. */
+  get lastEntryAtMs(): number | null {
+    return this.lastEntryAt;
+  }
+
   async handleEntry(entry: StreamEntry): Promise<IntakeResult> {
     try {
+      this.lastEntryAt = this.d.now(); // the stream is alive, whatever this entry turns out to be
       const parsed = parseItemFields(entry.fields);
       if (!parsed.ok) {
         await this.journal(this.d.now(), 'intake_parse_error', { id: entry.id, error: parsed.error });
