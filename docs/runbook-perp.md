@@ -8,6 +8,7 @@ Spec: `docs/superpowers/specs/2026-10-14-us500-perp-bot-design.md`. Code: `src/p
 - No live unit ships. See "Going live".
 
 ## Install / start (paper)
+    mkdir -p ~/executor_module-perp/data   # the units' ReadWritePaths needs it to exist (else 226/NAMESPACE); a fresh clone may lack it
     mkdir -p ~/.config/systemd/user
     cp ~/executor_module-perp/deploy/mini-mac/perp-bot.service ~/.config/systemd/user/
     systemctl --user daemon-reload && systemctl --user enable --now perp-bot
@@ -26,6 +27,7 @@ Needs `config/perp-calendar.json` filled (below), `~/executor_module/.env` with 
 
 ## Phase 0 (before any order): run `npm run perp-verify` and record the answers here
 - [ ] Trading hours and any daily break confirmed (next close seen: Fri 5 pm ET).
+- [ ] Each collector (Kalshi margin API, FRED, news/IIP stream, calendar file) confirmed available, with its latency noted.
 - [ ] Perp price tracks the S&P 500 (ratio to FRED SP500 is ~constant); contract price mapping understood.
 - [ ] Funding payer confirmed on the demo exchange (set `fundingLongPays` accordingly in `src/perp/broker/paper.ts` if it is the opposite).
 - [ ] Liquidation margin ratio definition confirmed with `/margin/risk` on a demo position.
