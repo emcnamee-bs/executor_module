@@ -1,6 +1,7 @@
 # Unified position-aware decision (`DECISION_MODE=unified`)
 
-Date: 2026-10-13. Status: **draft for the user's review** (no code written). Scope: paper units only. Builds on
+Date: 2026-10-13. Status: **approved by the user on 2026-10-13** with the decisions in section 10 (model recommends and
+code enforces; rolled out to ALL paper units; data integrity must stay intact). Scope: paper units only. Builds on
 `2026-10-13-multi-market-structure-design.md` (its `moves` output shape) and on the exit review already merged.
 
 ## 1. Problem and evidence
@@ -45,15 +46,17 @@ for entry (`buy` or `none`), so its own judgement about selling, holding or buyi
 
 - Paper only; the live unit never runs it (same startup refusal as the exit review). `classic` stays the default and the
   only code path for the live unit.
-- Selected per unit by an environment drop-in (`DECISION_MODE=unified`), so classic and unified can run side by side on
-  different units and be compared from the archive.
+- Selected per unit by an environment drop-in (`DECISION_MODE=unified`); removing the drop-in and restarting is the rollback
+  (the `classic` code path stays in place, unchanged).
 - Cost: one Sonnet call per gated item instead of 2 + N; the existing budget alert applies.
 
-## 5. Evaluation before it is widened
+## 5. Rollout (decision: all paper units)
 
-Replay the news already logged for a pilot set of trades (the backtest tooling exists) through both modes and compare:
-positions opened, sells triggered and their timing, vetoes, cost. Run unified on 3-5 pilot units for a week against their
-classic twins' history before moving more units.
+Because these are paper trades the user chose to roll out to **every** active paper unit rather than pilot a few. The
+safeguard is data integrity, not scale: roll out in three waves (the four units that already trade; the other tradeable
+units; the converted `multi` trades), run the integrity checker (section 9) after each wave and after the first hour of
+live items, and **fix every violation it reports before continuing**. A violation never gets "accepted": either the code is
+corrected and the affected ledger rows repaired from the audit trail, or the unit goes back to `classic` until it is.
 
 ## 6. Out of scope
 
@@ -69,9 +72,38 @@ gate.
 - The model's recommended action can disagree with the numbers; by design either can veto, and every disagreement is in the
   log, which is itself useful analysis.
 
-## 8. Open questions for the user
+## 8. (Open questions: answered, see section 10)
 
-1. **Who has the last word?** Recommended: both must agree (model recommends, code enforces your 2% rule and sizing).
-   Alternative: the model decides outright within the position and exposure limits (more autonomy, less reproducible).
-2. Keep the Sonnet triage step in unified mode (cheaper first look) or drop it (recommended, one call)?
-3. Which units pilot it? Suggested: `kxwti`, `kxaaagasw`, `kxbrentmon`, `kxhormuzweekly` (the ones that already trade).
+## 9. Data integrity (read-only checker, runs on a timer and after each rollout wave)
+
+A read-only tool (`~/exit-analysis/integrity.py`, next to the archive, with tests) opens every ledger with `mode=ro` and
+verifies these invariants, printing each violation with the trade, table, row id and rule, exiting non-zero and sending one
+alert when anything fails:
+
+1. **Positions.** `contracts > 0`; `entry_price_cents` in 1..99; a closed position (`settled_at` set) has `pnl_cents` set;
+   an open one has none; `result` is NULL only for a position closed by exits.
+2. **Exits.** The sum of a position's exit fills never exceeds its contracts; a fully sold position is closed with
+   `pnl_cents` equal to the sum of its fills' P&L; every exit row's review exists, belongs to the same position and has
+   verdict `sell`; fill prices are within the position's side range 1..100.
+3. **Reviews.** At most one review per (item, position); `sell` reviews have numbers (mid, loss, exit cost) and a lag
+   record; `error` reviews carry a reason.
+4. **Legs.** Every leg 2 has a leg 1 with the same `source_item_id`; at most two legs per source item; two-leg items occur
+   only on `exclusive` trades; both legs have positive contracts and distinct markets.
+5. **Audit trail.** Every position created after the multi/unified rollout points to a decision or model-call row that
+   explains it (an `ai_calls` row of stage `decide`, `decide_multi` or `decide_unified` for its item); no `decisions` row
+   has `would_trade = 1` on a paper unit (that table is the real-order path); no ledger has rows older than its archive
+   snapshot missing from the snapshot.
+6. **Unified mode.** Every `decide_unified` call's recommended actions are present for each open position that existed at
+   the time; no sell happened without a `sell` recommendation (and vice versa a recommendation of `sell` that the rule
+   vetoed is recorded as such).
+
+Run order: after every deploy or restart wave, hourly for the first day, then daily with the archive. Findings are
+fixed (code and, where a row is wrong, a documented repair from the audit trail), never silenced.
+
+## 10. Decisions (user, 2026-10-13)
+
+1. **Who has the last word:** both must agree. The model recommends, the code enforces the 2% / exit-cost rule and the
+   sizing gates (the section 2 default).
+2. The Sonnet triage step is dropped in unified mode (one call).
+3. **Roll out to all** paper units, not a pilot; it is only paper trading, so a failure is acceptable as long as it is
+   fixed and the data stays intact (section 5 and section 9).

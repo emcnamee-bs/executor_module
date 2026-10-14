@@ -1,6 +1,7 @@
 # Multi-market structure: making the 11 capture-only trades tradeable
 
-Date: 2026-10-13. Status: **draft for the user's review** (no code written). Scope: paper units only.
+Date: 2026-10-13. Status: **approved by the user on 2026-10-13** with the decisions in section 9 (up to two markets
+per item, tracked; `kxguilfoyleout` retired; builder classifies the outcome group). Scope: paper units only.
 
 ## 1. Problem and evidence
 
@@ -55,6 +56,18 @@ positive, else NO; candidate = (ask of that side, spread, depth, fair, edge). Re
 `contractsWithinCaps` and `PAPER_CAPS` exactly as `evaluateSizing` does. The best-edge candidate wins; one position per
 item; `hasOpenPosition` (same story) and the post-exit re-entry block apply unchanged.
 
+**Two legs per item (decision 2026-10-13).** On an `exclusive` group, up to **two** candidates from one item may be bought,
+on two distinct markets, each independently clearing every gate, the edge threshold and the shared exposure cap
+(`paperExposureCents` for the event counts both legs). Because `paper_positions.item_id` is UNIQUE (it is what makes a
+redelivered stream entry idempotent), the second leg is stored with `item_id = "<item>#2"`, and two new nullable columns
+(added with `ALTER TABLE ... ADD COLUMN`, so existing ledgers need no rebuild) make the pairing explicit and queryable:
+`source_item_id` (the original item id on every leg, NULL on legacy rows) and `leg` (1 or 2, NULL on legacy rows).
+`hasPaperPosition` treats `<item>` and `<item>#2` as the same delivery. Tracking: both legs share one `decisions` row
+reason that names both markets, both appear in `exit-reviews`/`paper_exits` like any position, the analysis archive
+exports the two new columns, and the integrity checker (see the unified-decision spec, section 9) verifies that every
+leg 2 has a leg 1 with the same `source_item_id`, that no item has more than two legs, and that two-leg items exist only
+on `exclusive` trades.
+
 **3.5 Recording and exits.** The position is an ordinary single-market paper position with `structure = 'multi'`. The exit
 review treats `multi` like `binary` (YES-probability-point shifts against the market's own bid/ask; ceiling 100) and its
 prompt names the market by label and tells the model the group type. `paper_exit_*` tables, the retry timer, lateness and
@@ -88,11 +101,15 @@ answer), existing `pipeline.test.ts` unedited. Replay: run the new decision over
 ## 7. Rollout
 
 Paper only. Enable per unit by rebuilding the profile; roll back by restoring the profile backup (the refresh script keeps
-one) and restarting. Suggested order: Fed and Bank of Canada decisions first (liquid, exclusive), then the date ladders,
-then the candidate lists.
+one) and restarting. Order: Fed and Bank of Canada decisions first (liquid, exclusive), then the date ladders, then the
+candidate lists; run the integrity checker after each batch and fix anything it reports before the next.
 
-## 8. Open questions for the user
+## 8. (Open questions: answered, see section 9)
 
-1. Let the builder's model classify `outcomeGroup` (recommended, with the fallback), or keep a hand-written map of the 10?
-2. Keep one position per news item (recommended) or allow up to two markets per item on exclusive sets?
-3. Retire `kxguilfoyleout` now (all markets at 99-100c)?
+## 9. Decisions (user, 2026-10-13)
+
+1. `outcomeGroup` is classified by the builder's model with the deterministic fallback (default, not separately asked).
+2. **Up to two markets per item on exclusive sets**, with explicit tracking (section 3.4: `source_item_id`, `leg`).
+3. **Retire `kxguilfoyleout` now** (stop and disable its unit, remove it from the wall grid, record it in HANDOFF 5a.7).
+4. Data integrity must stay intact throughout: anything that goes wrong on paper is fixed, and the integrity checker
+   (unified-decision spec, section 9) runs after every rollout step.
