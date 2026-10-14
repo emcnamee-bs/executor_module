@@ -16,3 +16,11 @@ export function clearHaltInDb(db: Database.Database, nowMs: number): { wasHalted
   appendJournal(db, { tsMs: nowMs, kind: 'halt_cleared', payload: out });
   return out;
 }
+
+/**
+ * Operator guard for the clear-halt script: clearing also starts a new kill-switch epoch (the old exits and equity
+ * peak stop counting), so doing it when the bot is not halted needs an explicit --force.
+ */
+export function shouldClear(wasHalted: boolean, force: boolean): boolean {
+  return wasHalted || force;
+}

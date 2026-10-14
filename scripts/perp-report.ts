@@ -1,22 +1,28 @@
 // scripts/perp-report.ts
 // Read-only evaluation of a bot database. Usage: npm run perp-report -- --db data/perp/perp-paper.db [--days 30]
 import Database from 'better-sqlite3';
+import fs from 'node:fs';
 import { brierScore, bucketTable, outcomesFor } from '../src/perp/eval/calibration.js';
+import { parseArgs } from '../src/perp/ops/args.js';
 import type { ImpactAssessment } from '../src/perp/types.js';
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
-
-const file = arg('db');
-if (!file) {
-  console.error('usage: perp-report --db <path to perp-<mode>.db> [--days N]');
+const USAGE = 'usage: perp-report --db <path to perp-<mode>.db> [--days N]';
+const args = parseArgs(process.argv.slice(2), { values: ['db', 'days'] });
+if (!args.ok || args.values.db === undefined) {
+  if (!args.ok) console.error(args.error);
+  console.error(USAGE);
   process.exit(2);
 }
-const days = Number(arg('days') ?? 30);
+const file = args.values.db;
+const days = Number(args.values.days ?? 30);
 if (!Number.isFinite(days) || days <= 0) {
   console.error('--days must be a positive number');
+  console.error(USAGE);
+  process.exit(2);
+}
+if (!fs.existsSync(file)) {
+  console.error(`database ${file} does not exist`);
+  console.error(USAGE);
   process.exit(2);
 }
 const since = Date.now() - days * 86_400_000;

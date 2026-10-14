@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseArgs } from '../../src/perp/ops/args.js';
+import { shouldClear } from '../../src/perp/ops/clearHalt.js';
 import { fundPaperInDb } from '../../src/perp/ops/paperFund.js';
 import { getState, listJournal, openPerpDb, setState } from '../../src/perp/store/db.js';
 import type { PaperState } from '../../src/perp/broker/paper.js';
@@ -56,5 +57,14 @@ describe('parseArgs (operator scripts, W1/W12)', () => {
     const r = parseArgs(argv, spec);
     expect(r.ok).toBe(false);
     expect(r.ok ? '' : r.error).toMatch(msg);
+  });
+});
+
+describe('shouldClear (W12)', () => {
+  it('clears a halt, refuses a non-halted bot unless forced', () => {
+    expect(shouldClear(true, false)).toBe(true);
+    expect(shouldClear(true, true)).toBe(true);
+    expect(shouldClear(false, false)).toBe(false);
+    expect(shouldClear(false, true)).toBe(true);
   });
 });
