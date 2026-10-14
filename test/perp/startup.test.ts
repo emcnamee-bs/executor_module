@@ -40,6 +40,26 @@ describe('createBroker', () => {
     expect(paper).toBeInstanceOf(PaperBroker);
     expect((await broker.balance()).equityUsd).toBe(4.25);
   });
+  it('paper never mutates the exchange: open/close/poll/quote/balance work while post/put/del throw (W9c)', async () => {
+    const mutating: string[] = [];
+    const prodClient = {
+      get: async () => ({ market: { bid: '13.75', ask: '13.76', price: '13.755' } }),
+      post: async (p: string) => { mutating.push(`POST ${p}`); throw new Error('paper must not POST'); },
+      put: async (p: string) => { mutating.push(`PUT ${p}`); throw new Error('paper must not PUT'); },
+      del: async (p: string) => { mutating.push(`DELETE ${p}`); throw new Error('paper must not DELETE'); },
+    } as never;
+    const { broker, paper } = createBroker(resolveMode({}, T), { env: {}, ticker: T, prodClient, demoClient: null, now: () => 1 });
+    expect(broker).toBe(paper);
+    await broker.quote();
+    await broker.balance();
+    await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    await broker.setTrailingStop(300);
+    expect(await broker.poll()).toEqual([]);
+    broker.watch('long', 1);
+    await broker.close();
+    expect(await broker.position()).toBeNull();
+    expect(mutating).toEqual([]);
+  });
   it('paper: rejects a non-positive equity', () => {
     expect(() => createBroker(resolveMode({}, T), { env: { PERP_PAPER_EQUITY_USD: '0' }, ticker: T, prodClient: client, demoClient: null, now: () => 1 })).toThrow(/PERP_PAPER_EQUITY_USD/);
   });
