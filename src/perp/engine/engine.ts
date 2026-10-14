@@ -55,6 +55,12 @@ export interface EngineDeps {
   persistBroker?: () => void;
   /** Paper only: applies one funding settlement and returns the USD charged. */
   applyFunding?: (rate: number, markPrice: number) => number;
+  /**
+   * Cadence of the FULL snapshot: the 8-day price history is re-read from the database and a snapshot row is stored at most
+   * this often. Ticks in between are light: they still collect a fresh quote and run every exit rule against it, but reuse the
+   * cached history and write no snapshot row. 0 or absent = every tick is full (the old behavior).
+   */
+  fullSnapshotMs?: number;
 }
 
 export class PerpEngine {
@@ -64,6 +70,9 @@ export class PerpEngine {
   private position: PositionState | null;
   private breachStreak: number;
   private latest: Snapshot | null = null;
+  /** Mark history as of the last full snapshot; light ticks reuse it instead of re-reading 8 days of rows. */
+  private historyCache: Array<{ tsMs: number; mark: number }> = [];
+  private lastFullMs: number | null = null;
   private lastFundingEstimate: number | null = null;
   private consecutiveFailures = 0;
   private lastHoldJournalMs = 0;
@@ -154,6 +163,9 @@ export class PerpEngine {
 
   private async collectSnapshot(now: number): Promise<Snapshot> {
     const c = await this.d.collect();
+    const every = this.d.fullSnapshotMs ?? 0;
+    const full = every <= 0 || this.lastFullMs === null || now - this.lastFullMs >= every;
+    if (full) this.historyCache = markSeries(this.d.db, now - 8 * DAY);
     const snapshot = buildSnapshot({
       nowMs: now,
       perp: c.perp,
@@ -162,9 +174,12 @@ export class PerpEngine {
       macroFetchedAtMs: c.macroFetchedAtMs,
       events: c.events,
       kalshiEvents: c.kalshiEvents,
-      history: markSeries(this.d.db, now - 8 * DAY),
+      history: this.historyCache,
     });
-    saveSnapshot(this.d.db, snapshot);
+    if (full) {
+      saveSnapshot(this.d.db, snapshot);
+      this.lastFullMs = now;
+    }
     this.latest = snapshot;
     return snapshot;
   }
@@ -248,7 +263,9 @@ export class PerpEngine {
   /** Perp move since the item's publish time, signed in the item's direction; null when we have no price from then. */
   private movedSincePublish(a: ImpactAssessment, snap: Snapshot): number | null {
     if (a.direction === 'neutral') return 0;
-    const then = snapshotNear(this.d.db, a.publishedAtMs, PUBLISH_SNAPSHOT_MAX_GAP_MS);
+    // Stored rows are `fullSnapshotMs` apart, so the nearest one can be half that away.
+    const maxGap = Math.max(PUBLISH_SNAPSHOT_MAX_GAP_MS, Math.ceil((this.d.fullSnapshotMs ?? 0) / 2) + 30_000);
+    const then = snapshotNear(this.d.db, a.publishedAtMs, maxGap);
     if (then === null || then.perp.mark <= 0) return null;
     const move = snap.perp.mark / then.perp.mark - 1;
     return a.direction === 'up' ? move : -move;
