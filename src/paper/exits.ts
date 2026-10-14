@@ -12,7 +12,7 @@ export interface OpenPaperPosition {
   id: number;
   trade: string;
   itemId: string;
-  structure: 'band' | 'threshold' | 'binary' | 'capture';
+  structure: 'band' | 'threshold' | 'binary' | 'capture' | 'multi';
   eventTicker: string;
   marketTicker: string;
   side: 'yes' | 'no';

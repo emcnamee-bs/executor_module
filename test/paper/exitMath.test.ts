@@ -122,6 +122,29 @@ describe('evaluateExit (binary market: shift is YES-probability points)', () => 
   });
 });
 
+describe('evaluateExit: multi positions are priced like binary ones', () => {
+  const market: BandMarket = { ticker: 'F-CUT', label: 'Cut 25bps', floorStrike: null, capStrike: null, strikeType: 'custom', status: 'active', yesBidCents: 49, yesAskCents: 51, yesAskSizeContracts: 100, yesBidSizeContracts: 100 };
+  const base = { side: 'yes' as const, contracts: 10, remaining: 10, entryPriceCents: 50, market, bands: [market], confidence: 1 };
+
+  it('sells a YES position when the news removes enough YES probability', () => {
+    const r = evaluateExit({ ...base, structure: 'multi', shift: -20 });
+    expect(r.sell).toBe(true);
+    expect(r.fairAfterCents).toBe(30);
+    expect(r.midCents).toBe(50);
+    expect(evaluateExit({ ...base, structure: 'binary', shift: -20 })).toEqual(r);
+  });
+
+  it('prices a NO position the other way round', () => {
+    const r = evaluateExit({ ...base, side: 'no', structure: 'multi', shift: 20 });
+    expect(r.sell).toBe(true);
+    expect(r.fairAfterCents).toBe(30);
+  });
+
+  it('holds when the shift is small', () => {
+    expect(evaluateExit({ ...base, structure: 'multi', shift: -0.5 }).sell).toBe(false);
+  });
+});
+
 describe('evaluateExit (band ladder)', () => {
   const between = (lo: number, hi: number, mid: number): BandMarket => ({
     ticker: `B-${lo}`, floorStrike: lo, capStrike: hi, strikeType: 'between', status: 'active',

@@ -108,7 +108,7 @@ export async function runExitReview(item: Item, deps: ExitReviewDeps, prepare: (
           marketTicker: position.marketTicker, side: position.side, contracts: position.contracts,
           remaining: position.remaining, entryPriceCents: position.entryPriceCents,
         },
-        market, trajectory, model: deps.model,
+        market, trajectory, model: deps.model, outcomeGroup: loaded.profile.outcomeGroup,
       });
     } catch (err) {
       return errorRow(err instanceof Error ? err.message : String(err));
@@ -116,7 +116,7 @@ export async function runExitReview(item: Item, deps: ExitReviewDeps, prepare: (
     const modelReturnedAt = now();
 
     const math = evaluateExit({
-      structure: position.structure as 'band' | 'threshold' | 'binary',
+      structure: position.structure as 'band' | 'threshold' | 'binary' | 'multi',
       side: position.side, contracts: position.contracts, remaining: position.remaining,
       entryPriceCents: position.entryPriceCents, market, bands: ladder.bands,
       shift: review.shift, confidence: review.confidence, exitFeeCents: deps.exitFeeCents,

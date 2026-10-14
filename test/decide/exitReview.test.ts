@@ -136,6 +136,42 @@ describe('reviewForExit (fake client, offline)', () => {
     }));
 });
 
+describe('exit review for multi positions', () => {
+  const multiProfile = { seriesTicker: 'KXFEDDECISION', marketStructure: 'multi', outcomeGroup: 'exclusive', maxMagnitude: 25, magnitudeUnit: 'bps' };
+
+  it('accepts a shift up to 100 and states it in YES-probability points', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exitmulti-'));
+    try {
+      writeProfile(dir, 'kxfeddecision', { profile: multiProfile });
+      const loaded = loadProfile('kxfeddecision', dir);
+      expect(maxAbsShift(loaded)).toBe(100);
+      expect(buildExitSystem(loaded)).toMatch(/percentage points of the YES probability/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the market by its label and tells the model the group type', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exitmulti-'));
+    const db = openLedger(path.join(dir, 'l.db'));
+    try {
+      writeProfile(dir, 'kxfeddecision', { profile: multiProfile });
+      const loaded = loadProfile('kxfeddecision', dir);
+      const { client, calls } = fake(okResponse({ shift: -5, confidence: 0.8, reason: 'r' }));
+      const market = thr(0, 30, 1, { ticker: 'F-CUT', label: 'Cut 25bps', floorStrike: null, strikeType: 'custom' });
+      await reviewForExit(client, db, ctx(loaded, {
+        position: { marketTicker: 'F-CUT', side: 'yes', contracts: 4, remaining: 4, entryPriceCents: 30 }, market, trajectory: [], outcomeGroup: 'exclusive',
+      }));
+      const text = calls[0].messages[0].content as string;
+      expect(text).toMatch(/Cut 25bps/);
+      expect(text).toMatch(/exactly one resolves YES/i);
+    } finally {
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('buildExitSystem', () => {
   it('states the model never decides to sell', () =>
     withProfile((loaded) => {

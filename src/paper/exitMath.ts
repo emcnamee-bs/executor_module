@@ -17,7 +17,7 @@ import {
 export const EXIT_LOSS_FRACTION = 0.02;
 
 export interface ExitMathInput {
-  structure: 'band' | 'threshold' | 'binary';
+  structure: 'band' | 'threshold' | 'binary' | 'multi';
   side: 'yes' | 'no';
   /** Original size, for the 2% cost basis. */
   contracts: number;
@@ -28,7 +28,7 @@ export interface ExitMathInput {
   market: BandMarket;
   /** The whole ladder of that event, for the fair-value curve. */
   bands: BandMarket[];
-  /** Signed: curve markets use the profile's magnitude unit (positive = quantity higher); binary uses YES-probability points. */
+  /** Signed: curve markets use the profile's magnitude unit (positive = quantity higher); binary and multi use YES-probability points. */
   shift: number;
   /** 0..1: the item is real, material and not already in the price. */
   confidence: number;
@@ -68,7 +68,7 @@ export function evaluateExit(input: ExitMathInput): ExitMathResult {
   if (!Number.isFinite(input.shift) || !Number.isFinite(input.confidence)) return hold('non-finite shift or confidence from the model', quoted);
 
   let fairAfter: number;
-  if (input.structure === 'binary') {
+  if (input.structure === 'binary' || input.structure === 'multi') {
     const yesFair = Math.min(99, Math.max(1, yesMid + input.shift));
     fairAfter = side === 'yes' ? yesFair : 100 - yesFair;
   } else {
