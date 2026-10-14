@@ -68,8 +68,11 @@ export interface CallJsonArgs<T> {
 export async function callJson<T>(a: CallJsonArgs<T>): Promise<T> {
   ensureModelCallsTable(a.db);
   const now = a.now ?? (() => Date.now());
+  if (!Number.isFinite(a.dailyUsdCap) || a.dailyUsdCap <= 0) {
+    throw new SpendCapError(`invalid daily cap ${String(a.dailyUsdCap)}: must be a finite number > 0`);
+  }
   const spent = modelSpendTodayUsd(a.db, now());
-  if (spent >= a.dailyUsdCap) {
+  if (!(spent < a.dailyUsdCap)) {
     throw new SpendCapError(`model daily spend cap reached: $${spent.toFixed(4)} of $${a.dailyUsdCap.toFixed(2)} today (UTC)`);
   }
 

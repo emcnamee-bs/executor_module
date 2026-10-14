@@ -77,6 +77,17 @@ describe('callJson', () => {
     expect(rows(db)).toHaveLength(1);
   });
 
+  it('fails closed on an invalid daily cap (NaN, 0, negative, Infinity): no API call and no row', async () => {
+    for (const cap of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
+      const db = openPerpDb(':memory:');
+      const calls: unknown[] = [];
+      await expect(callJson(base(db, client(ok('{"relevant":true}'), calls), { dailyUsdCap: cap }))).rejects.toThrow(SpendCapError);
+      await expect(callJson(base(db, client(ok('{"relevant":true}'), calls), { dailyUsdCap: cap }))).rejects.toThrow(/invalid daily cap/);
+      expect(calls).toHaveLength(0);
+      expect(rows(db)).toHaveLength(0);
+    }
+  });
+
   it('counts only today (UTC) toward the cap', async () => {
     const db = openPerpDb(':memory:');
     await callJson(base(db, client(ok('{"relevant":true}', 1_000_000, 0)), { dailyUsdCap: 0.05, now: () => NOW - 86_400_000 }));
