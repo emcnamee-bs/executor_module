@@ -10,11 +10,11 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
 import type { Item } from '../item.js';
 import type { LoadedProfile } from '../profile/profile.js';
-import { fetchLadderForEvent as defaultFetchLadder, type ActiveLadder } from './kalshi.js';
+import { fetchLadderForEvent as defaultFetchLadder, type ActiveLadder, type BandMarket } from './kalshi.js';
 import { fetchTrajectory as defaultFetchTrajectory } from './kalshiHistory.js';
-import { reviewForExit } from './exitReview.js';
+import { reviewForExit, type ExitReviewResult } from './exitReview.js';
 import type { PreparedItem } from './prepare.js';
-import { evaluateExit } from '../paper/exitMath.js';
+import { evaluateExit, type ExitMathResult } from '../paper/exitMath.js';
 import {
   listOpenPaperPositions, hasExitReview, positionHasSellReview, recordExitReview, updateReviewLag, type OpenPaperPosition,
 } from '../paper/exits.js';
@@ -41,6 +41,76 @@ export interface ExitReviewDeps {
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
+
+export interface SettleInput {
+  db: Database.Database;
+  trade: string;
+  item: Item;
+  position: OpenPaperPosition;
+  /** The held market as quoted now. */
+  market: BandMarket;
+  /** Its whole event, for the fair-value curve. */
+  bands: BandMarket[];
+  review: ExitReviewResult;
+  reviewStartedAt: number;
+  modelReturnedAt: number;
+  now: () => number;
+  exitFeeCents?: number;
+  onFill?: (info: ExitFillInfo) => void;
+  /** Unified mode only: the model's own recommendation for this position. Absent = classic (the rule alone decides). */
+  model?: { action: 'hold' | 'sell'; reason: string };
+}
+
+/** Both must agree in unified mode (spec section 3): a sell needs the model's `sell` AND the rule's. */
+export function verdictFor(math: ExitMathResult, model: SettleInput['model']): { sell: boolean; reason: string } {
+  if (model === undefined) return { sell: math.sell, reason: math.reason };
+  if (math.sell && model.action === 'sell') return { sell: true, reason: `model: sell (${model.reason}); rule: ${math.reason}` };
+  if (math.sell) return { sell: false, reason: `the rule says sell (${math.reason}) but the model recommended hold (${model.reason})` };
+  if (model.action === 'sell') return { sell: false, reason: `the model recommended sell (${model.reason}) but the rule vetoed it: ${math.reason}` };
+  return { sell: false, reason: `model: hold (${model.reason}); rule: ${math.reason}` };
+}
+
+/**
+ * Everything after the model has spoken about ONE position: the rule's arithmetic, the audit row, and on a
+ * sell the immediate simulated fill. Shared by the classic exit review and the unified step so there is one
+ * implementation of "what happens when a position is judged".
+ */
+export function settleReview(input: SettleInput): void {
+  const { db, trade, item, position, market, review } = input;
+  const math = evaluateExit({
+    structure: position.structure as 'band' | 'threshold' | 'binary' | 'multi',
+    side: position.side, contracts: position.contracts, remaining: position.remaining,
+    entryPriceCents: position.entryPriceCents, market, bands: input.bands,
+    shift: review.shift, confidence: review.confidence, exitFeeCents: input.exitFeeCents,
+  });
+  const verdict = verdictFor(math, input.model);
+  const lag = {
+    sourcePublishTs: item.source_publish_ts, eventTime: item.event_time, firstSeenTs: item.first_seen_ts, emittedTs: item.emitted_ts,
+    reviewStartedAt: iso(input.reviewStartedAt), modelReturnedAt: iso(input.modelReturnedAt), firstSellAttemptAt: null as string | null,
+    fillAt: null as string | null, outcome: null as string | null,
+  };
+  const reviewId = recordExitReview(db, {
+    trade, itemId: item.item_id, positionId: position.id, shift: review.shift, confidence: review.confidence,
+    reason: review.reason, midCents: math.midCents, fairAfterCents: math.fairAfterCents, lossCents: math.lossCents,
+    exitCostCents: math.exitCostCents, verdict: verdict.sell ? 'sell' : 'hold', verdictReason: verdict.reason, lagJson: JSON.stringify(lag),
+    modelAction: input.model?.action ?? null, decisionMode: input.model === undefined ? null : 'unified',
+  });
+  if (!verdict.sell) return;
+
+  console.log(`[EXIT TRIGGER] trade=${trade} market=${position.marketTicker} side=${position.side} item=${item.item_id} :: ${verdict.reason}`);
+  lag.firstSellAttemptAt = iso(input.now());
+  const attempt = attemptExitFill(db, { position, reviewId, market });
+  lag.fillAt = attempt.filledAt;
+  lag.outcome = attempt.outcome;
+  updateReviewLag(db, reviewId, JSON.stringify(lag));
+  logExitFill(position, attempt);
+  if (attempt.contracts > 0 && attempt.exitId !== null && attempt.priceCents !== null && attempt.filledAt !== null) {
+    input.onFill?.({
+      positionId: position.id, reviewId, exitId: attempt.exitId, contracts: attempt.contracts,
+      priceCents: attempt.priceCents, remaining: attempt.remaining, filledAt: attempt.filledAt,
+    });
+  }
+}
 
 export async function runExitReview(item: Item, deps: ExitReviewDeps, prepare: () => Promise<PreparedItem>): Promise<void> {
   const { db, profile: loaded } = deps;
@@ -113,39 +183,10 @@ export async function runExitReview(item: Item, deps: ExitReviewDeps, prepare: (
     } catch (err) {
       return errorRow(err instanceof Error ? err.message : String(err));
     }
-    const modelReturnedAt = now();
-
-    const math = evaluateExit({
-      structure: position.structure as 'band' | 'threshold' | 'binary' | 'multi',
-      side: position.side, contracts: position.contracts, remaining: position.remaining,
-      entryPriceCents: position.entryPriceCents, market, bands: ladder.bands,
-      shift: review.shift, confidence: review.confidence, exitFeeCents: deps.exitFeeCents,
+    settleReview({
+      db, trade, item, position, market, bands: ladder.bands, review, reviewStartedAt, modelReturnedAt: now(), now,
+      exitFeeCents: deps.exitFeeCents, onFill: deps.onFill,
     });
-    const lag = {
-      sourcePublishTs: item.source_publish_ts, eventTime: item.event_time, firstSeenTs: item.first_seen_ts, emittedTs: item.emitted_ts,
-      reviewStartedAt: iso(reviewStartedAt), modelReturnedAt: iso(modelReturnedAt), firstSellAttemptAt: null as string | null,
-      fillAt: null as string | null, outcome: null as string | null,
-    };
-    const reviewId = recordExitReview(db, {
-      trade, itemId: item.item_id, positionId: position.id, shift: review.shift, confidence: review.confidence,
-      reason: review.reason, midCents: math.midCents, fairAfterCents: math.fairAfterCents, lossCents: math.lossCents,
-      exitCostCents: math.exitCostCents, verdict: math.sell ? 'sell' : 'hold', verdictReason: math.reason, lagJson: JSON.stringify(lag),
-    });
-    if (!math.sell) return;
-
-    console.log(`[EXIT TRIGGER] trade=${trade} market=${position.marketTicker} side=${position.side} item=${item.item_id} :: ${math.reason}`);
-    lag.firstSellAttemptAt = iso(now());
-    const attempt = attemptExitFill(db, { position, reviewId, market });
-    lag.fillAt = attempt.filledAt;
-    lag.outcome = attempt.outcome;
-    updateReviewLag(db, reviewId, JSON.stringify(lag));
-    logExitFill(position, attempt);
-    if (attempt.contracts > 0 && attempt.exitId !== null && attempt.priceCents !== null && attempt.filledAt !== null) {
-      deps.onFill?.({
-        positionId: position.id, reviewId, exitId: attempt.exitId, contracts: attempt.contracts,
-        priceCents: attempt.priceCents, remaining: attempt.remaining, filledAt: attempt.filledAt,
-      });
-    }
   };
 
   for (const position of candidates) {
