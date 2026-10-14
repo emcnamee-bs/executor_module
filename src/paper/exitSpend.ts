@@ -1,7 +1,8 @@
 // src/paper/exitSpend.ts
 //
 // EXIT_DAILY_USD_CAP is ALERT-ONLY (spec section 7): going over it pages a human once per UTC day but
-// never stops reviews, because stopping would blind the exits exactly when news is heaviest.
+// never stops reviews, because stopping would blind the exits exactly when news is heaviest. The budget
+// covers both stages that review positions: 'exit_review' (classic) and 'decide_unified' (DECISION_MODE=unified).
 import type Database from 'better-sqlite3';
 
 // USD per million tokens. Haiku 5.5's price is the one recorded in anthropicGateClient.ts. An
@@ -20,7 +21,7 @@ export function estimateExitSpendUsd(db: Database.Database, nowMs: number): numb
   const rows = db
     .prepare(
       `SELECT model, COALESCE(SUM(prompt_tokens), 0) AS inTok, COALESCE(SUM(output_tokens), 0) AS outTok
-         FROM ai_calls WHERE stage = 'exit_review' AND substr(called_at, 1, 10) = ? GROUP BY model`
+         FROM ai_calls WHERE stage IN ('exit_review', 'decide_unified') AND substr(called_at, 1, 10) = ? GROUP BY model`
     )
     .all(day) as Array<{ model: string; inTok: number; outTok: number }>;
   return rows.reduce((total, r) => {

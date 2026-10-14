@@ -209,6 +209,23 @@ describe('runExitReview', () => {
     expect(exits()).toEqual([{ status: 'unsellable', contracts: 0, price_cents: null }]);
   });
 
+  it('a multi position is reviewed as a YES-probability shift: mid 50 and shift -30 give fair 20 and a sell', async () => {
+    writeProfile(dir, 'kxfeddecision', { profile: { seriesTicker: 'KXFEDDECISION', marketStructure: 'multi', outcomeGroup: 'exclusive', maxMagnitude: 25, magnitudeUnit: 'bps' } });
+    const cut = thr(0, 50, 1, { ticker: 'F-CUT', label: 'Cut 25bps', floorStrike: null, strikeType: 'custom' });
+    const hold = thr(0, 40, 1, { ticker: 'F-HOLD', label: 'No change', floorStrike: null, strikeType: 'custom' });
+    const p = position('p1', { structure: 'multi', marketTicker: 'F-CUT' });
+    modelAnswer = () => ({ shift: -30, confidence: 1, reason: 'r' });
+    await runExitReview(makeItem(), {
+      ...deps, profile: loadProfile('kxfeddecision', dir),
+      fetchLadderForEvent: async (e) => ({ eventTicker: e, strikeDate: null, bands: [cut, hold] }),
+    }, prepared());
+    expect(parseCalls).toHaveLength(1);
+    expect(parseCalls[0].messages[0].content).toMatch(/exactly one resolves YES/i);
+    expect(db.prepare(`SELECT position_id, verdict, fair_after_cents, mid_cents FROM paper_exit_reviews`).all()).toEqual([
+      { position_id: p, verdict: 'sell', fair_after_cents: 20, mid_cents: 50 },
+    ]);
+  });
+
   it('uses the configured model and fee', async () => {
     position('p1');
     await runExitReview(makeItem(), { ...deps, model: 'claude-haiku-5-5', exitFeeCents: 50 }, prepared());

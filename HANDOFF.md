@@ -862,7 +862,7 @@ gasoline: "sanctions on Russian oil" 73%; Hormuz weekly: "Strait of Hormuz" 95%)
 
 ### 5a.7 Retired paper trades
 
-Retired 2026-10-12 (units stopped and disabled; profiles and ledgers are kept; removed from the wall grid). Reason: nothing left to
+Retired 2026-10-12 (and `kxguilfoyleout` 2026-10-13; units stopped and disabled; profiles and ledgers are kept; removed from the wall grid). Reason: nothing left to
 trade or no way to feed them.
 
 | Trade | Why |
@@ -871,6 +871,7 @@ trade or no way to feed them.
 | `kxredistricting` | Kalshi restructured the series into "which states redistrict" markets; the Arizona profile is stale and no live process exists |
 | `kxflycancjfk` | ~1c tail event (>=50% of JFK flights cancelled on a day) and no free per-airport cancellation source |
 | `kxretirepelosi` | 1-2c; she announced her retirement in 2025, so a resignation is not expected |
+| `kxguilfoyleout` | all three markets at 99-100c, resolved in effect (retired 2026-10-13) |
 
 To revive one: `systemctl --user enable --now executor-module@<name>`, put it back in `TRADES` in `~/wall/paper-grid-publish.py`
 (the wall publishers are not in this repo), and if its series changed, rebuild its profile first (`npm run build-trade -- --series
@@ -906,6 +907,129 @@ it reviews the positions a paper trade holds and simulates a sell at the touch w
   Other flags: `--model`, `--max-items` (default 80 per position), `--fee`, `--out` (default `~/exit-backtest`, one `<name>-<date>.md`
   report per run). It prints settled-only and all-positions summaries and a warning when review calls failed (an unreliable run).
 - **Wall:** the publisher (`~/wall/paper-grid-publish.py`, not in git) counts the exits; its backups are `*.bak-pre-exits-*`.
+
+### 5a.9 Multi-market trades (paper)
+
+The design is `docs/superpowers/specs/2026-10-13-multi-market-structure-design.md`. A trade whose series has several open markets that
+are priced against each other (a Fed decision, "who will X", nested "before date" markets) is built with `marketStructure: "multi"` and
+an `outcomeGroup` (`ladder`, `exclusive` or `independent`) instead of the single-band structure. Which trades are `multi` and their
+group: set by `build-trade`; see `trades/<t>/profile.json` `outcomeGroup`. Multi entry sizes against `PAPER_CAPS` and writes only paper rows (it imports nothing that can place an order).
+
+- **Entry flow:** `src/decide/pipeline.ts` calls `decideMulti` (`src/decide/decideMulti.ts`: one Sonnet call; the model answers with
+  `moves`, each a market, a YES-probability shift in points and a confidence 0..1). `decideMulti` runs `checkMultiMoves` on that answer
+  (unknown, duplicate or out-of-range markets, at most 4 moves, the exclusive net-to-zero rule, the ladder monotone repair that never
+  reverses a direction; see Checks below). If that yields moves, `pipeline.ts` calls `applyMultiEntry` (`src/decide/multiEntry.ts`),
+  which drops the markets that already had a sell trigger (`hasSellTrigger`) BEFORE sizing, so they never take a leg slot from a valid
+  market, then calls `evaluateMultiSizing` (`src/decide/sizing.ts`) and writes the legs and the decision row.
+- **Checks** (`checkMultiMoves`; an invalid answer is rejected whole, never partly used): at most 4 moves, each on a distinct open,
+  two-sided-quoted market of the event, `|shift| <= 100` (a probability-point ceiling), confidence within 0..1, zero shifts dropped.
+  `exclusive`: the shifts must net to within +/-5 points of zero. `ladder`: shifts are repaired to be monotone (an earlier date can never be
+  likelier than a later one); a move whose repaired shift is zero or would reverse the model's direction is dropped, never flipped.
+- **Sizing** (`evaluateMultiSizing`): a positive shift buys YES, a negative one buys NO, with fair YES = mid + shift clamped to 1..99.
+  Confidence is clamped to [0,1] and scales the Kelly fraction; a non-finite shift is skipped; one ticker never gets two legs. Each
+  candidate must clear the same gates as the band path: price 10-90c, spread <= 5c, depth >= 1 contract, edge >= 0.5c, then Kelly and the
+  rung stake (`reported` 0.25, `corroborated` 0.5, `confirmed` 1.0, `rumor` never trades). Paper caps (`PAPER_CAPS`): 1000c per trade
+  (leg) and 5000c total open exposure for the event. A skip row lists a plain reason per move that was not bought.
+- **Legs:** `ladder` and `independent` buy at most one leg per item; `exclusive` buys at most two, ranked by edge, on two different
+  markets. Leg 1 keeps the item's own `item_id`; leg 2 is stored as `<item_id>#2` because `item_id` is UNIQUE (that is what keeps a
+  redelivered stream entry harmless). Both rows carry the pairing in `source_item_id` (the original item id) and `leg` (1 or 2); both
+  are NULL on a single-leg band trade. Inspect the pairs:
+  `SELECT source_item_id, leg, market_ticker, side, contracts FROM paper_positions WHERE source_item_id IS NOT NULL ORDER BY id;`
+- **Exits and labels:** the exit review treats a multi position as a YES-probability shift on its own market. The market `label`
+  (Kalshi's `yes_sub_title`, such as "Hike 25bps") names the market in the exit prompt for multi profiles only; every other
+  structure's prompt is unchanged.
+- **Dry run before enabling a unit:** `npm run multi-dryrun -- --series KXFEDDECISION --move KXFEDDECISION-26OCT-H25=+6 --move
+  KXFEDDECISION-26OCT-H0=-6 --group exclusive [--rung reported]` prints the active event's markets and the legs `evaluateMultiSizing`
+  would buy. It uses only Kalshi's public API: no model call, no ledger, no order. It runs ONLY `evaluateMultiSizing` on the moves you
+  type: it does NOT apply `checkMultiMoves` (group rules, ladder repair, 4-move cap) or the sell-trigger filter, so a result is "what
+  sizing would do with those moves", not what the pipeline would do with a model answer. Shifts are given with confidence 1.
+  `--rung` is one of `rumor|reported|corroborated|confirmed` and defaults to `reported` (stake 0.25), the realistic setting.
+  `confirmed` is not reachable in production (`computeRungDetailed` never returns it; the real maximum is `corroborated`, stake 0.5),
+  so it only shows an upper bound on size. `--group` is `ladder|exclusive|independent` (default `independent`; `exclusive` allows two
+  legs). An unknown flag, a flag without a value, or a bad `--rung` / `--group` value is an error.
+- **Rollback:** restore the profile backup the build left in `~/trade-refresh/backups/` over `trades/<t>/profile.json`, then
+  `systemctl --user restart executor-module@<t>`. Positions already written stay in the ledger.
+
+### 5a.10 Unified decisions (paper): operator notes
+
+The design is `docs/superpowers/specs/2026-10-13-unified-position-aware-decision-design.md`. `DECISION_MODE=unified` makes a paper unit
+make **one `decide_unified` model call per gated item** (one that passed the Haiku/Ollama relevance gate) in place of triage + decide
+(or `decideMulti`) + one exit review per open position. The call sees the news, the market table, every open position (with its own
+event's ladder and its 5/15/60-minute held-side trajectory) and whether an entry is possible, and answers with a shared belief
+(`assessment`, or `moves[]` on `multi` trades), a `hold`/`sell` per position and a `buy`/`none` for entry. The model recommends and
+code enforces; either side can veto:
+
+- **A sell needs both:** the model says `sell` AND the existing 2% of cost / exit-cost rule (`evaluateExit`, via `settleReview`) passes.
+  On `multi` trades a `sell` recommendation only executes if the model ALSO proposed a move on that position's market (without a move the
+  rule sees no expected loss, so the sell cannot pass); the prompt tells the model so. Separately, the trade-refresh job keeps an
+  existing `multi` profile's `outcomeGroup` on a rebuild (`buildTradeProfile` does not re-ask the model, and logs
+  `[build-trade] kept outcomeGroup ...` if the model would now answer differently), so historical positions keep their group rules.
+- **A buy needs both:** the model says `buy` AND the existing sizing gates (price, spread, depth, edge, Kelly, rung stake, paper caps)
+  pass. On a `multi` trade a `buy` also needs at least one move on the active event, and the unchanged sell-trigger filter still applies.
+- **Entry blockers stop only the entry.** Kill switch / `EXECUTOR_TRADING_HALTED`, an open circuit-breaker trip, the `rumor` rung and
+  the trade-pacing limit set `entryAllowed=false`: the model is told entry is unavailable (its `entry` answer is then ignored) and the
+  positions are STILL reviewed. "Story already has an open position for the active event" is checked after the call and likewise
+  stops only the entry. Nothing is called when there is no open position to review and entry is not allowed.
+- **A failed or invalid model answer never sells or buys.** A model/API error, or an answer that fails validation (unknown, duplicate or missing
+  `position_id`, bad action, empty reason, shift beyond the sanity ceiling, confidence outside 0..1, invalid `moves`, an invalid
+  `entry` when entry is available; the whole answer is rejected, never partly used) writes an `error` review row for EVERY reviewable
+  position, sends ONE Slack alert `[UNIFIED ERROR] <trade> item <id>: <reason>`, and records the entry as a skip (`unified decision
+  failed: ...`). A per-position recommendation that is missing at settle time is an `error` row (`the model gave no recommendation for
+  this position`), never a rule-only verdict. A position whose event ladder cannot be fetched gets an `error` row (one
+  `[UNIFIED ERROR] ... ladder for <event> failed` alert per event per item) while positions on other events are still sent to the
+  model; a position whose market is no longer open gets a `hold` row (`market not open (closed or settled)`) with no model action.
+- **Prompt:** the markets of the event the news is about are listed first (the `multi` group rule applies to them only); held markets
+  of OTHER events are listed separately and each is judged on its own (on `multi` trades a move there is checked as `independent`).
+- **Same guards as the exit review:** `DECISION_MODE` unset, empty or `classic` = classic. `unified` requires `EXIT_REVIEW=on` (it
+  reuses the exit review's fills, retry timer and lateness) and refuses to start on a live-capable process (`KALSHI_DRY_RUN` not
+  `true`, `EXECUTOR_LIVE_TRADE` set, the live ledger or live consumer group); any other value refuses. The pipeline re-checks the
+  dry-run/non-live condition on every item. The startup `[profile]` line ends with `decision=classic|unified`; check it after every
+  restart. The model is `EXIT_REVIEW_MODEL` (default `claude-sonnet-5`) and `EXIT_FEE_CENTS` applies as in 5a.8.
+- **Enable per paper unit:** copy `deploy/mini-mac/executor-module@.service.d/decision-mode.conf.example` to
+  `~/.config/systemd/user/executor-module@<trade>.service.d/decision-mode.conf` (the unit must also have its `exit-review.conf`), then
+  `systemctl --user daemon-reload && systemctl --user restart executor-module@<trade>`.
+- **Roll back:** delete that `decision-mode.conf`, `systemctl --user daemon-reload`, restart the unit. Classic behaviour is
+  unchanged when the drop-in is absent; rows already written stay in the ledger.
+- **Rollout order** (all paper units, with the integrity checker after every wave; fix every violation before continuing): merge
+  `feat/multi-unified` into the local `~/executor_module` main (no push without the user's approval) and run
+  `python3 ~/exit-analysis/integrity.py --no-alert` for a baseline (on ledgers that do not yet have the new columns the checker skips
+  the checks that need them without raising violations, so the baseline is expected to be 0 violations). Wave 1: the units that already hold positions (`kxwti`,
+  `kxaaagasw`, `kxbrentmon`, `kxhormuzweekly`): install the drop-in, reload, restart ONE unit, wait for its first gated item, run the
+  checker and read the unified review rows, then the rest of the wave. Wave 2: every other tradeable paper unit. Wave 3: the
+  converted `multi` trades (after 5a.9's rollout). Check again after each wave and after the first hour of live items.
+- **Cost:** the `[EXIT-REVIEW BUDGET]` alert (alert-only, once per UTC day, `EXIT_DAILY_USD_CAP`) now sums the `exit_review` AND
+  `decide_unified` stages of `ai_calls`.
+
+**Ledger columns** (added automatically when a unit opens its ledger with the new code, so a unit's ledger has them only after its
+first restart on this version; before that these queries fail with `no such column`): `paper_exit_reviews.model_action`
+(`hold` | `sell`, what the model recommended) and `paper_exit_reviews.decision_mode` (`unified` is the only value the code writes).
+`NULL` in BOTH columns means a classic or pre-existing review only. Unified `error` rows and unified `market not open (closed or
+settled)` hold rows have `decision_mode='unified'` and a NULL `model_action` (the model was not asked about them). In a unified `sell` row `verdict_reason` reads `model: sell (...); rule: ...`; a veto reads `the model recommended
+sell (...) but the rule vetoed it: ...` or `the rule says sell (...) but the model recommended hold (...)`. The `decide_unified`
+calls are in `ai_calls` with `stage='decide_unified'` (its `verdict` is `<buy|none> sells:N holds:M`, or `invalid:<why>`).
+mini-mac has no `sqlite3` CLI; use python3 read-only, e.g.
+`python3 -c "import sqlite3;c=sqlite3.connect('file:/home/emac/executor_module/data/kxwti/decisions.db?mode=ro',uri=True);print(c.execute(\"<SQL>\").fetchall())"`.
+
+- Latest unified reviews:
+  `SELECT verdict, model_action, verdict_reason FROM paper_exit_reviews WHERE decision_mode = 'unified' ORDER BY id DESC LIMIT 20;`
+- Disagreements (the model and the rule did not agree, so nothing was sold):
+  `SELECT id, item_id, position_id, verdict, model_action, verdict_reason FROM paper_exit_reviews WHERE decision_mode = 'unified' AND ((verdict = 'hold' AND model_action = 'sell') OR (verdict = 'hold' AND verdict_reason LIKE 'the rule says sell%')) ORDER BY id DESC;`
+- Unified failures: `SELECT id, item_id, position_id, verdict_reason FROM paper_exit_reviews WHERE decision_mode = 'unified' AND verdict = 'error' ORDER BY id DESC;`
+
+**Integrity checker** (`~/exit-analysis/integrity.py`, not in git; user timer `integrity.timer`, hourly, runs `integrity.service`). It opens
+every `<data>/<trade>/decisions.db` read-only (never writes a ledger), prints one `VIOLATION <trade> <table>#<id> <RULE>: <message>` line
+per problem and a count line, and exits 0 clean / 1 for any violation line (including `IO` and `SKIP` lines: a ledger it cannot read, or a
+rule that raised, counts as a violation). Rules: `P1` position shape, `P2` exit fills versus contracts and pnl, `E1` exit rows (review
+linkage, price range, pnl arithmetic), `R1` review completeness (a sell has its arithmetic and `lag_json`, an error has a reason), `L1`
+two-leg entries, `A1` audit trail (every `multi` position has a `decide_multi`/`decide_unified` call without error; once a ledger has a
+`decide_unified` call, every position created at or after the first one needs a `decide`/`decide_multi`/`decide_unified` call
+without error for its item, so a rollback to classic is not flagged; no `would_trade` decisions), `A2` the newest archive snapshot is a subset of the live ledger, `U1` unified consistency (every unified
+hold/sell review has a `model_action`, except the unified `market not open (closed or settled)` hold rows, which the checker exempts
+by that exact reason (the model was not asked), a unified sell was recommended `sell`, every position a `decide_unified` call recommended has a review
+row, i.e. no lost decision). Legacy NULL columns are skipped. On violations it posts ONE Slack message (an identical set is not
+re-alerted for 24 h; a clean run clears the state). Run by hand: `python3 ~/exit-analysis/integrity.py --no-alert` (no Slack, no state
+change). Timer logs: `journalctl --user -u integrity.service` (timer: `systemctl --user list-timers integrity.timer`). **A finding is
+fixed (correct the code, repair the rows from the audit trail, or put the unit back to classic), never silenced or accepted.**
 
 ## 6. Instructions for whoever picks this up
 

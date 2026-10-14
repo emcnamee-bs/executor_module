@@ -53,16 +53,16 @@ describe('deriveStructure', () => {
     [['greater_or_equal', 'greater_or_equal'], 2, 'threshold'],
     [['less', 'greater'], 2, 'threshold'],
     [[null], 1, 'binary'],
-    [['custom', 'custom'], 5, 'capture'],
-    [['between', 'custom'], 2, 'capture'],
+    [['custom', 'custom'], 5, 'multi'],
+    [['between', 'custom'], 2, 'multi'],
   ])('%j with %i markets is %s', (types, n, expected) => {
     expect(deriveStructure(types as any, n as number)).toBe(expected);
   });
 });
 
 describe('deriveStructure edge cases', () => {
-  it("'custom' deliberately wins over 'between': capture is the safe direction (never a real order)", () => {
-    expect(deriveStructure(['between', 'custom'], 2)).toBe('capture');
+  it("'custom' still wins over 'between': separate outcomes are never a band", () => {
+    expect(deriveStructure(['between', 'custom'], 2)).toBe('multi');
   });
   it('unknown strike types become capture', () => {
     expect(deriveStructure(['less_or_equal', 'less_or_equal'], 2)).toBe('capture');

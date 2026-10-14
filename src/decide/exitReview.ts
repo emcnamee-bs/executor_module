@@ -5,7 +5,7 @@
 // how sure it is the item is real, material and new (`confidence`). exitMath.ts does the rest.
 import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
-import type { LoadedProfile } from '../profile/profile.js';
+import type { LoadedProfile, OutcomeGroup } from '../profile/profile.js';
 import type { BandMarket } from './kalshi.js';
 import type { TrajectoryPoint } from './kalshiHistory.js';
 import { wrapUntrusted, MAX_SOURCE_CHARS } from '../guard/untrusted.js';
@@ -33,8 +33,12 @@ const EXIT_SCHEMA = {
   additionalProperties: false,
 };
 
+/** Binary and multi markets both move as YES-probability points. */
+const yesProbabilityStructure = (loaded: LoadedProfile): boolean =>
+  loaded.profile.marketStructure === 'binary' || loaded.profile.marketStructure === 'multi';
+
 export function maxAbsShift(loaded: LoadedProfile): number {
-  return loaded.profile.marketStructure === 'binary' ? BINARY_MAX_SHIFT : loaded.profile.maxMagnitude;
+  return yesProbabilityStructure(loaded) ? BINARY_MAX_SHIFT : loaded.profile.maxMagnitude;
 }
 
 /** Narrows the model's output to a genuine ExitReviewResult; any invalid field throws (an error review, never a sell). */
@@ -60,7 +64,7 @@ export function validateExitReview(parsed: unknown, maxAbs: number): ExitReviewR
 
 export function buildExitSystem(loaded: LoadedProfile): string {
   const { profile } = loaded;
-  const binary = profile.marketStructure === 'binary';
+  const binary = yesProbabilityStructure(loaded);
   const shiftLine = binary
     ? `- shift: a SIGNED number of percentage points of the YES probability this news adds (positive) or removes (negative), beyond what the quoted prices already imply. At most +/-${BINARY_MAX_SHIFT}. 0 if the price already reflects it or the item is irrelevant.`
     : `- shift: a SIGNED number in ${profile.magnitudeUnit}: how far this news moves the settlement quantity (positive = higher, negative = lower), beyond what the quoted prices already imply. At most +/-${profile.maxMagnitude} in absolute value. 0 if the price already reflects it or the item is irrelevant.`;
@@ -87,17 +91,26 @@ export interface ExitReviewContext {
   position: { marketTicker: string; side: 'yes' | 'no'; contracts: number; remaining: number; entryPriceCents: number };
   market: BandMarket;
   trajectory: TrajectoryPoint[];
+  /** Set for multi trades: how the event's markets relate. */
+  outcomeGroup?: OutcomeGroup;
   /** Defaults to Sonnet; see EXIT_REVIEW_MODEL. */
   model?: string;
 }
 
-function describeMarket(m: BandMarket): string {
+const GROUP_HINT: Record<OutcomeGroup, string> = {
+  ladder: 'This market is one of several nested "before date X" markets of one event: an earlier date can never be more likely than a later one.',
+  exclusive: 'This market is one of several mutually exclusive outcomes of one question: exactly one resolves YES.',
+  independent: 'This market is one of several separate yes/no questions about different outcomes.',
+};
+
+/** `useLabel` is true only for multi positions, so every other structure's prompt stays unchanged. */
+export function describeMarket(m: BandMarket, useLabel = false): string {
   switch (m.strikeType) {
     case 'greater': return `pays YES if the settlement quantity is above ${m.floorStrike}`;
     case 'greater_or_equal': return `pays YES if the settlement quantity is at or above ${m.floorStrike}`;
     case 'less': return `pays YES if the settlement quantity is below ${m.capStrike}`;
     case 'between': return `pays YES if the settlement quantity is between ${m.floorStrike} and ${m.capStrike}`;
-    default: return 'a single yes/no market';
+    default: return useLabel && m.label ? `pays YES if "${m.label}"` : 'a single yes/no market';
   }
 }
 
@@ -110,7 +123,8 @@ export async function reviewForExit(
   const fmt = (v: number | null) => (v === null ? 'none' : `${v}c`);
   const trajectory = ctx.trajectory.map((t) => `${t.minutesAgo} min ago: ${t.markCents === null ? 'unknown' : `${t.markCents}c`}`).join('; ');
   const lines: string[] = [
-    `Held position: ${p.side.toUpperCase()} on ${p.marketTicker} (${describeMarket(m)}); ${p.remaining} of ${p.contracts} contracts, bought at ${p.entryPriceCents}c (${p.side.toUpperCase()} cents).`,
+    `Held position: ${p.side.toUpperCase()} on ${p.marketTicker} (${describeMarket(m, ctx.outcomeGroup !== undefined)}); ${p.remaining} of ${p.contracts} contracts, bought at ${p.entryPriceCents}c (${p.side.toUpperCase()} cents).`,
+    ...(ctx.outcomeGroup ? [GROUP_HINT[ctx.outcomeGroup]] : []),
     `Current YES quotes: bid ${fmt(m.yesBidCents)} / ask ${fmt(m.yesAskCents)}.`,
     `Recent held-side value (what we could sell the position for): ${trajectory}.`,
     `Source trust tier: ${ctx.sourceTrustTier} (1 = most trusted, 5 = least). Published: ${ctx.publishedAt ?? 'unknown'}.`,

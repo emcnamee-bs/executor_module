@@ -5,7 +5,7 @@ import { parseItemFields, type Item } from './item.js';
 import { formatSummaryLine } from './log.js';
 import { findMatches, getMatchableText, type CompiledPhrase } from './keyphrases/match.js';
 import type { LoadedProfile } from './profile/profile.js';
-import { prepareStartup, assertLedgerStartAllowed } from './startup.js';
+import { prepareStartup, assertLedgerStartAllowed, type DecisionMode } from './startup.js';
 import { fetchArticle } from './fetch/excerpt.js';
 import {
   openLedger,
@@ -97,6 +97,8 @@ export interface OnItemDeps {
   gateProvider?: 'ollama' | 'anthropic';
   gateModel?: string;
   exit?: ExitWiring;
+  /** From prepareStartup (resolveDecisionMode); unset = classic. */
+  decisionMode?: DecisionMode;
 }
 
 /**
@@ -203,6 +205,7 @@ export async function main(): Promise<void> {
     makeOnItem({
       anthropicClient, ollamaClient: gateWiring.client, gateProvider: gateWiring.provider, gateModel: gateWiring.model, db, fetchLadder: fetchActiveLadder, kalshiClient, profile: loaded, fetchArticle,
       paperLowTier: startup.paperLowTier,
+      decisionMode: startup.decisionMode,
       exit: exitCfg.enabled ? { model: exitCfg.model, exitFeeCents: exitCfg.exitFeeCents, dailyUsdCap: exitCfg.dailyUsdCap } : undefined,
     }),
     controller.signal

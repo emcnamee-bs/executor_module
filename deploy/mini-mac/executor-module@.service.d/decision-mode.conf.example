@@ -1,0 +1,13 @@
+# DECISION_MODE=unified drop-in: let ONE paper trade replace triage + decide + per-position exit reviews
+# with a single position-aware call per news item. Design:
+# docs/superpowers/specs/2026-10-13-unified-position-aware-decision-design.md. Paper only: the process
+# refuses to start with this set on the live unit, a non-dry-run process or the live ledger.
+# EXIT_REVIEW=on MUST also be set on the unit (see exit-review.conf.example): unified mode reuses the
+# exit review's fills, retry timer and lateness, and the process refuses to start without it.
+# Enable on a paper unit by copying this file (without .example) to
+#   ~/.config/systemd/user/executor-module@<name>.service.d/decision-mode.conf
+# then: systemctl --user daemon-reload && systemctl --user restart executor-module@<name>
+# ROLL BACK: delete that decision-mode.conf, then daemon-reload and restart. The unit returns to
+# "classic" (the code default).
+[Service]
+Environment=DECISION_MODE=unified

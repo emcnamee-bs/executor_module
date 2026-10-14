@@ -23,9 +23,13 @@ import {
 } from './ledger.js';
 import { evaluateSizing, evaluateBinarySizing, type SizingResult } from './sizing.js';
 import { triageItem } from './triage.js';
-import { decideTrade } from './decide.js';
+import { decideTrade, type DecideResult } from './decide.js';
+import { decideMulti } from './decideMulti.js';
+import { applyMultiEntry } from './multiEntry.js';
+import { skipRecord } from './skipRecord.js';
 import { makePrepare, type PreparedItem } from './prepare.js';
 import { runExitReview, type ExitReviewDeps } from './exitPipeline.js';
+import { runUnifiedStep, type UnifiedStepResult } from './unifiedPipeline.js';
 import { hasSellTrigger } from '../paper/exits.js';
 import { placeOrder, deriveClientOrderId } from '../execute/order.js';
 import { positionForTicker, type KalshiClient } from '../execute/kalshiClient.js';
@@ -44,6 +48,11 @@ export type ExitWiring = Pick<
  */
 function exitReviewAllowed(deps: Pick<PipelineDeps, 'exit'>): boolean {
   return deps.exit !== undefined && process.env.KALSHI_DRY_RUN === 'true' && process.env.EXECUTOR_LIVE_TRADE === undefined;
+}
+
+/** Unified mode needs the same guards as the exit review (re-read per item) plus the per-unit flag. */
+function unifiedAllowed(deps: Pick<PipelineDeps, 'exit' | 'decisionMode'>): boolean {
+  return deps.decisionMode === 'unified' && exitReviewAllowed(deps);
 }
 
 export interface PipelineDeps {
@@ -65,6 +74,8 @@ export interface PipelineDeps {
   gateModel?: string;
   /** Exit-review wiring. Undefined = off. Honoured only on a dry-run, non-live process (re-checked per item). */
   exit?: ExitWiring;
+  /** Selected per unit by DECISION_MODE (startup.ts); unset = classic. Honoured only on a dry-run, non-live process (re-checked per item). */
+  decisionMode?: 'classic' | 'unified';
 }
 
 /**
@@ -80,57 +91,63 @@ function lowTierRelaxationAllowed(deps: Pick<PipelineDeps, 'paperLowTier'>): boo
   );
 }
 
-/**
- * `rung` is required, not defaulted: it is computed from `Item` fields alone, before
- * any model call and therefore before every skip point below, so no skip row ever
- * needs a placeholder standing in for "not yet computed".
- */
-function skipRecord(
-  item: Item,
-  reason: string,
-  { rung, ...overrides }: Partial<DecisionRecord> & { rung: Rung }
-): DecisionRecord {
-  return {
-    itemId: item.item_id,
-    storyKey: item.story_key,
-    eventTicker: null,
-    marketTicker: null,
-    side: null,
-    rung,
-    direction: null,
-    magnitudePts: null,
-    contracts: 0,
-    entryPriceCents: null,
-    notionalCents: 0,
-    edgeCents: null,
-    wouldTrade: false,
-    reason,
-    orderStatus: 'resolved',
-    ...overrides,
-  };
+/** The entry blockers of runEntryPipeline (kill switch, breaker, rumor rung, rate limit), evaluated up front for the unified call. */
+function entryAllowedNow(item: Item, deps: PipelineDeps): boolean {
+  const { rung } = computeRungDetailed({
+    trustTier: item.trust_tier, storyKey: item.story_key, corroborations: item.corroborations, relaxLowTier: lowTierRelaxationAllowed(deps),
+  });
+  if (process.env.EXECUTOR_TRADING_HALTED === 'true' || isTradingHalted(deps.db)) return false;
+  if (rung === 'rumor') return false;
+  return recentTradeCount(deps.db, RATE_LIMIT_WINDOW_MINUTES) < MAX_TRADES_PER_WINDOW;
 }
 
 export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promise<void> {
   const isDirect = deps.profile.profile.directSources.includes(item.source_id);
   const prep = makePrepare(item, deps, isDirect);
-  // The exit review starts at once and runs IN PARALLEL with the entry path. Entry-only blockers
+  const unified = unifiedAllowed(deps);
+  const fresh = !hasDecisionForItem(deps.db, item.item_id);
+  // Classic: the exit review starts at once and runs IN PARALLEL with the entry path. Entry-only blockers
   // (kill switch, circuit breaker, rumor rung, rate limit, "story already has a position") stop new
-  // entries inside runEntryPipeline; they must never stop a risk-reducing review. A redelivered
-  // item (already has a decision row) was fully processed once, so it is not reviewed again.
+  // entries inside runEntryPipeline; they must never stop a risk-reducing review. A redelivered item
+  // (already has a decision row) was fully processed once, so it is not reviewed again.
   const exitRun =
-    exitReviewAllowed(deps) && !hasDecisionForItem(deps.db, item.item_id)
+    !unified && exitReviewAllowed(deps) && fresh
       ? runExitReview(item, { anthropicClient: deps.anthropicClient, db: deps.db, profile: deps.profile, ...deps.exit }, prep).catch((err) =>
           console.error(`[exit-review] error processing item=${item.item_id}:`, err)
         )
       : Promise.resolve();
+  // Unified: ONE call serves the positions and the entry; same parallelism and the same independence
+  // from the entry blockers (it is told whether an entry is possible).
+  const unifiedRun: Promise<UnifiedStepResult | null> | undefined =
+    unified && fresh
+      ? (() => {
+          const { rung, lowTierRelaxedFrom } = computeRungDetailed({
+            trustTier: item.trust_tier, storyKey: item.story_key, corroborations: item.corroborations, relaxLowTier: lowTierRelaxationAllowed(deps),
+          });
+          return runUnifiedStep(
+            item,
+            { anthropicClient: deps.anthropicClient, db: deps.db, profile: deps.profile, fetchLadder: deps.fetchLadder, ...deps.exit },
+            prep, entryAllowedNow(item, deps), rung, lowTierRelaxedFrom !== null
+          ).catch((err) => {
+            console.error(`[unified] error processing item=${item.item_id}:`, err);
+            return null;
+          });
+        })()
+      : undefined;
   try {
-    await runEntryPipeline(item, deps, prep);
+    await runEntryPipeline(item, deps, prep, unifiedRun);
   } finally {
     await exitRun;
+    await unifiedRun;
   }
 }
 
-async function runEntryPipeline(item: Item, deps: PipelineDeps, prep: () => Promise<PreparedItem>): Promise<void> {
+async function runEntryPipeline(
+  item: Item,
+  deps: PipelineDeps,
+  prep: () => Promise<PreparedItem>,
+  unifiedRun?: Promise<UnifiedStepResult | null>
+): Promise<void> {
   const { anthropicClient, ollamaClient, db, fetchLadder, kalshiClient, profile: loaded } = deps;
   const trade = loaded.profile.name;
   const structure = loaded.profile.marketStructure;
@@ -211,36 +228,96 @@ async function runEntryPipeline(item: Item, deps: PipelineDeps, prep: () => Prom
     const { articleText, excerptSource, tripwireHit } = prepared;
     const gateReason: string | null = prepared.gate.reason;
 
-    const triage = await triageItem(anthropicClient, db, {
-      loaded, itemId: item.item_id, excerptText: articleText, excerptSource, gateReason, tripwireHit,
-    });
-    if (triage.verdict === 'skip') {
-      record(skipRecord(item, `triage: ${triage.reason}`, { rung, orderStatus: 'resolved' }));
-      return;
+    let ladder: ActiveLadder;
+    let decision: DecideResult;
+
+    if (unifiedRun !== undefined) {
+      // Unified: the one call (already running or finished) replaced triage and the entry decide.
+      const u = await unifiedRun;
+      if (u === null) {
+        record(skipRecord(item, 'unified decision unavailable', { rung, orderStatus: 'resolved' }));
+        return;
+      }
+      if (u.ladderError !== null) throw u.ladderError; // recorded as `pipeline error: ...`, exactly like the classic fetch
+      if (u.ladder === null) {
+        record(skipRecord(item, `no active ${loaded.profile.seriesTicker} event found`, { rung, orderStatus: 'resolved' }));
+        return;
+      }
+      ladder = u.ladder;
+      if (u.failure !== null || u.decision === null) {
+        record(skipRecord(item, `unified decision failed: ${u.failure ?? 'no decision'}`, { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
+        return;
+      }
+      if (item.story_key !== null && hasOpenPosition(db, item.story_key, ladder.eventTicker)) {
+        record(skipRecord(item, 'story already has an open position for the active event', { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
+        return;
+      }
+      const d = u.decision;
+      const why = `${d.entry.reason}${d.reasoning === d.entry.reason ? '' : ` | ${d.reasoning}`}`;
+      if (structure === 'multi') {
+        const outcomeGroup = loaded.profile.outcomeGroup;
+        if (outcomeGroup === undefined) throw new Error('multi profile has no outcomeGroup'); // the schema forbids this
+        const onActive = new Set(ladder.bands.map((b) => b.ticker));
+        const moves = d.moves.filter((m) => onActive.has(m.market));
+        if (d.entry.action !== 'buy' || moves.length === 0) {
+          record(skipRecord(item, d.entry.action !== 'buy' ? why : `model said buy but proposed no move on the active event: ${why}`, { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
+          return;
+        }
+        applyMultiEntry({ db, item, trade, rung, ladder, moves, reasoning: why, outcomeGroup, tag: lowTierTag, record });
+        return;
+      }
+      const shift = d.assessment!.shift; // non-multi trades always carry an assessment
+      decision = { direction: shift >= 0 ? 'up' : 'down', magnitudePts: Math.abs(shift), shouldTrade: d.entry.action === 'buy', reasoning: why };
+    } else {
+      // ---- classic path: the existing code, unchanged ----
+      const triage = await triageItem(anthropicClient, db, {
+        loaded, itemId: item.item_id, excerptText: articleText, excerptSource, gateReason, tripwireHit,
+      });
+      if (triage.verdict === 'skip') {
+        record(skipRecord(item, `triage: ${triage.reason}`, { rung, orderStatus: 'resolved' }));
+        return;
+      }
+
+      const fetched: ActiveLadder | null = await fetchLadder(loaded.profile.seriesTicker, db);
+      if (fetched === null) {
+        record(
+          skipRecord(item, `no active ${loaded.profile.seriesTicker} event found`, { rung, orderStatus: 'resolved' })
+        );
+        return;
+      }
+      ladder = fetched;
+
+      if (item.story_key !== null && hasOpenPosition(db, item.story_key, ladder.eventTicker)) {
+        record(
+          skipRecord(item, 'story already has an open position for the active event', {
+            rung,
+            eventTicker: ladder.eventTicker,
+            orderStatus: 'resolved',
+          })
+        );
+        return;
+      }
+
+      if (structure === 'multi') {
+        const outcomeGroup = loaded.profile.outcomeGroup;
+        if (outcomeGroup === undefined) throw new Error('multi profile has no outcomeGroup'); // the schema forbids this
+        const multi = await decideMulti(anthropicClient, db, {
+          loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit,
+          triageReason: triage.reason, markets: ladder.bands, group: outcomeGroup,
+        });
+        if (!multi.shouldTrade) {
+          record(skipRecord(item, multi.reasoning, { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
+          return;
+        }
+        applyMultiEntry({ db, item, trade, rung, ladder, moves: multi.moves, reasoning: multi.reasoning, outcomeGroup, tag: lowTierTag, record });
+        return;
+      }
+
+      decision = await decideTrade(anthropicClient, db, {
+        loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit, triageReason: triage.reason,
+      });
     }
 
-    const ladder: ActiveLadder | null = await fetchLadder(loaded.profile.seriesTicker, db);
-    if (ladder === null) {
-      record(
-        skipRecord(item, `no active ${loaded.profile.seriesTicker} event found`, { rung, orderStatus: 'resolved' })
-      );
-      return;
-    }
-
-    if (item.story_key !== null && hasOpenPosition(db, item.story_key, ladder.eventTicker)) {
-      record(
-        skipRecord(item, 'story already has an open position for the active event', {
-          rung,
-          eventTicker: ladder.eventTicker,
-          orderStatus: 'resolved',
-        })
-      );
-      return;
-    }
-
-    const decision = await decideTrade(anthropicClient, db, {
-      loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit, triageReason: triage.reason,
-    });
     if (!decision.shouldTrade) {
       record(
         skipRecord(item, decision.reasoning, {

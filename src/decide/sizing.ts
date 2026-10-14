@@ -512,3 +512,116 @@ export function evaluateBinarySizing(input: {
     reason: `binary paper position: 1 contract ${side} at ${askCents}c (direction ${direction}, rung ${rung})`,
   };
 }
+
+export interface MultiLeg {
+  wouldTrade: true;
+  marketTicker: string;
+  side: 'yes' | 'no';
+  contracts: number;
+  entryPriceCents: number;
+  notionalCents: number;
+  edgeCents: number;
+  reason: string;
+  shift: number;
+  confidence: number;
+  fairYesCents: number;
+}
+
+export interface MultiSizingResult {
+  legs: MultiLeg[];
+  /** One line per move that did not become a leg (or per cap that stopped one). */
+  reasons: string[];
+}
+
+/**
+ * Paper sizing for the moves a `multi` decision produced (multi-market spec, section 3.4). Each move
+ * becomes a candidate on its own market: YES when the shift is positive, NO when negative, with
+ * fair YES = mid + shift (clamped to 1..99) and the same ask/spread/depth/edge arithmetic as the band
+ * path. The same `gateCandidate`, Kelly fraction (scaled by the move's confidence) and
+ * `contractsWithinCaps` apply. Candidates are ranked by edge; up to `maxLegs` become legs, each sized
+ * against the exposure the previous one left.
+ */
+export function evaluateMultiSizing(input: {
+  markets: BandMarket[];
+  moves: Array<{ market: string; shift: number; confidence: number }>;
+  maxLegs: 1 | 2;
+  rung: Rung;
+  currentTotalExposureCents: number;
+  caps?: { perTradeCents: number; totalExposureCents: number };
+}): MultiSizingResult {
+  const stake = RUNG_STAKES[input.rung];
+  if (stake <= 0) return { legs: [], reasons: [`rung is ${input.rung}, stake ${stake} -- never trades`] };
+
+  const reasons: string[] = [];
+  const candidates: Array<{ cand: BandCandidate; kelly: number; shift: number; confidence: number; fairYesCents: number }> = [];
+
+  for (const move of input.moves) {
+    if (!Number.isFinite(move.shift)) { reasons.push(`${move.market}: shift is not a finite number`); continue; }
+    const confidence = Number.isFinite(move.confidence) ? Math.min(1, Math.max(0, move.confidence)) : 0;
+    const m = input.markets.find((x) => x.ticker === move.market);
+    if (m === undefined) { reasons.push(`${move.market}: not among the event's open markets`); continue; }
+    if (m.status !== 'active') { reasons.push(`${m.ticker}: market is ${m.status}, not active`); continue; }
+    if (m.yesAskCents === null || m.yesBidCents === null) { reasons.push(`${m.ticker}: no two-sided quote`); continue; }
+    if (move.shift === 0) continue;
+
+    const midYes = (m.yesAskCents + m.yesBidCents) / 2;
+    const fairYesCents = Math.min(99, Math.max(1, Math.round(midYes + move.shift)));
+    const spreadCents = m.yesAskCents - m.yesBidCents;
+    const cand: BandCandidate =
+      move.shift > 0
+        ? {
+            ticker: m.ticker, side: 'yes', askCents: m.yesAskCents, spreadCents, depthContracts: m.yesAskSizeContracts,
+            fairPriceCents: fairYesCents, edgeCents: fairYesCents - m.yesAskCents,
+          }
+        : {
+            ticker: m.ticker, side: 'no', askCents: SETTLEMENT_CENTS - m.yesBidCents, spreadCents, depthContracts: m.yesBidSizeContracts,
+            fairPriceCents: SETTLEMENT_CENTS - fairYesCents, edgeCents: SETTLEMENT_CENTS - fairYesCents - (SETTLEMENT_CENTS - m.yesBidCents),
+          };
+
+    const verdict = gateCandidate(cand);
+    if (!verdict.ok) { reasons.push(`${m.ticker}: ${verdict.reason}`); continue; }
+    const kelly = kellyFraction(cand.fairPriceCents, cand.askCents);
+    if (kelly <= 0) { reasons.push(`${m.ticker}: zero Kelly fraction`); continue; }
+    candidates.push({ cand, kelly, shift: move.shift, confidence, fairYesCents });
+  }
+
+  candidates.sort((a, b) => b.cand.edgeCents - a.cand.edgeCents || a.cand.ticker.localeCompare(b.cand.ticker));
+
+  const totalCap = input.caps?.totalExposureCents ?? MAX_TOTAL_EXPOSURE_CENTS;
+  let exposure = input.currentTotalExposureCents;
+  const legs: MultiLeg[] = [];
+  for (const c of candidates) {
+    if (legs.length >= input.maxLegs) break;
+    if (legs.some((l) => l.marketTicker === c.cand.ticker)) { reasons.push(`${c.cand.ticker}: already has a leg from this item`); continue; }
+    const remainingExposureCents = totalCap - exposure;
+    if (remainingExposureCents <= 0) {
+      reasons.push(`total exposure cap reached (${exposure}c of ${totalCap}c)`);
+      break;
+    }
+    const contracts = contractsWithinCaps({
+      askCents: c.cand.askCents,
+      kelly: c.kelly * c.confidence,
+      stake,
+      depthContracts: c.cand.depthContracts,
+      remainingExposureCents,
+      perTradeCents: input.caps?.perTradeCents,
+    });
+    if (!(contracts > 0)) { reasons.push(`${c.cand.ticker}: sized to zero contracts after Kelly/stake/depth/exposure clamps`); continue; }
+    const notionalCents = contracts * c.cand.askCents;
+    exposure += notionalCents;
+    legs.push({
+      wouldTrade: true,
+      marketTicker: c.cand.ticker,
+      side: c.cand.side,
+      contracts,
+      entryPriceCents: c.cand.askCents,
+      notionalCents,
+      edgeCents: c.cand.edgeCents,
+      reason: `${contracts} contracts, ${c.cand.edgeCents.toFixed(2)}c edge, stake ${stake}, confidence ${c.confidence}`,
+      shift: c.shift,
+      confidence: c.confidence,
+      fairYesCents: c.fairYesCents,
+    });
+  }
+  return { legs, reasons };
+}
