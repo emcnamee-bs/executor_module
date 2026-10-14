@@ -158,6 +158,36 @@ export function resolveExitReview(
   };
 }
 
+export type DecisionMode = 'classic' | 'unified';
+
+/**
+ * DECISION_MODE=unified replaces triage + decide + per-position exit reviews with one position-aware call
+ * (docs/superpowers/specs/2026-10-13-unified-position-aware-decision-design.md). Like the exit review it must
+ * be impossible to engage on a live-capable process, and it reuses the exit review's fills, timer and
+ * lateness, so it also requires EXIT_REVIEW=on. Unset, empty or "classic" means the existing behaviour.
+ */
+export function resolveDecisionMode(
+  profile: Pick<TradeProfile, 'name' | 'ledgerPath' | 'consumerGroup'>,
+  env: NodeJS.ProcessEnv,
+  exitReviewEnabled: boolean
+): DecisionMode {
+  const value = env.DECISION_MODE;
+  if (value === undefined || value === '' || value === 'classic') return 'classic';
+  const refuse = (why: string) =>
+    new Error(
+      `start refused for trade ${profile.name}: DECISION_MODE is set, but ${why}. Unified decisions are paper-only, enabled per paper ` +
+        `unit via its decision-mode.conf drop-in; the live unit must never set it.`
+    );
+  if (value !== 'unified') throw refuse(`its value ${JSON.stringify(value)} is not "classic" or "unified"`);
+  if (env.KALSHI_DRY_RUN !== 'true') throw refuse('KALSHI_DRY_RUN is not "true" (this would be a live process)');
+  if (env.EXECUTOR_LIVE_TRADE !== undefined) throw refuse('EXECUTOR_LIVE_TRADE is set, so this is the live unit');
+  if (profile.ledgerPath.toLowerCase() === LIVE_LEDGER_PATH || profile.consumerGroup === LIVE_CONSUMER_GROUP) {
+    throw refuse(`the profile uses the live ledger ${LIVE_LEDGER_PATH} or live consumer group ${LIVE_CONSUMER_GROUP}`);
+  }
+  if (!exitReviewEnabled) throw refuse('EXIT_REVIEW=on is also required (unified mode reuses the exit review fills and retry timer)');
+  return 'unified';
+}
+
 export interface Startup {
   loaded: LoadedProfile;
   ledgerPath: string;
@@ -169,6 +199,8 @@ export interface Startup {
   paperLowTier: boolean;
   /** EXIT_REVIEW and friends, resolved and validated by resolveExitReview. */
   exitReview: ExitReviewConfig;
+  /** DECISION_MODE, resolved and validated by resolveDecisionMode (classic unless a paper unit opts in to unified). */
+  decisionMode: DecisionMode;
   /** GATE_PROVIDER and friends, resolved and validated by resolveGateConfig (default: the local Ollama gate). */
   gate: GateConfig;
   lock: LedgerLock;
@@ -208,6 +240,7 @@ export async function prepareStartup(
   assertLiveLedgerOwnership(profile, env);
   const paperLowTier = resolvePaperLowTier(profile, env);
   const exitReview = resolveExitReview(profile, env);
+  const decisionMode = resolveDecisionMode(profile, env, exitReview.enabled);
   const gate = resolveGateConfig(env);
   const ledgerPath = resolveLedgerPath(profile, repoRoot);
   // Refuses a LIVE start on a ledger file that does not exist (mis-pinned profile guard).
@@ -240,7 +273,7 @@ export async function prepareStartup(
       `structure=${profile.marketStructure} gateProvider=${gate.provider} gateModel=${gate.provider === 'anthropic' ? gate.anthropicModel : profile.gateModel} ` +
       `ledger=${ledgerPath} group=${profile.consumerGroup} ` +
       `bankSha=${loaded.bankSha.slice(0, 12)} keyphrases=${loaded.keyphrases.length} ` +
-      `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted} lowTier=${paperLowTier} exitReview=${exitReview.enabled ? 'on' : 'off'}`
+      `directSources=${JSON.stringify(profile.directSources)} dryRun=${dryRun} halted=${halted} lowTier=${paperLowTier} exitReview=${exitReview.enabled ? 'on' : 'off'} decision=${decisionMode}`
   );
 
   if (!dryRun && !halted) {
@@ -251,5 +284,5 @@ export async function prepareStartup(
     );
   }
 
-  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, exitReview, gate, lock };
+  return { loaded, ledgerPath, consumerOptions, compiledPhrases, dryRun, halted, paperLowTier, exitReview, decisionMode, gate, lock };
 }

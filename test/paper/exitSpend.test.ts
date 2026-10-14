@@ -34,6 +34,13 @@ describe('exit review budget', () => {
     expect(estimateExitSpendUsd(db, NOW)).toBeCloseTo(0.6);
   });
 
+  it('counts decide_unified calls toward the daily spend, and still not triage or decide', () => {
+    call('decide_unified', 'claude-haiku-5-5', 1_000_000, 1_000_000, '2026-10-12T01:00:00.000Z'); // 0.1 + 0.5
+    call('triage', 'claude-haiku-5-5', 1_000_000, 1_000_000, '2026-10-12T01:00:00.000Z'); // other stage: ignored
+    call('decide', 'claude-haiku-5-5', 1_000_000, 1_000_000, '2026-10-12T01:00:00.000Z'); // other stage: ignored
+    expect(estimateExitSpendUsd(db, NOW)).toBeCloseTo(0.6);
+  });
+
   it('an unlisted model is costed at a conservative non-zero rate', () => {
     call('exit_review', 'claude-something-new', 1_000_000, 0, '2026-10-12T01:00:00.000Z');
     expect(estimateExitSpendUsd(db, NOW)).toBeGreaterThan(0);

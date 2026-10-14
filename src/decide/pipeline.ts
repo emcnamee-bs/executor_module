@@ -68,6 +68,8 @@ export interface PipelineDeps {
   gateModel?: string;
   /** Exit-review wiring. Undefined = off. Honoured only on a dry-run, non-live process (re-checked per item). */
   exit?: ExitWiring;
+  /** Selected per unit by DECISION_MODE (startup.ts); unset = classic. Honoured only on a dry-run, non-live process (re-checked per item). */
+  decisionMode?: 'classic' | 'unified';
 }
 
 /**
