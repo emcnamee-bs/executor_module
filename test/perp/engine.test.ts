@@ -24,10 +24,12 @@ function harness(over: { startEquityUsd?: number } = {}) {
   const db = openPerpDb(':memory:');
   const alerts: string[] = [];
   let collectError: Error | null = null;
+  let nextCloseTsMs: number | null = NOW0 + 3 * 24 * H;
+  let marketOpen = true;
   const collect = async (): Promise<Collected> => {
     if (collectError) throw collectError;
     return {
-      perp: { bid: q.bid, ask: q.ask, mark: q.mark, marketOpen: true, nextCloseTsMs: NOW0 + 3 * 24 * H, fundingEstimate: 0.0001 },
+      perp: { bid: q.bid, ask: q.ask, mark: q.mark, marketOpen, nextCloseTsMs, fundingEstimate: 0.0001 },
       perpFetchedAtMs: now,
       macro: { vix: { value: 16, change1d: 0, asOf: '2026-10-13' } },
       macroFetchedAtMs: now,
@@ -47,6 +49,8 @@ function harness(over: { startEquityUsd?: number } = {}) {
     advance: (ms: number) => { now += ms; },
     setMark: (m: number) => { q.mark = m; q.bid = m - 0.005; q.ask = m + 0.005; },
     setCollectError: (e: Error | null) => { collectError = e; },
+    setNextClose: (ts: number | null) => { nextCloseTsMs = ts; },
+    setMarketOpen: (open: boolean) => { marketOpen = open; },
   };
 }
 type H = ReturnType<typeof harness>;
@@ -290,6 +294,63 @@ describe('paper collateral top-up (W1)', () => {
     await e2.onAssessment(assess(h));
     expect((await b2.position())?.side).toBe('long');
     expect(loadPosition(h.db)?.side).toBe('long');
+  });
+});
+
+describe('holding across the weekly close (W2b)', () => {
+  it('alerts and journals weekend_hold once per weekly close when strong aligned pressure keeps the position', async () => {
+    const h = harness();
+    await openLong(h);
+    await h.engine.onAssessment(assess(h)); // a second bullish item: aligned pressure ~3.6% >= 1.5 x 1.5%
+    expect(h.engine.status().pressure).toBeGreaterThanOrEqual(DEFAULT_CONFIG.weekendHoldMult * 0.015);
+    const closeTs = h.now() + 21 * MIN;
+    h.setNextClose(closeTs);
+    h.advance(MIN);
+    await h.engine.tick();
+    expect(loadPosition(h.db)?.side).toBe('long');
+    const rows = listJournal(h.db, 'weekend_hold', 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toMatchObject({ side: 'long', nextCloseTsMs: closeTs, stopBps: 388 });
+    const msgs = h.alerts.filter((a) => /across the weekly close/.test(a));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatch(/holding long across the weekly close \(aligned pressure 3\.\d\d% >= 2\.25%\); the exchange-side trailing stop \(388 bps\) remains in force/);
+    h.advance(MIN);
+    await h.engine.tick();
+    h.advance(MIN);
+    await h.engine.tick();
+    expect(listJournal(h.db, 'weekend_hold', 5)).toHaveLength(1);
+    expect(h.alerts.filter((a) => /across the weekly close/.test(a))).toHaveLength(1);
+    // The next weekly close is a new one: it alerts again.
+    h.setNextClose(closeTs + 7 * 24 * H);
+    h.advance(7 * 24 * H - 2 * MIN);
+    await h.engine.onAssessment(assess(h));
+    await h.engine.onAssessment(assess(h));
+    await h.engine.tick(); // fresh snapshot carrying the new close time
+    expect(loadPosition(h.db)?.side).toBe('long');
+    expect(listJournal(h.db, 'weekend_hold', 5)).toHaveLength(2);
+  });
+
+  it('no weekend_hold for a hold that is not the strong-pressure decision (market closed inside the window, weak pressure)', async () => {
+    const h = harness();
+    await openLong(h); // one item: ~1.8% < 2.25%
+    h.setNextClose(h.now() + 20 * MIN);
+    h.setMarketOpen(false);
+    h.advance(MIN);
+    await h.engine.tick();
+    expect(loadPosition(h.db)?.side).toBe('long'); // the policy held: nothing can trade while the market is closed
+    expect(listJournal(h.db, 'weekend_hold', 5)).toHaveLength(0);
+    expect(h.alerts.join('\n')).not.toMatch(/across the weekly close/);
+  });
+
+  it('no weekend_hold when weak pressure flattens the position before the close', async () => {
+    const h = harness();
+    await openLong(h); // one item: ~1.8% < 2.25%
+    h.setNextClose(h.now() + 20 * MIN);
+    h.advance(MIN);
+    await h.engine.tick();
+    expect(listExits(h.db, 0).map((e) => e.rule)).toEqual(['weekend']);
+    expect(listJournal(h.db, 'weekend_hold', 5)).toHaveLength(0);
+    expect(h.alerts.join('\n')).not.toMatch(/across the weekly close/);
   });
 });
 

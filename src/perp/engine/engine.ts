@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 import type { Broker, BrokerEvent, BrokerPosition, CloseResult, FillResult } from '../broker/types.js';
 import type { PerpConfig } from '../config.js';
 import { summarizeContext } from '../model/context.js';
-import { decide, type NewItem, type PolicyInput } from '../policy/policy.js';
+import { decide, entryThreshold, type NewItem, type PolicyInput } from '../policy/policy.js';
 import { stopFraction } from '../quant/formulas.js';
 import { PressureBook } from '../quant/pressure.js';
 import { computeGovernors } from '../risk/governor.js';
@@ -15,6 +15,7 @@ import {
   recordAssessment, recordEquity, recordExit as recordExitRow, saveRiskState, savePosition, saveSnapshot, setState,
   snapshotNear,
 } from '../store/db.js';
+import { minutesToClose } from '../time/windows.js';
 import type { Action, ExitRule, ImpactAssessment, MacroPoint, PositionState, ScheduledEvent, Side, Snapshot } from '../types.js';
 import { extremeSince } from './helpers.js';
 import { Mutex } from './mutex.js';
@@ -304,6 +305,7 @@ export class PerpEngine {
     const out = decide(input);
     this.breachStreak = out.breachStreak;
     setState(db, 'breachStreak', this.breachStreak);
+    if (out.action.kind === 'hold') this.noteWeekendHold(snapshot, input.pressureNow, now);
 
     const interesting = out.action.kind !== 'hold' || newItems.length > 0;
     if (interesting || now - this.lastHoldJournalMs >= HOLD_JOURNAL_EVERY_MS) {
@@ -324,6 +326,32 @@ export class PerpEngine {
       });
     }
     await this.execute(out.action, snapshot, newItems, allowFlip);
+  }
+
+  /**
+   * The policy held a position inside the weekly-close window, i.e. the aligned pressure was strong enough to keep it
+   * across the close. Tell the operator once per weekly close (deduped by the close time, persisted across restarts).
+   */
+  private noteWeekendHold(snapshot: Snapshot, pressureNow: number, now: number): void {
+    const p = this.position;
+    const closeTs = snapshot.perp.nextCloseTsMs;
+    if (p === null || closeTs === null) return;
+    const mtc = minutesToClose(now, closeTs);
+    if (mtc === null || mtc < 0 || mtc > this.d.cfg.weekendFlatMinutes) return;
+    const alignedP = p.side === 'long' ? pressureNow : -pressureNow;
+    const holdAt = this.d.cfg.weekendHoldMult * entryThreshold(p.side, this.d.cfg);
+    if (!(alignedP >= holdAt)) return; // a hold for another reason (stale data, closed market) is not this decision
+    if (getState<number>(this.d.db, 'weekendHoldAlertedFor') === closeTs) return;
+    setState(this.d.db, 'weekendHoldAlertedFor', closeTs);
+    const pct = (x: number): string => `${(x * 100).toFixed(2)}%`;
+    appendJournal(this.d.db, {
+      tsMs: now,
+      kind: 'weekend_hold',
+      payload: { side: p.side, nextCloseTsMs: closeTs, alignedPressure: alignedP, holdAt, stopBps: p.stopBps },
+    });
+    this.d.alert(
+      `[PERP ${this.d.broker.mode}] holding ${p.side} across the weekly close (aligned pressure ${pct(alignedP)} >= ${pct(holdAt)}); the exchange-side trailing stop (${p.stopBps} bps) remains in force`
+    );
   }
 
   private async execute(a: Action, snapshot: Snapshot, newItems: NewItem[], allowFlip: boolean): Promise<void> {

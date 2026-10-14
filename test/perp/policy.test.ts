@@ -119,6 +119,12 @@ describe('flat: entries', () => {
     expect(decide(input({ snapshot: snap({ nextCloseTsMs: NOW + 20 * MIN }) })).action.kind).toBe('hold');
     expect(decide(input({ snapshot: snap({}, [{ tsMs: NOW + 3 * MIN, name: 'CPI', impact: 'high' }]) })).action.kind).toBe('hold');
   });
+  it('fails closed when the weekly close time is unknown (W2a)', () => {
+    const out = decide(input({ snapshot: snap({ nextCloseTsMs: null }) }));
+    expect(out.action).toEqual({ kind: 'hold', reasons: ['weekly close time unknown'] });
+    const short = decide(input({ snapshot: snap({ nextCloseTsMs: null }), pressureNow: -0.03, newItems: [item({ direction: 'down', confidence: 0.8 })] }));
+    expect(short.action.kind).toBe('hold');
+  });
   it('holds during the per-side cooldown but allows the opposite side after a news exit', () => {
     const cooling = { ...initialRiskState(), cooldownUntilMs: { long: NOW + H, short: 0 } };
     expect(decide(input({ risk: cooling })).action.kind).toBe('hold');
@@ -199,6 +205,12 @@ describe('long: exits', () => {
     const closing = snap({ nextCloseTsMs: NOW + 20 * MIN });
     expect(decide(input({ ...noNews, snapshot: closing, pressureNow: 0.01 })).action).toMatchObject({ kind: 'close', rule: 'weekend' });
     expect(decide(input({ ...noNews, snapshot: closing, pressureNow: 0.0226 })).action.kind).toBe('hold');
+  });
+  it('an unknown weekly close time does not change in-position decisions (W2a)', () => {
+    const unknown = snap({ nextCloseTsMs: null });
+    expect(decide(input({ ...noNews, snapshot: unknown })).action).toEqual(decide(input(noNews)).action);
+    expect(decide(input({ ...noNews, snapshot: unknown, liqDistance: 0.07 })).action).toMatchObject({ kind: 'close', rule: 'margin_guard' });
+    expect(decide(input({ ...noNews, snapshot: unknown, position: longPos({ stopBps: 500 }) })).action.kind).toBe('set_stop');
   });
   it('cannot close while the market is closed (holds; the exchange trigger remains)', () => {
     const out = decide(input({ ...noNews, snapshot: snap({ marketOpen: false }), pressureNow: -0.05, prevBreachStreak: 5 }));

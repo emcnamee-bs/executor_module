@@ -163,6 +163,8 @@ function decideFlat(inp: PolicyInput): PolicyOutput {
   const ageMs = Math.max(nowMs - snapshot.tsMs, snapshot.freshness.perpAgeMs);
   if (ageMs > cfg.staleSnapshotMs) return hold(`stale data (${Math.round(ageMs / 1000)}s old)`);
   if (!snapshot.perp.marketOpen) return hold('market closed');
+  // Fail closed: without the close time the weekly-close window below cannot be checked.
+  if (snapshot.perp.nextCloseTsMs === null) return hold('weekly close time unknown');
   const mtc = minutesToClose(nowMs, snapshot.perp.nextCloseTsMs);
   if (mtc !== null && mtc <= cfg.weekendFlatMinutes) return hold('inside the weekly-close window');
   if (inEventWindow(nowMs, snapshot.events, cfg.noTradeMinutesAroundEvents)) {
