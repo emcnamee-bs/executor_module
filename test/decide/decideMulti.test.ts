@@ -49,6 +49,11 @@ describe('checkMultiMoves: shape rules (any group)', () => {
     expect(checkMultiMoves([mv('A', 3)], markets, 'independent')).toMatchObject({ ok: false });
     expect(checkMultiMoves([mv('B', 3)], markets, 'independent')).toMatchObject({ ok: false });
   });
+  it('rejects non-object entries', () => {
+    for (const bad of [[null], [3], [[1, 2]], ['x']]) {
+      expect(checkMultiMoves(bad, fed, 'independent')).toMatchObject({ ok: false });
+    }
+  });
   it('rejects a duplicate market', () => {
     expect(checkMultiMoves([mv('F-HOLD', 3), mv('F-HOLD', -3)], fed, 'independent')).toMatchObject({ ok: false, reason: expect.stringMatching(/twice/) });
   });
@@ -72,6 +77,12 @@ describe('checkMultiMoves: group rules', () => {
     expect(checkMultiMoves([mv('F-HOLD', -8), mv('F-CUT', 6), mv('F-HIKE', 3)], fed, 'exclusive')).toMatchObject({ ok: true });
     expect(checkMultiMoves([mv('F-HOLD', -5)], fed, 'exclusive')).toMatchObject({ ok: true });
   });
+  it('exclusive: decimal shifts that sum to exactly the tolerance are not rejected by float error', () => {
+    const four = [mk('X1', 'A', 24, 26), mk('X2', 'B', 24, 26), mk('X3', 'C', 24, 26), mk('X4', 'D', 24, 26)];
+    // (the brief's 1.1+1.1+1.1+1.7 happens to sum to exactly 5 in floats; this order does not)
+    expect(1.1 + 1.3 + 1.9 + 0.7).toBeGreaterThan(5);
+    expect(checkMultiMoves([mv('X1', 1.1), mv('X2', 1.3), mv('X3', 1.9), mv('X4', 0.7)], four, 'exclusive')).toMatchObject({ ok: true });
+  });
   it('exclusive: rejects shifts that do not net out, naming the sum', () => {
     const r = checkMultiMoves([mv('F-CUT', 10)], fed, 'exclusive');
     expect(r).toMatchObject({ ok: false, reason: expect.stringMatching(/net to 10/) });
@@ -84,6 +95,19 @@ describe('checkMultiMoves: group rules', () => {
     // L-1 20 -> 50 would exceed L-2 (40) and L-3 (60 stays): pooled with L-2 -> both 45; shift on L-1 becomes +25
     const r = checkMultiMoves([mv('L-1', 30)], ladder, 'ladder');
     expect(r).toEqual({ ok: true, moves: [mv('L-1', 25)] });
+  });
+  it('ladder: drops a move whose repair would reverse the model direction, keeping the same-sign repaired one', () => {
+    // targets 80/30/60 -> L-1 and L-2 pool to 55/55: L-2 would become +15 though the model said -10, so it is dropped; L-1 becomes +35
+    const r = checkMultiMoves([mv('L-1', 60), mv('L-2', -10)], ladder, 'ladder');
+    expect(r).toEqual({ ok: true, moves: [mv('L-1', 35)] });
+  });
+  it('ladder: a repair that only shrinks a same-sign move keeps it', () => {
+    expect(checkMultiMoves([mv('L-1', 30)], ladder, 'ladder')).toEqual({ ok: true, moves: [mv('L-1', 25)] });
+  });
+  it('ladder: a repair that clamps at the 1..99 bounds still gives a same-sign shift', () => {
+    // 60 + 60 -> clamped to 99 (shift +39); 20 - 60 -> clamped to 1 (shift -19)
+    expect(checkMultiMoves([mv('L-3', 60)], ladder, 'ladder')).toEqual({ ok: true, moves: [mv('L-3', 39)] });
+    expect(checkMultiMoves([mv('L-1', -60)], ladder, 'ladder')).toEqual({ ok: true, moves: [mv('L-1', -19)] });
   });
   it('ladder: orders markets by current YES mid, not by the order given', () => {
     const shuffled = [ladder[2], ladder[0], ladder[1]];

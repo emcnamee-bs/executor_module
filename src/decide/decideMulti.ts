@@ -76,7 +76,8 @@ const tradable = (m: BandMarket): boolean => m.status === 'active' && yesMid(m) 
 /**
  * Checks the model's `moves` against the open markets and the group rule (see the plan's Global
  * Constraints). Returns the moves to size: zero shifts dropped and, for a ladder, each shift replaced by
- * the monotone-repaired one. Never throws: an invalid answer is `{ ok: false, reason }`.
+ * the monotone-repaired one (a move whose repaired shift is zero or would reverse the model's direction
+ * is dropped, never flipped). Never throws: an invalid answer is `{ ok: false, reason }`.
  */
 export function checkMultiMoves(rawMoves: unknown, markets: BandMarket[], group: OutcomeGroup): MultiCheck {
   if (!Array.isArray(rawMoves)) return { ok: false, reason: 'moves is not a list' };
@@ -101,7 +102,8 @@ export function checkMultiMoves(rawMoves: unknown, markets: BandMarket[], group:
   }
 
   if (group === 'exclusive') {
-    const net = moves.reduce((total, m) => total + m.shift, 0);
+    // Rounded so that decimal shifts that sum to exactly the tolerance are not rejected by float error.
+    const net = Number(moves.reduce((total, m) => total + m.shift, 0).toFixed(6));
     if (Math.abs(net) > EXCLUSIVE_SUM_TOLERANCE) {
       return { ok: false, reason: `shifts on an exclusive set must net to within +/-${EXCLUSIVE_SUM_TOLERANCE} points of zero but net to ${Number(net.toFixed(2))}` };
     }
@@ -116,7 +118,9 @@ export function checkMultiMoves(rawMoves: unknown, markets: BandMarket[], group:
     const out: MultiMove[] = [];
     for (const m of moves) {
       const shift = Number(repaired.get(m.market)!.toFixed(4));
-      if (Math.abs(shift) >= 0.01) out.push({ ...m, shift });
+      // The model's stated direction is never reversed: a move whose repaired shift is zero or has the
+      // opposite sign is dropped rather than traded the other way.
+      if (Math.abs(shift) >= 0.01 && Math.sign(shift) === Math.sign(m.shift)) out.push({ ...m, shift });
     }
     return { ok: true, moves: out };
   }
@@ -128,7 +132,7 @@ const GROUP_RULE: Record<OutcomeGroup, string> = {
   ladder:
     'These markets are NESTED "before date X" markets for one event: an earlier date can never be more likely than a later one. Moves that break that order are repaired by code.',
   exclusive:
-    'Exactly one of these markets resolves YES, so the probabilities always sum to 100%. If you raise one outcome you MUST lower others by about the same total: your shifts must net to within +/-5 points of zero or the whole answer is rejected.',
+    `Exactly one of these markets resolves YES, so the probabilities always sum to 100%. If you raise one outcome you MUST lower others by about the same total: your shifts must net to within +/-${EXCLUSIVE_SUM_TOLERANCE} points of zero or the whole answer is rejected.`,
   independent: 'Each of these markets is its own separate yes/no question; moving one says nothing about the others.',
 };
 
