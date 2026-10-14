@@ -108,13 +108,15 @@ export async function runUnifiedStep(
     return p;
   };
 
-  const errorRow = (position: OpenPaperPosition, why: string): void => {
+  // A review row written without a model call (error, or a market that is no longer open).
+  const reviewRow = (position: OpenPaperPosition, verdict: 'error' | 'hold', why: string): void => {
     recordExitReview(db, {
       trade, itemId: item.item_id, positionId: position.id, shift: null, confidence: null, reason: null, midCents: null,
-      fairAfterCents: null, lossCents: null, exitCostCents: null, verdict: 'error', verdictReason: why, lagJson: null,
+      fairAfterCents: null, lossCents: null, exitCostCents: null, verdict, verdictReason: why, lagJson: null,
       modelAction: null, decisionMode: 'unified',
     });
   };
+  const errorRow = (position: OpenPaperPosition, why: string): void => reviewRow(position, 'error', why);
 
   const reviewable: Array<{ position: OpenPaperPosition; market: BandMarket; bands: BandMarket[]; view: UnifiedPositionView }> = [];
   for (const position of candidates) {
@@ -123,11 +125,7 @@ export async function runUnifiedStep(
       if (eventLadder === null) { errorRow(position, `could not fetch the ladder for ${position.eventTicker}`); continue; }
       const market = eventLadder.bands.find((b) => b.ticker === position.marketTicker);
       if (market === undefined) {
-        recordExitReview(db, {
-          trade, itemId: item.item_id, positionId: position.id, shift: null, confidence: null, reason: null, midCents: null,
-          fairAfterCents: null, lossCents: null, exitCostCents: null, verdict: 'hold', verdictReason: 'market not open (closed or settled)',
-          lagJson: null, modelAction: null, decisionMode: 'unified',
-        });
+        reviewRow(position, 'hold', 'market not open (closed or settled)');
         continue;
       }
       const trajectory = await fetchTrajectory(loaded.profile.seriesTicker, position.marketTicker, position.side, Math.floor(now() / 1000));
@@ -163,7 +161,14 @@ export async function runUnifiedStep(
 
   for (const r of reviewable) {
     try {
-      const call = decision.positions.get(r.position.id)!; // validateUnified guarantees every position has one
+      // validateUnified guarantees every position has one; if that ever fails, never settle without the model's
+      // call (settleReview without `model` is the classic rule-only verdict and could sell on the rule alone).
+      const call = decision.positions.get(r.position.id);
+      if (call === undefined) {
+        console.error(`[unified] position ${r.position.id} (${r.position.marketTicker}): the model gave no recommendation; not settled`);
+        errorRow(r.position, 'the model gave no recommendation for this position');
+        continue;
+      }
       const move = decision.assessment === null ? decision.moves.find((m) => m.market === r.position.marketTicker) : undefined;
       const review =
         decision.assessment !== null
@@ -177,6 +182,13 @@ export async function runUnifiedStep(
       console.error(`[unified] position ${r.position.id} (${r.position.marketTicker}) failed:`, err);
     }
   }
-  if (deps.dailyUsdCap !== undefined) checkExitBudget(db, deps.dailyUsdCap, alert, now());
+  if (deps.dailyUsdCap !== undefined) {
+    // Alert-only: a failure here must never turn a good decision into `null` for the entry path.
+    try {
+      checkExitBudget(db, deps.dailyUsdCap, alert, now());
+    } catch (err) {
+      console.error('[unified] exit budget check failed:', err);
+    }
+  }
   return { ladder, ladderError, decision, failure: null };
 }

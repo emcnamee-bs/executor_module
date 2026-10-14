@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import type Database from 'better-sqlite3';
-import { openLedger } from '../../src/decide/ledger.js';
+import { openLedger, recordDecision, tripBreaker, MAX_TRADES_PER_WINDOW } from '../../src/decide/ledger.js';
 import { loadProfile } from '../../src/profile/profile.js';
 import { writeProfile } from '../profile/fixtures.js';
 import { recordPaperPosition } from '../../src/paper/paper.js';
@@ -131,6 +131,7 @@ describe('runDecisionPipeline in unified mode', () => {
     const spy = answer(decision());
     process.env.EXECUTOR_TRADING_HALTED = 'true';
     await runDecisionPipeline(makeItem({ item_id: 'a' }), deps);
+    expect(gateModule.runGate).not.toHaveBeenCalled(); // nothing held, entry blocked: not even the gate runs
     delete process.env.EXECUTOR_TRADING_HALTED;
     vi.spyOn(gateModule, 'runGate').mockResolvedValue({ relevant: false, reason: 'unrelated' });
     heldYes();
@@ -172,6 +173,7 @@ describe('runDecisionPipeline in unified mode', () => {
     const spy = answer(decision({ entry: { action: 'buy', reason: 'cheap' } }));
     process.env.EXECUTOR_LIVE_TRADE = 'KXWTI';
     await runDecisionPipeline(makeItem({ item_id: 'a' }), deps);
+    expect(decideModule.decideTrade).toHaveBeenCalledTimes(1); // the classic path really ran for 'a'
     delete process.env.EXECUTOR_LIVE_TRADE;
     delete process.env.KALSHI_DRY_RUN;
     await runDecisionPipeline(makeItem({ item_id: 'b' }), deps);
@@ -202,6 +204,81 @@ describe('runDecisionPipeline in unified mode', () => {
     await runDecisionPipeline(makeItem(), { ...deps, anthropicClient: client });
     expect(aiStages()).toEqual(['decide_unified']);
     expect(reviews()[0].verdict).toBe('sell');
+  });
+
+  const heldOn = (event: string, market: string, itemId: string) =>
+    recordPaperPosition(db, { trade: 'kxwti', itemId, structure: 'threshold', eventTicker: event, marketTicker: market, side: 'yes', contracts: 4, entryPriceCents: 50, direction: 'up', magnitude: 1, edgeCents: 5, reasoning: 'r', ladderJson: '[]' });
+  const exitCount = () => (db.prepare(`SELECT COUNT(*) AS n FROM paper_exits`).get() as { n: number }).n;
+
+  it('a position-event ladder fetch failure: that position gets an error row and one alert; the others and the entry proceed', async () => {
+    const a = heldYes('T-94', 'p1');
+    const b = heldOn('EV2', 'T-92', 'p2');
+    answer(decision({ positions: holdOn(a), entry: { action: 'buy', reason: 'mispriced' } }));
+    const fetchLadderForEvent = vi.fn(async (event: string) => { if (event === 'EV2') throw new Error('kalshi 500'); return ladder; });
+    await runDecisionPipeline(makeItem(), { ...deps, exit: { ...deps.exit!, fetchLadderForEvent } });
+    const byId = new Map(reviews().map((r) => [r.p, r]));
+    expect(byId.get(b)).toMatchObject({ verdict: 'error', m: 'unified', why: expect.stringMatching(/could not fetch the ladder for EV2/) });
+    expect(byId.get(a)).toMatchObject({ verdict: 'hold', a: 'hold' });
+    expect(alerts.filter((m) => /\[UNIFIED ERROR\]/.test(m))).toHaveLength(1);
+    expect(decideCalls[0].positions.map((p) => p.id)).toEqual([a]);
+    expect(decideCalls[0].entryAllowed).toBe(true);
+    expect(positions().filter((p) => p.item_id === 'news-1')).toHaveLength(1);
+  });
+
+  it('a trajectory fetch failure: that position gets an error row and is never sold', async () => {
+    const id = heldYes();
+    answer(decision({ positions: sellOn(id) }));
+    await runDecisionPipeline(makeItem(), { ...deps, exit: { ...deps.exit!, fetchTrajectory: async () => { throw new Error('candles down'); } } });
+    expect(reviews()).toEqual([expect.objectContaining({ p: id, verdict: 'error', why: expect.stringMatching(/candles down/) })]);
+    expect(decideCalls[0].positions).toEqual([]);
+    expect(exitCount()).toBe(0);
+  });
+
+  it('position-event Kalshi calls never receive a db (a failure there must not feed the circuit breaker)', async () => {
+    const id = heldOn('EV2', 'T-94', 'p2');
+    answer(decision({ positions: holdOn(id) }));
+    const fetchLadderForEvent = vi.fn(async () => ({ ...ladder, eventTicker: 'EV2' }));
+    const fetchTrajectory = vi.fn(async () => [{ minutesAgo: 5, markCents: 50 }]);
+    await runDecisionPipeline(makeItem(), { ...deps, exit: { ...deps.exit!, fetchLadderForEvent, fetchTrajectory, now: () => 1_700_000_000_500 } });
+    expect(fetchLadderForEvent.mock.calls).toEqual([['EV2']]);
+    expect(fetchTrajectory.mock.calls).toEqual([['KXWTI', 'T-94', 'yes', 1_700_000_000]]);
+  });
+
+  describe('entry blockers still review held positions, telling the model entry is unavailable', () => {
+    const blocked = async (item: ReturnType<typeof makeItem>, reason: RegExp) => {
+      const id = heldYes();
+      answer(decision({ positions: sellOn(id), entry: { action: 'buy', reason: 'cheap' } }));
+      await runDecisionPipeline(item, deps);
+      expect(decideCalls).toHaveLength(1);
+      expect(decideCalls[0].entryAllowed).toBe(false);
+      expect(reviews()).toEqual([expect.objectContaining({ p: id, verdict: 'sell', m: 'unified' })]);
+      expect(entryRow(item.item_id)!.reason).toMatch(reason);
+      expect(positions()).toHaveLength(1);
+    };
+    it('rumor rung', async () => {
+      await blocked(makeItem({ trust_tier: 5, corroborations: 0, story_key: null }), /rumor rung/);
+    });
+    it('rate limit', async () => {
+      for (let i = 0; i < MAX_TRADES_PER_WINDOW; i++) {
+        recordDecision(db, {
+          itemId: `seed-rate-${i}`, storyKey: `seed-story-${i}`, eventTicker: 'OTHER', marketTicker: 'X-1', side: 'yes', rung: 'reported',
+          direction: 'up', magnitudePts: 1, contracts: 1, entryPriceCents: 50, notionalCents: 50, edgeCents: 3, wouldTrade: true, reason: 'seed', orderStatus: 'resolved',
+        });
+      }
+      await blocked(makeItem(), /rate limit/);
+    });
+    it('circuit breaker', async () => {
+      tripBreaker(db, 'failed-orders', 'test trip');
+      await blocked(makeItem(), /circuit breaker tripped/);
+    });
+  });
+
+  it('never settles a position the model gave no recommendation for, even when the rule alone would sell', async () => {
+    const id = heldYes(); // shift -2 on a held YES at T-94: the rule alone sells (see the "rule agrees" case)
+    answer(decision({ positions: new Map() }));
+    await runDecisionPipeline(makeItem(), deps);
+    expect(reviews()).toEqual([expect.objectContaining({ p: id, verdict: 'error', a: null, m: 'unified', why: 'the model gave no recommendation for this position' })]);
+    expect(exitCount()).toBe(0);
   });
 
   describe('multi trade', () => {
