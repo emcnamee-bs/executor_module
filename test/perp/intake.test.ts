@@ -108,4 +108,167 @@ describe('NewsIntake', () => {
     expect(intake.counters.assessed).toBe(1);
     expect(intake.counters.skipped_replay).toBe(1);
   });
+
+  describe('never rejects, never loses an alert (R25)', () => {
+    const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const capGate = async () => { throw new SpendCapError('cap reached'); };
+
+    it('a throwing journal write on the parse-failure path does not reject handleEntry', async () => {
+      const errSpy = quiet();
+      const { intake, db } = mk();
+      db.close();
+      expect(await intake.handleEntry({ id: '2-0', fields: {} })).toBe('parse_error');
+      expect(intake.counters.parse_error).toBe(1);
+      errSpy.mockRestore();
+    });
+
+    it('a throwing journal write inside the error path still resolves error', async () => {
+      const errSpy = quiet();
+      const { intake, db } = mk({ extract: async () => { throw new Error('503'); } });
+      db.close();
+      expect(await intake.handleItem(item())).toBe('error');
+      expect(intake.counters.error).toBe(1);
+      errSpy.mockRestore();
+    });
+
+    it('handleEntry resolves error on anything unexpected', async () => {
+      const errSpy = quiet();
+      const { intake } = mk();
+      const entry = { id: '9-0', get fields(): Record<string, string> { throw new Error('boom'); } };
+      expect(await intake.handleEntry(entry)).toBe('error');
+      expect(intake.counters.error).toBe(1);
+      errSpy.mockRestore();
+    });
+
+    it('a synchronously throwing alert resolves error and does not suppress the next cap alert that day', async () => {
+      const errSpy = quiet();
+      const sent: string[] = [];
+      let attempts = 0;
+      const alert = (m: string) => { attempts += 1; if (attempts === 1) throw new Error('slack down'); sent.push(m); };
+      const { intake } = mk({ gate: capGate, alert });
+      expect(await intake.handleItem(item())).toBe('error');
+      expect(sent).toHaveLength(0);
+      expect(await intake.handleItem(item())).toBe('error');
+      expect(sent).toHaveLength(1);
+      expect(await intake.handleItem(item())).toBe('error');
+      expect(sent).toHaveLength(1); // delivered once, now suppressed for the day
+      errSpy.mockRestore();
+    });
+
+    it('an alert returning a rejected promise causes no unhandled rejection and resolves error', async () => {
+      const errSpy = quiet();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (r: unknown) => { unhandled.push(r); };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const { intake } = mk({ gate: capGate, alert: () => Promise.reject(new Error('slack 500')) });
+        expect(await intake.handleItem(item())).toBe('error');
+        await new Promise((r) => setImmediate(r));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+        errSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('sustained provider outage alerts loudly, once per UTC day (R26)', () => {
+    const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const fail = async () => { throw new Error('anthropic 529 overloaded'); };
+    const fresh = (clock: number) => item({ source_publish_ts: new Date(clock - 60_000).toISOString() });
+
+    it('4 consecutive errors do not alert; the 5th alerts exactly once; later errors that day do not', async () => {
+      const errSpy = quiet();
+      const { intake, alerts } = mk({ extract: fail });
+      for (let i = 0; i < 4; i++) await intake.handleItem(item());
+      expect(alerts).toHaveLength(0);
+      await intake.handleItem(item());
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatch(/5 consecutive/);
+      expect(alerts[0]).toMatch(/anthropic 529 overloaded/);
+      expect(alerts[0]).toMatch(/exchange-side stop/);
+      for (let i = 0; i < 5; i++) await intake.handleItem(item());
+      expect(alerts).toHaveLength(1);
+      errSpy.mockRestore();
+    });
+
+    it('truncates the latest message to 200 characters', async () => {
+      const errSpy = quiet();
+      const long = 'x'.repeat(500);
+      const { intake, alerts } = mk({ extract: async () => { throw new Error(long); } });
+      for (let i = 0; i < 5; i++) await intake.handleItem(item());
+      expect(alerts[0]).toContain('x'.repeat(200));
+      expect(alerts[0]).not.toContain('x'.repeat(201));
+      errSpy.mockRestore();
+    });
+
+    it('a successful assessment resets the counter', async () => {
+      const errSpy = quiet();
+      let failing = true;
+      const { intake, alerts } = mk({
+        extract: async (it: Item) => {
+          if (failing) throw new Error('503');
+          return { itemId: it.item_id, receivedAtMs: NOW, publishedAtMs: NOW - 60_000, direction: 'up', bucket: 'minor', horizon: 'days', credibility: 0.5, novelty: 'new', alreadyPriced: 'no', confidence: 0.5, rationale: 'r' };
+        },
+      });
+      for (let i = 0; i < 4; i++) await intake.handleItem(item());
+      failing = false;
+      expect(await intake.handleItem(item())).toBe('assessed');
+      failing = true;
+      for (let i = 0; i < 4; i++) await intake.handleItem(item());
+      expect(alerts).toHaveLength(0);
+      errSpy.mockRestore();
+    });
+
+    it('a gated-out item resets the counter', async () => {
+      const errSpy = quiet();
+      let mode: 'err' | 'irrelevant' = 'err';
+      const { intake, alerts } = mk({ gate: async () => { if (mode === 'err') throw new Error('503'); return { relevant: false, reason: 'x' }; } });
+      for (let i = 0; i < 4; i++) await intake.handleItem(item());
+      mode = 'irrelevant';
+      expect(await intake.handleItem(item())).toBe('gated_out');
+      mode = 'err';
+      for (let i = 0; i < 4; i++) await intake.handleItem(item());
+      expect(alerts).toHaveLength(0);
+      errSpy.mockRestore();
+    });
+
+    it('spend-cap errors do not count toward the outage alert', async () => {
+      const errSpy = quiet();
+      const { intake, alerts } = mk({ gate: async () => { throw new SpendCapError('cap reached'); } });
+      for (let i = 0; i < 10; i++) await intake.handleItem(item());
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatch(/spend cap/);
+      errSpy.mockRestore();
+    });
+
+    it('re-arms on the next UTC day', async () => {
+      const errSpy = quiet();
+      let clock = NOW;
+      const { intake, alerts } = mk({ extract: fail, now: () => clock });
+      for (let i = 0; i < 5; i++) await intake.handleItem(fresh(clock));
+      expect(alerts).toHaveLength(1);
+      clock = NOW + 24 * H;
+      await intake.handleItem(fresh(clock));
+      expect(alerts).toHaveLength(2);
+      await intake.handleItem(fresh(clock));
+      expect(alerts).toHaveLength(2);
+      errSpy.mockRestore();
+    });
+
+    it('a failed outage alert is retried on the next error the same day', async () => {
+      const errSpy = quiet();
+      const sent: string[] = [];
+      let attempts = 0;
+      const alert = (m: string) => { attempts += 1; if (attempts === 1) throw new Error('slack down'); sent.push(m); };
+      const { intake } = mk({ extract: fail, alert });
+      for (let i = 0; i < 5; i++) await intake.handleItem(item());
+      expect(sent).toHaveLength(0);
+      await intake.handleItem(item());
+      expect(sent).toHaveLength(1);
+      await intake.handleItem(item());
+      expect(sent).toHaveLength(1);
+      errSpy.mockRestore();
+    });
+  });
 });

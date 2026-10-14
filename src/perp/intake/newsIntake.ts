@@ -13,7 +13,7 @@ export type IntakeResult =
 export interface IntakeDeps {
   db: Database.Database;
   now: () => number;
-  alert: (message: string) => void;
+  alert: (message: string) => void | Promise<void>;
   engine: { contextText(): string | null; onAssessment(a: ImpactAssessment): Promise<void> };
   gate: (item: Item) => Promise<{ relevant: boolean; reason: string }>;
   extract: (item: Item, contextText: string) => Promise<ImpactAssessment>;
@@ -22,6 +22,8 @@ export interface IntakeDeps {
 }
 
 const SEEN_LIMIT = 5000;
+const OUTAGE_ERROR_THRESHOLD = 5;
+const OUTAGE_MESSAGE_MAX = 200;
 const RESULTS: IntakeResult[] = [
   'assessed', 'gated_out', 'skipped_replay', 'skipped_amended', 'skipped_old', 'skipped_seen', 'skipped_no_context', 'parse_error', 'error',
 ];
@@ -30,6 +32,8 @@ export class NewsIntake {
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
   private capAlertDay: string | null = null;
+  private outageAlertDay: string | null = null;
+  private consecutiveErrors = 0;
   readonly counters = Object.fromEntries(RESULTS.map((r) => [r, 0])) as Record<IntakeResult, number>;
 
   constructor(private readonly d: IntakeDeps) {}
@@ -45,13 +49,33 @@ export class NewsIntake {
     if (this.seenOrder.length > SEEN_LIMIT) this.seen.delete(this.seenOrder.shift() as string);
   }
 
-  async handleEntry(entry: StreamEntry): Promise<IntakeResult> {
-    const parsed = parseItemFields(entry.fields);
-    if (!parsed.ok) {
-      appendJournal(this.d.db, { tsMs: this.d.now(), kind: 'intake_parse_error', payload: { id: entry.id, error: parsed.error } });
-      return this.count('parse_error');
+  /** Runs a side effect (journal write or alert); never throws or rejects. Returns whether it succeeded. */
+  private async safe(what: string, fn: () => void | Promise<void>): Promise<boolean> {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[perp-intake] ${what} failed:`, err instanceof Error ? err.message : String(err));
+      return false;
     }
-    return this.handleItem(parsed.item);
+  }
+
+  private journal(tsMs: number, kind: string, payload: unknown): Promise<boolean> {
+    return this.safe(`journal ${kind}`, () => appendJournal(this.d.db, { tsMs, kind, payload }));
+  }
+
+  async handleEntry(entry: StreamEntry): Promise<IntakeResult> {
+    try {
+      const parsed = parseItemFields(entry.fields);
+      if (!parsed.ok) {
+        await this.journal(this.d.now(), 'intake_parse_error', { id: entry.id, error: parsed.error });
+        return this.count('parse_error');
+      }
+      return await this.handleItem(parsed.item);
+    } catch (err) {
+      console.error('[perp-intake] entry failed:', err instanceof Error ? err.message : String(err));
+      return this.count('error');
+    }
   }
 
   async handleItem(item: Item): Promise<IntakeResult> {
@@ -67,24 +91,41 @@ export class NewsIntake {
       this.markSeen(item.item_id);
 
       const gate = await this.d.gate(item);
-      if (!gate.relevant) return this.count('gated_out');
+      if (!gate.relevant) {
+        this.consecutiveErrors = 0;
+        return this.count('gated_out');
+      }
       const assessment = await this.d.extract(item, context);
       await this.d.engine.onAssessment(assessment);
+      this.consecutiveErrors = 0;
       return this.count('assessed');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const day = new Date(now).toISOString().slice(0, 10);
       if (err instanceof SpendCapError) {
-        const day = new Date(now).toISOString().slice(0, 10);
         if (this.capAlertDay !== day) {
-          this.capAlertDay = day;
-          this.d.alert(
-            `[PERP] model daily spend cap reached; news is ignored until the next UTC day. ` +
-              `Any open position stays protected by its exchange-side stop. (${msg})`
+          const sent = await this.safe('spend-cap alert', () =>
+            this.d.alert(
+              `[PERP] model daily spend cap reached; news is ignored until the next UTC day. ` +
+                `Any open position stays protected by its exchange-side stop. (${msg})`
+            )
           );
+          if (sent) this.capAlertDay = day;
         }
       } else {
-        appendJournal(this.d.db, { tsMs: now, kind: 'intake_error', payload: { itemId: item.item_id, error: msg } });
+        await this.journal(now, 'intake_error', { itemId: item.item_id, error: msg });
         console.error('[perp-intake] item failed:', msg);
+        this.consecutiveErrors += 1;
+        if (this.consecutiveErrors >= OUTAGE_ERROR_THRESHOLD && this.outageAlertDay !== day) {
+          const sent = await this.safe('outage alert', () =>
+            this.d.alert(
+              `[PERP] news intake: ${OUTAGE_ERROR_THRESHOLD} consecutive model/engine errors ` +
+                `(latest: ${msg.slice(0, OUTAGE_MESSAGE_MAX)}); news-driven action is impaired; ` +
+                `any open position stays protected by its exchange-side stop`
+            )
+          );
+          if (sent) this.outageAlertDay = day;
+        }
       }
       return this.count('error');
     }
