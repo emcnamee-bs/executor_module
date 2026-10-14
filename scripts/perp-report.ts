@@ -29,6 +29,10 @@ const eq = db.prepare('SELECT MIN(equity) AS lo, MAX(equity) AS hi, COUNT(*) AS 
 const first = db.prepare('SELECT equity FROM equity WHERE ts_ms >= ? ORDER BY ts_ms ASC LIMIT 1').get(since) as { equity: number } | undefined;
 const last = db.prepare('SELECT equity FROM equity ORDER BY ts_ms DESC LIMIT 1').get() as { equity: number } | undefined;
 console.log(`equity: start ${first?.equity.toFixed(3) ?? 'n/a'} -> now ${last?.equity.toFixed(3) ?? 'n/a'}  (low ${eq.lo?.toFixed(3) ?? 'n/a'}, high ${eq.hi?.toFixed(3) ?? 'n/a'}, ${eq.n} samples)`);
+const topUps = (db.prepare("SELECT payload FROM journal WHERE kind = 'paper_funded' AND ts_ms >= ?").all(since) as Array<{ payload: string }>)
+  .map((r) => Number((JSON.parse(r.payload) as { usd?: unknown }).usd))
+  .filter(Number.isFinite);
+console.log(`paper top-ups: ${topUps.reduce((s, x) => s + x, 0).toFixed(3)} USD (${topUps.length}); P&L = equity change minus top-ups`);
 
 const exits = db.prepare('SELECT at_ms, rule, side, pnl_usd FROM exits WHERE at_ms >= ? ORDER BY at_ms').all(since) as Array<{ at_ms: number; rule: string; side: string; pnl_usd: number }>;
 console.log(`\nexits: ${exits.length}, total P&L ${exits.reduce((s, e) => s + e.pnl_usd, 0).toFixed(3)} USD`);

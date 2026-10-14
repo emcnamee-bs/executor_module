@@ -4,6 +4,7 @@ import { DEFAULT_PAPER_CONFIG, PaperBroker, type PaperState } from '../../src/pe
 import type { BrokerQuote } from '../../src/perp/broker/types.js';
 import { PerpEngine, type Collected } from '../../src/perp/engine/engine.js';
 import { clearHaltInDb } from '../../src/perp/ops/clearHalt.js';
+import { fundPaperInDb } from '../../src/perp/ops/paperFund.js';
 import {
   getState, listExits, listJournal, loadPosition, loadRiskState, openPerpDb, savePosition, setState,
 } from '../../src/perp/store/db.js';
@@ -255,6 +256,40 @@ describe('paper funding', () => {
     h.advance(MIN);
     await h.engine.tick();
     expect((await h.broker.balance()).equityUsd).toBeCloseTo(after, 8);
+  });
+});
+
+describe('paper collateral top-up (W1)', () => {
+  const lastDecisionReasons = (h: H): string =>
+    (listJournal(h.db, 'decision', 1)[0].payload as { action: { reasons: string[] } }).action.reasons.join(' | ');
+
+  it('a full-distance stop-out leaves the bot flat on the leverage guard; a top-up of the saved state lets it re-enter', async () => {
+    const h = harness();
+    await openLong(h);
+    h.setMark(13.2); // below the 388 bps trail from 13.755 (13.221): stopped out at the bid, a ~0.57 USD loss
+    await h.engine.tick();
+    expect(listExits(h.db, 0).map((e) => e.rule)).toEqual(['trailing_stop']);
+    const equityAfter = (await h.broker.balance()).equityUsd;
+    expect(13.755 / equityAfter).toBeGreaterThan(4 * DEFAULT_CONFIG.entryLeverageSlack);
+
+    h.advance(25 * H); // past the 24h stop-out cooldown
+    h.setMark(13.755);
+    await h.engine.tick();
+    await h.engine.onAssessment(assess(h));
+    expect(await h.broker.position()).toBeNull();
+    expect(lastDecisionReasons(h)).toMatch(/long: realized leverage .* exceeds governed/);
+
+    const out = fundPaperInDb(h.db, 1, h.now());
+    expect(out.cashAfter).toBeCloseTo(out.cashBefore + 1, 9);
+    const b2 = new PaperBroker(h.getQuote, DEFAULT_PAPER_CONFIG, h.now);
+    b2.importState(getState<PaperState>(h.db, 'paper')!);
+    const e2 = h.newEngine(b2);
+    await e2.start();
+    h.advance(MIN);
+    await e2.tick();
+    await e2.onAssessment(assess(h));
+    expect((await b2.position())?.side).toBe('long');
+    expect(loadPosition(h.db)?.side).toBe('long');
   });
 });
 
