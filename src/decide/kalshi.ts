@@ -13,6 +13,8 @@ export interface BandMarket {
   floorStrike: number | null;
   capStrike: number | null;
   strikeType: StrikeType;
+  /** Kalshi's `yes_sub_title` ("Hike 25bps", "Michael Cohen"); absent when Kalshi sends none. */
+  label?: string;
   status: string;
   /** null when Kalshi reports no resting order on this side (raw price exactly 0.0000). */
   yesAskCents: number | null;
@@ -47,6 +49,7 @@ interface KalshiMarket {
   floor_strike?: number;
   cap_strike?: number;
   strike_type?: StrikeType;
+  yes_sub_title?: string;
   status: string;
   yes_ask_dollars: string;
   yes_bid_dollars: string;
@@ -88,17 +91,21 @@ async function fetchEventBands(eventTicker: string): Promise<BandMarket[]> {
     throw new Error(`Kalshi markets fetch failed: ${marketsRes.status} ${marketsRes.statusText}`);
   }
   const marketsBody = (await marketsRes.json()) as KalshiMarketsResponse;
-  return marketsBody.markets.map((m) => ({
-    ticker: m.ticker,
-    floorStrike: m.floor_strike ?? null,
-    capStrike: m.cap_strike ?? null,
-    strikeType: m.strike_type ?? null,
-    status: m.status,
-    yesAskCents: priceCentsOrNull(m.yes_ask_dollars),
-    yesBidCents: priceCentsOrNull(m.yes_bid_dollars),
-    yesAskSizeContracts: sizeContracts(m.yes_ask_size_fp),
-    yesBidSizeContracts: sizeContracts(m.yes_bid_size_fp),
-  }));
+  return marketsBody.markets.map((m) => {
+    const label = typeof m.yes_sub_title === 'string' ? m.yes_sub_title.trim() : '';
+    return {
+      ticker: m.ticker,
+      ...(label !== '' ? { label } : {}),
+      floorStrike: m.floor_strike ?? null,
+      capStrike: m.cap_strike ?? null,
+      strikeType: m.strike_type ?? null,
+      status: m.status,
+      yesAskCents: priceCentsOrNull(m.yes_ask_dollars),
+      yesBidCents: priceCentsOrNull(m.yes_bid_dollars),
+      yesAskSizeContracts: sizeContracts(m.yes_ask_size_fp),
+      yesBidSizeContracts: sizeContracts(m.yes_bid_size_fp),
+    };
+  });
 }
 
 export async function fetchActiveLadder(seriesTicker: string, db?: Database.Database): Promise<ActiveLadder | null> {
