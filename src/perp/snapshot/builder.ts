@@ -27,13 +27,24 @@ export function computeReturns(nowMs: number, mark: number, history: History): {
   return { d1: at(1), d5: at(5) };
 }
 
-/** Weekly sigma from the hourly stdev of log returns, scaled by sqrt(120). Null with fewer than 24 hourly returns. */
+/** Age in ms; clamps clock skew (future-dated) to 0 but maps non-finite input to Infinity so a bad timestamp reads as stale. */
+function ageMs(nowMs: number, fetchedAtMs: number): number {
+  const age = nowMs - fetchedAtMs;
+  return Number.isFinite(age) ? Math.max(0, age) : Infinity;
+}
+
+/**
+ * Weekly sigma from the hourly stdev of log returns, scaled by sqrt(120). Only ADJACENT hourly buckets form a
+ * return (a gap breaks the pair), so sparse or gappy history cannot masquerade as hourly data.
+ * Null with fewer than 24 such returns.
+ */
 export function realizedWeeklySigma(history: History): number | null {
   const byHour = new Map<number, number>();
   for (const h of history) byHour.set(Math.floor(h.tsMs / HOUR_MS), h.mark); // last mark in each hour wins
   const hours = [...byHour.keys()].sort((a, b) => a - b);
   const rets: number[] = [];
   for (let i = 1; i < hours.length; i++) {
+    if (hours[i] - hours[i - 1] !== 1) continue;
     const a = byHour.get(hours[i - 1])!;
     const b = byHour.get(hours[i])!;
     if (a > 0 && b > 0) rets.push(Math.log(b / a));
@@ -63,8 +74,8 @@ export function buildSnapshot(i: {
     events: i.events,
     kalshiEvents: i.kalshiEvents,
     freshness: {
-      perpAgeMs: Math.max(0, i.nowMs - i.perpFetchedAtMs),
-      macroAgeMs: i.macroFetchedAtMs === null ? null : Math.max(0, i.nowMs - i.macroFetchedAtMs),
+      perpAgeMs: ageMs(i.nowMs, i.perpFetchedAtMs),
+      macroAgeMs: i.macroFetchedAtMs === null ? null : ageMs(i.nowMs, i.macroFetchedAtMs),
     },
   };
 }
