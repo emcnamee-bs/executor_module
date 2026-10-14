@@ -103,13 +103,14 @@ const GROUP_HINT: Record<OutcomeGroup, string> = {
   independent: 'This market is one of several separate yes/no questions about different outcomes.',
 };
 
-function describeMarket(m: BandMarket): string {
+/** `useLabel` is true only for multi positions, so every other structure's prompt stays unchanged. */
+function describeMarket(m: BandMarket, useLabel = false): string {
   switch (m.strikeType) {
     case 'greater': return `pays YES if the settlement quantity is above ${m.floorStrike}`;
     case 'greater_or_equal': return `pays YES if the settlement quantity is at or above ${m.floorStrike}`;
     case 'less': return `pays YES if the settlement quantity is below ${m.capStrike}`;
     case 'between': return `pays YES if the settlement quantity is between ${m.floorStrike} and ${m.capStrike}`;
-    default: return m.label ? `pays YES if "${m.label}"` : 'a single yes/no market';
+    default: return useLabel && m.label ? `pays YES if "${m.label}"` : 'a single yes/no market';
   }
 }
 
@@ -122,7 +123,7 @@ export async function reviewForExit(
   const fmt = (v: number | null) => (v === null ? 'none' : `${v}c`);
   const trajectory = ctx.trajectory.map((t) => `${t.minutesAgo} min ago: ${t.markCents === null ? 'unknown' : `${t.markCents}c`}`).join('; ');
   const lines: string[] = [
-    `Held position: ${p.side.toUpperCase()} on ${p.marketTicker} (${describeMarket(m)}); ${p.remaining} of ${p.contracts} contracts, bought at ${p.entryPriceCents}c (${p.side.toUpperCase()} cents).`,
+    `Held position: ${p.side.toUpperCase()} on ${p.marketTicker} (${describeMarket(m, ctx.outcomeGroup !== undefined)}); ${p.remaining} of ${p.contracts} contracts, bought at ${p.entryPriceCents}c (${p.side.toUpperCase()} cents).`,
     ...(ctx.outcomeGroup ? [GROUP_HINT[ctx.outcomeGroup]] : []),
     `Current YES quotes: bid ${fmt(m.yesBidCents)} / ask ${fmt(m.yesAskCents)}.`,
     `Recent held-side value (what we could sell the position for): ${trajectory}.`,

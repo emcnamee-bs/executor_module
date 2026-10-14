@@ -172,6 +172,44 @@ describe('exit review for multi positions', () => {
   });
 });
 
+describe('non-multi prompts are unchanged by the multi additions', () => {
+  it('a binary profile keeps "a single yes/no market" even when the market carries a label', () =>
+    withProfile(async (loaded, db) => {
+      const { client, calls } = fake(okResponse({ shift: -1, confidence: 0.5, reason: 'r' }));
+      const binary = { ...loaded, profile: { ...loaded.profile, marketStructure: 'binary' as const } };
+      const m = thr(0, 60, 1, { ticker: 'KXRET-27', strikeType: null, floorStrike: null, label: 'Distinctive Label Text' });
+      await reviewForExit(client, db, ctx(binary, { market: m, position: { marketTicker: 'KXRET-27', side: 'yes', contracts: 1, remaining: 1, entryPriceCents: 60 } }));
+      const user = calls[0].messages[0].content as string;
+      expect(user).toContain('a single yes/no market');
+      expect(user).not.toContain('Distinctive Label Text');
+    }));
+
+  it('a threshold-profile prompt contains none of the group-hint sentences', () =>
+    withProfile(async (loaded, db) => {
+      const { client, calls } = fake(okResponse({ shift: -1, confidence: 0.5, reason: 'r' }));
+      await reviewForExit(client, db, ctx(loaded));
+      const user = calls[0].messages[0].content as string;
+      expect(user).not.toContain('mutually exclusive');
+      expect(user).not.toContain('nested "before date X"');
+      expect(user).not.toContain('separate yes/no questions');
+    }));
+});
+
+describe('multi shift ceiling', () => {
+  it('validateExitReview accepts exactly 100 and rejects 101 using maxAbsShift', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exitmulti-'));
+    try {
+      writeProfile(dir, 'kxfeddecision', { profile: { seriesTicker: 'KXFEDDECISION', marketStructure: 'multi', outcomeGroup: 'exclusive', maxMagnitude: 25, magnitudeUnit: 'bps' } });
+      const loaded = loadProfile('kxfeddecision', dir);
+      const ok = { shift: 100, confidence: 0.5, reason: 'r' };
+      expect(validateExitReview(ok, maxAbsShift(loaded)).shift).toBe(100);
+      expect(() => validateExitReview({ ...ok, shift: 101 }, maxAbsShift(loaded))).toThrow();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('buildExitSystem', () => {
   it('states the model never decides to sell', () =>
     withProfile((loaded) => {
