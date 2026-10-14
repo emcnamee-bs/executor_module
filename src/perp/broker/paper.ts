@@ -102,6 +102,8 @@ export class PaperBroker implements Broker {
     if (this.pos !== null) throw new Error('paper: a position is already open');
     if (!Number.isInteger(p.contracts) || p.contracts < 1) throw new Error('paper: contracts must be a positive integer');
     const q = await this.quote();
+    // Re-check after the await: an overlapping open() may have won while the quote was in flight.
+    if (this.pos !== null) throw new Error('paper: a position is already open');
     const price = p.side === 'long' ? q.ask : q.bid;
     const need = this.cfg.initialMarginMultiplier * this.cfg.maintenanceMargin[p.side] * price * p.contracts;
     if (this.cash < need) {
@@ -126,7 +128,10 @@ export class PaperBroker implements Broker {
   async close(): Promise<CloseResult> {
     if (this.pos === null) throw new Error('paper: no open position');
     const q = await this.quote();
-    return this.exitAt(this.pos.side === 'long' ? q.bid : q.ask);
+    // Re-read after the await: a concurrent poll() may have stopped the position out meanwhile.
+    const pos = this.pos;
+    if (pos === null) throw new Error('paper: no open position');
+    return this.exitAt(pos.side === 'long' ? q.bid : q.ask);
   }
 
   async setTrailingStop(stopBps: number): Promise<void> {

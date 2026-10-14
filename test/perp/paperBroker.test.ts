@@ -120,3 +120,54 @@ describe('PaperBroker funding', () => {
     expect(harness().broker.applyFunding(0.001, 13.76)).toBe(0);
   });
 });
+
+describe('PaperBroker concurrency (quote in flight)', () => {
+  /** getQuote that, while `hold` is true, returns a promise the test resolves by hand. */
+  function gated() {
+    const live: BrokerQuote = { bid: 13.75, ask: 13.76, mark: 13.755, tsMs: 1000 };
+    const pending: Array<(q: BrokerQuote) => void> = [];
+    const state = { hold: false };
+    const getQuote = (): Promise<BrokerQuote> =>
+      state.hold ? new Promise<BrokerQuote>((res) => pending.push(res)) : Promise.resolve(live);
+    const broker = new PaperBroker(getQuote, { ...DEFAULT_PAPER_CONFIG }, () => 1000);
+    return { broker, live, pending, state };
+  }
+
+  it('two overlapping open() calls: exactly one succeeds, the fee is charged once', async () => {
+    const { broker, live, pending, state } = gated();
+    state.hold = true;
+    const a = broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    const b = broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    expect(pending).toHaveLength(2); // both passed the guard and are awaiting their quote
+    pending[0](live);
+    pending[1](live);
+    const [ra, rb] = await Promise.allSettled([a, b]);
+    expect(ra.status).toBe('fulfilled');
+    expect(rb.status).toBe('rejected');
+    if (rb.status === 'rejected') expect(String(rb.reason)).toMatch(/already open/);
+    state.hold = false;
+    const bal = await broker.balance();
+    expect(bal.equityUsd).toBeCloseTo(3.5 - 0.000072 * 13.76 + (13.755 - 13.76), 8);
+    expect((await broker.position())?.feesUsd).toBeCloseTo(0.000072 * 13.76, 8);
+  });
+
+  it('close() whose quote is in flight while poll() stops the position out rejects cleanly', async () => {
+    const { broker, live, pending, state } = gated();
+    await broker.open({ side: 'long', contracts: 1, stopBps: 100 });
+    state.hold = true;
+    const closing = broker.close(); // awaiting quote #0
+    const polling = broker.poll(); // awaiting quote #1
+    expect(pending).toHaveLength(2);
+    pending[1]({ bid: 13.495, ask: 13.505, mark: 13.5, tsMs: 2000 }); // 1% below 13.755 -> stop fires
+    const events = await polling;
+    expect(events[0]?.kind).toBe('stopped_out');
+    pending[0](live);
+    const r = await Promise.allSettled([closing]);
+    expect(r[0].status).toBe('rejected');
+    if (r[0].status === 'rejected') {
+      expect(r[0].reason).toBeInstanceOf(Error);
+      expect(String(r[0].reason)).toMatch(/no open position/);
+      expect(r[0].reason).not.toBeInstanceOf(TypeError);
+    }
+  });
+});
