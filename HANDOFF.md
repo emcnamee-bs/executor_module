@@ -960,6 +960,10 @@ event's ladder and its 5/15/60-minute held-side trajectory) and whether an entry
 code enforces; either side can veto:
 
 - **A sell needs both:** the model says `sell` AND the existing 2% of cost / exit-cost rule (`evaluateExit`, via `settleReview`) passes.
+  On `multi` trades a `sell` recommendation only executes if the model ALSO proposed a move on that position's market (without a move the
+  rule sees no expected loss, so the sell cannot pass); the prompt tells the model so. Separately, the trade-refresh job keeps an
+  existing `multi` profile's `outcomeGroup` on a rebuild (`buildTradeProfile` does not re-ask the model, and logs
+  `[build-trade] kept outcomeGroup ...` if the model would now answer differently), so historical positions keep their group rules.
 - **A buy needs both:** the model says `buy` AND the existing sizing gates (price, spread, depth, edge, Kelly, rung stake, paper caps)
   pass. On a `multi` trade a `buy` also needs at least one move on the active event, and the unchanged sell-trigger filter still applies.
 - **Entry blockers stop only the entry.** Kill switch / `EXECUTOR_TRADING_HALTED`, an open circuit-breaker trip, the `rumor` rung and

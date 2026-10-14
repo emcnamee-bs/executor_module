@@ -106,13 +106,31 @@ describe('validateUnified (multi trade)', () => {
     expect(() => validateUnified(answer([mv('F-CUT', 101)]), ctx())).toThrow(/shift/);
     expect(() => validateUnified(answer([mv('F-CUT', 3), mv('F-CUT', -3)]), ctx())).toThrow(/twice/);
   });
-  it('enforces the move limit on the whole answer, not per event (3 active + 2 elsewhere is rejected)', () => {
-    const a = [mk('A-1', 'One', 29, 31), mk('A-2', 'Two', 29, 31), mk('A-3', 'Three', 29, 31)];
-    const o = [mk('O-1', 'Other 1', 39, 41), mk('O-2', 'Other 2', 39, 41)];
-    const c = ctx({ markets: [...a, ...o], activeTickers: a.map((m) => m.ticker), positions: [] });
-    const five = [mv('A-1', 1), mv('A-2', -1), mv('A-3', 0), mv('O-1', 5), mv('O-2', 5)];
-    expect(() => validateUnified(answer(five, { positions: [] }), c)).toThrow(/at most 4 moves are allowed, got 5/);
-    expect(validateUnified(answer(five.slice(0, 4), { positions: [] }), c).moves).toHaveLength(3);
+  describe('move caps', () => {
+    const a = ['A-1', 'A-2', 'A-3', 'A-4', 'A-5'].map((t) => mk(t, t, 29, 31));
+    const o = [mk('O-1', 'Other 1', 39, 41), mk('O-2', 'Other 2', 39, 41), mk('O-3', 'Other 3', 39, 41)];
+    const held = (id: number, ticker: string) => view(id, { marketTicker: ticker, label: ticker });
+    const holds = (ids: number[]) => ids.map((position_id) => ({ position_id, action: 'hold', reason: 'unaffected' }));
+    const c = (nPositions: number) => ctx({
+      markets: [...a, ...o], activeTickers: a.map((m) => m.ticker),
+      positions: o.slice(0, nPositions).map((m, i) => held(10 + i, m.ticker)),
+    });
+    const net0 = [mv('A-1', 1), mv('A-2', -1), mv('A-3', 1), mv('A-4', -1)];
+
+    it('accepts 4 active moves plus 2 other-event moves when 2 other-event positions are held', () => {
+      const d = validateUnified(answer([...net0, mv('O-1', 5), mv('O-2', -5)], { positions: holds([10, 11]) }), c(2));
+      expect(d.moves).toHaveLength(6);
+    });
+    it('rejects 5 active moves (the active cap stays at 4) even when the sanity bound would allow them', () => {
+      const five = [...net0, mv('A-5', 0)];
+      expect(() => validateUnified(answer(five, { positions: holds([10, 11]) }), c(2))).toThrow(/at most 4 moves are allowed, got 5/);
+    });
+    it('rejects a total beyond the sanity bound (4 + positions held)', () => {
+      expect(() => validateUnified(answer([...net0, mv('O-1', 5), mv('O-2', 5), mv('O-3', 5)], { positions: holds([10, 11]) }), c(2))).toThrow(/at most 6 moves are allowed, got 7/);
+    });
+    it('with no positions the whole answer is capped at 4', () => {
+      expect(() => validateUnified(answer([mv('A-1', 1), mv('A-2', -1), mv('O-1', 5), mv('O-2', 5), mv('O-3', 5)], { positions: [] }), c(0))).toThrow(/at most 4 moves are allowed, got 5/);
+    });
   });
   it('still validates moves when entry is not available, and forces entry to none', () => {
     const d = validateUnified(answer([mv('F-CUT', 8), mv('F-HOLD', -8)]), ctx({ entryAllowed: false }));
@@ -192,8 +210,28 @@ describe('positionAwareDecide', () => {
     expect(user.slice(first, second)).toMatch(/F-CUT \|/);
     expect(user.slice(first, second)).not.toMatch(/OLD-X/);
     expect(user.slice(second)).toMatch(/OLD-X \| "Old market"/);
+    expect(user).toContain('Markets of OTHER events where we hold positions (each judged on its own; the set rule above does not apply to them):');
     expect(calls[0].system).toMatch(/applies to the markets of the event this news is about \(the first list\)/);
     expect(calls[0].system).toMatch(/second list.*independent/s);
+  });
+
+  it('marks a one-sided market on a multi trade as one that cannot be moved', async () => {
+    const m = (ticker: string, bid: number | null, ask: number | null): BandMarket => ({
+      ticker, label: ticker, floorStrike: null, capStrike: null, strikeType: 'custom', status: 'active', yesBidCents: bid, yesAskCents: ask, yesAskSizeContracts: 50, yesBidSizeContracts: 50,
+    });
+    const ctx = base({ loaded: fed, markets: [m('F-ONE', null, 40), m('F-TWO', 29, 31)], activeTickers: ['F-ONE', 'F-TWO'], positions: [] });
+    await positionAwareDecide(clientReturning({ moves: [], reasoning: 'nothing', positions: [], entry: { action: 'none', reason: 'no edge' } }), db, ctx);
+    const user: string = calls[0].messages[0].content;
+    expect(user).toMatch(/F-ONE \| "F-ONE" \| no two-sided quote \(cannot be moved\)/);
+    expect(user).toMatch(/F-TWO \| "F-TWO" \| YES bid 29c \/ ask 31c/);
+  });
+
+  it('the multi system prompt says a sell needs a move on its market; a non-multi one does not', async () => {
+    const answer = { moves: [], reasoning: 'nothing', positions: [], entry: { action: 'none', reason: 'no edge' } };
+    await positionAwareDecide(clientReturning(answer), db, base({ loaded: fed, markets: [], activeTickers: [], positions: [] }));
+    expect(calls[0].system).toMatch(/To sell a held position you must ALSO include a move on its market/);
+    await positionAwareDecide(clientReturning(good()), db, base());
+    expect(calls[1].system).not.toMatch(/ALSO include a move/);
   });
 
   it('prints only the first block when no other-event markets exist, and says so when there is no active event', async () => {
@@ -205,6 +243,9 @@ describe('positionAwareDecide', () => {
     const user: string = calls[1].messages[0].content;
     expect(user).toMatch(/none \(no active event is available for entry\)/);
     expect(user).toMatch(/Markets of OTHER events where we hold positions/);
+    // A threshold trade has no set rule, so the heading must not mention one.
+    expect(user).toContain('Markets of OTHER events where we hold positions (each judged on its own):');
+    expect(user).not.toMatch(/set rule/);
   });
 
   it('an invalid answer throws and is logged as invalid', async () => {

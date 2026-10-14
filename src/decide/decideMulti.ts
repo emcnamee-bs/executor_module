@@ -81,9 +81,9 @@ const tradable = (m: BandMarket): boolean => m.status === 'active' && yesMid(m) 
  * the monotone-repaired one (a move whose repaired shift is zero or would reverse the model's direction
  * is dropped, never flipped). Never throws: an invalid answer is `{ ok: false, reason }`.
  */
-export function checkMultiMoves(rawMoves: unknown, markets: BandMarket[], group: OutcomeGroup): MultiCheck {
+export function checkMultiMoves(rawMoves: unknown, markets: BandMarket[], group: OutcomeGroup, maxMoves: number = MULTI_MAX_MOVES): MultiCheck {
   if (!Array.isArray(rawMoves)) return { ok: false, reason: 'moves is not a list' };
-  if (rawMoves.length > MULTI_MAX_MOVES) return { ok: false, reason: `at most ${MULTI_MAX_MOVES} moves are allowed, got ${rawMoves.length}` };
+  if (rawMoves.length > maxMoves) return { ok: false, reason: `at most ${maxMoves} moves are allowed, got ${rawMoves.length}` };
   const open = new Map(markets.filter(tradable).map((m) => [m.ticker, m]));
   const seen = new Set<string>();
   const moves: MultiMove[] = [];

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -95,5 +95,52 @@ describe('buildTradeProfile writes multi profiles', () => {
     await buildTradeProfile(opts(), { client: fakeClientFor({}), fetchImpl: fakeFetchFor(markets) });
     const written = JSON.parse(fs.readFileSync(path.join(root, 'trades', 'kxwho', 'profile.json'), 'utf-8'));
     expect(written).toMatchObject({ marketStructure: 'multi', outcomeGroup: 'ladder' });
+  });
+
+  describe('a rebuild keeps an existing multi profile outcomeGroup', () => {
+    const three = () => [market('KXWHO-26-A', 'Alice'), market('KXWHO-26-B', 'Bob'), market('KXWHO-26-C', 'Carol')];
+    const profilePath = () => path.join(root, 'trades', 'kxwho', 'profile.json');
+    const written = () => JSON.parse(fs.readFileSync(profilePath(), 'utf-8'));
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => { warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+    afterEach(() => warn.mockRestore());
+    const warned = (): string[] => warn.mock.calls.map((c: unknown[]) => String(c[0]));
+
+    it('existing multi/exclusive + the model now answers independent => keeps exclusive and warns', async () => {
+      await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'exclusive' }), fetchImpl: fakeFetchFor(three()) });
+      warn.mockClear();
+      const { profile } = await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'independent' }), fetchImpl: fakeFetchFor(three()) });
+      expect(profile).toMatchObject({ marketStructure: 'multi', outcomeGroup: 'exclusive' });
+      expect(written()).toMatchObject({ outcomeGroup: 'exclusive' });
+      expect(warned()).toContain('[build-trade] kept outcomeGroup "exclusive" (the model now says "independent")');
+    });
+
+    it('an agreeing model answer keeps the group without a warning', async () => {
+      await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'exclusive' }), fetchImpl: fakeFetchFor(three()) });
+      warn.mockClear();
+      await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'exclusive' }), fetchImpl: fakeFetchFor(three()) });
+      expect(written()).toMatchObject({ outcomeGroup: 'exclusive' });
+      expect(warned().filter((m) => m.includes('kept outcomeGroup'))).toEqual([]);
+    });
+
+    it('no existing profile => the model answer is used', async () => {
+      const { profile } = await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'independent' }), fetchImpl: fakeFetchFor(three()) });
+      expect(profile).toMatchObject({ outcomeGroup: 'independent' });
+      expect(warned().filter((m) => m.includes('kept outcomeGroup'))).toEqual([]);
+    });
+
+    it('existing capture profile => the model answer is used', async () => {
+      await buildTradeProfile(opts(), { client: fakeClientFor({}), fetchImpl: fakeFetchFor([market('KXWHO-26-A', 'Alice')]) });
+      expect(written().marketStructure).toBe('capture');
+      const { profile } = await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'independent' }), fetchImpl: fakeFetchFor(three()) });
+      expect(profile).toMatchObject({ marketStructure: 'multi', outcomeGroup: 'independent' });
+    });
+
+    it('existing multi profile.json that cannot be parsed => the model answer is used', async () => {
+      await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'exclusive' }), fetchImpl: fakeFetchFor(three()) });
+      fs.writeFileSync(profilePath(), '{ not json');
+      const { profile } = await buildTradeProfile(opts(), { client: fakeClientFor({ outcomeGroup: 'independent' }), fetchImpl: fakeFetchFor(three()) });
+      expect(profile).toMatchObject({ outcomeGroup: 'independent' });
+    });
   });
 });

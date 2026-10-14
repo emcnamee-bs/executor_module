@@ -344,6 +344,19 @@ export async function buildTradeProfile(
     checkOlds();
   }
 
+  // A rebuild (the trade-refresh timer) of an existing multi profile keeps its outcomeGroup: re-asking the model
+  // could flip it (e.g. exclusive -> independent), changing maxLegs and the sum rule for positions already held.
+  // Read before the directory swap; a missing or unreadable file means "no existing group".
+  let existingGroup: OutcomeGroup | undefined;
+  try {
+    const existing = JSON.parse(fs.readFileSync(path.join(tradesRoot, name, 'profile.json'), 'utf-8'));
+    if (existing?.marketStructure === 'multi' && (OUTCOME_GROUPS as readonly string[]).includes(existing.outcomeGroup)) {
+      existingGroup = existing.outcomeGroup as OutcomeGroup;
+    }
+  } catch {
+    existingGroup = undefined;
+  }
+
   const spec = await fetchSeriesSpec(opts.seriesTicker, deps.fetchImpl, now);
   const structure = deriveStructure(spec.strikeTypes, spec.marketCount);
 
@@ -388,6 +401,12 @@ export async function buildTradeProfile(
           ...(structure === 'multi'
             ? (() => {
                 const resolved = resolveOutcomeGroup(parsed.outcomeGroup, spec.sampleSubtitles);
+                if (existingGroup !== undefined) {
+                  if (resolved.group !== existingGroup) {
+                    console.warn(`[build-trade] kept outcomeGroup "${existingGroup}" (the model now says "${resolved.group}")`);
+                  }
+                  return { outcomeGroup: existingGroup };
+                }
                 if (resolved.source === 'fallback') {
                   console.warn(`[build-trade] the model gave no valid outcomeGroup; using the fallback "${resolved.group}"`);
                 }

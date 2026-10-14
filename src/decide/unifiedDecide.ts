@@ -147,15 +147,17 @@ export function validateUnified(
     if (group === undefined) throw new Error('unified decision: multi profile has no outcomeGroup');
     if (!text(p.reasoning)) throw new Error('unified decision: reasoning is missing or empty');
     if (!Array.isArray(p.moves)) throw new Error('unified decision: moves is not a list');
-    // Checked once on the whole answer: checkMultiMoves enforces it per call, so the split below could double it.
-    if (p.moves.length > MULTI_MAX_MOVES) throw new Error(`unified decision: at most ${MULTI_MAX_MOVES} moves are allowed, got ${p.moves.length}`);
+    // Hard sanity bound on the whole answer; the per-event caps below are the real limits.
+    const sanityBound = MULTI_MAX_MOVES + ctx.positions.length;
+    if (p.moves.length > sanityBound) throw new Error(`unified decision: at most ${sanityBound} moves are allowed, got ${p.moves.length}`);
     const active = new Set(ctx.activeTickers);
     const onActive = p.moves.filter((m) => active.has(String(obj(m).market)));
     const elsewhere = p.moves.filter((m) => !active.has(String(obj(m).market)));
     // The group rule governs the active event's markets; a move on a held market of another event is checked as independent.
     const a = checkMultiMoves(onActive, ctx.markets.filter((m) => active.has(m.ticker)), group);
     if (!a.ok) throw new Error(`unified decision: moves: ${a.reason}`);
-    const o = checkMultiMoves(elsewhere, ctx.markets.filter((m) => !active.has(m.ticker)), 'independent');
+    // Held markets of other events may each need a move (a sell on one needs it), so their cap grows with the positions held.
+    const o = checkMultiMoves(elsewhere, ctx.markets.filter((m) => !active.has(m.ticker)), 'independent', Math.max(MULTI_MAX_MOVES, ctx.positions.length));
     if (!o.ok) throw new Error(`unified decision: moves: ${o.reason}`);
     return { assessment: null, moves: [...a.moves, ...o.moves], reasoning: p.reasoning, positions, entry };
   }
@@ -184,7 +186,7 @@ export function buildUnifiedSystem(loaded: LoadedProfile): string {
 
 You are the single analyst for one trade. One news item has arrived. You are shown the market prices, EVERY position we already hold on this trade (there may be none), their recent price trajectory, and whether a new entry is available. Do three things:
 ${assess}
-2. For EACH held position (by position_id) recommend "hold" or "sell", with a one-sentence reason. Recommend sell only if this news makes holding clearly worse than the cost of getting out; use the trajectory: if the held side has already fallen sharply, much of the news is probably priced in, so hold. A low-credibility or vague item deserves low confidence, not automatically "hold".
+2. For EACH held position (by position_id) recommend "hold" or "sell", with a one-sentence reason. Recommend sell only if this news makes holding clearly worse than the cost of getting out; use the trajectory: if the held side has already fallen sharply, much of the news is probably priced in, so hold. A low-credibility or vague item deserves low confidence, not automatically "hold".${multi ? ' To sell a held position you must ALSO include a move on its market: a sell recommendation on a market with no move cannot execute, because the rule sees no expected loss.' : ''}
 3. ENTRY: "buy" only if the news makes some market clearly mispriced AND buying it is consistent with what we already hold (do not recommend buying the same exposure we are selling or the opposite of what we hold unless the news truly warrants both). Otherwise "none". If entry is not available, answer "none".
 
 Code, not you, applies your numbers: a sell happens only when you say sell AND the expected loss beats 2% of the position's cost and the cost of exiting; a buy happens only when you say buy AND the price, spread and edge gates pass. So state your honest beliefs; do not try to game either check. You are told the story's evidentiary rung for context only (rumor/reported/corroborated/confirmed); do not restate or alter it.
@@ -203,25 +205,30 @@ function describePosition(v: UnifiedPositionView): string {
   );
 }
 
-function marketRows(markets: BandMarket[]): string {
+/** On multi trades a market without a two-sided quote cannot be moved (checkMultiMoves rejects it), so the model is told so, as decideMulti's table does. */
+function marketRows(markets: BandMarket[], multi: boolean): string {
   return markets
     .filter((m) => m.status === 'active')
     .slice(0, MAX_TABLE_ROWS)
-    .map((m) => `${m.ticker} | ${m.label ? `"${m.label}"` : describeMarket(m)} | YES bid ${fmtCents(m.yesBidCents)} / ask ${fmtCents(m.yesAskCents)}`)
+    .map((m) => {
+      const oneSided = multi && (m.yesBidCents === null || m.yesAskCents === null);
+      const quote = oneSided ? 'no two-sided quote (cannot be moved)' : `YES bid ${fmtCents(m.yesBidCents)} / ask ${fmtCents(m.yesAskCents)}`;
+      return `${m.ticker} | ${m.label ? `"${m.label}"` : describeMarket(m)} | ${quote}`;
+    })
     .join('\n');
 }
 
 export async function positionAwareDecide(client: Anthropic, db: Database.Database, ctx: UnifiedContext): Promise<UnifiedDecision> {
   const multi = ctx.loaded.profile.marketStructure === 'multi';
   const activeSet = new Set(ctx.activeTickers);
-  const activeRows = marketRows(ctx.markets.filter((m) => activeSet.has(m.ticker)));
-  const otherRows = marketRows(ctx.markets.filter((m) => !activeSet.has(m.ticker)));
+  const activeRows = marketRows(ctx.markets.filter((m) => activeSet.has(m.ticker)), multi);
+  const otherRows = marketRows(ctx.markets.filter((m) => !activeSet.has(m.ticker)), multi);
   const lines: string[] = [
     `Evidentiary rung: ${ctx.rung}${ctx.lowTierRelaxed === true ? ' (low-tier relaxed, paper test)' : ''}`,
     `Source trust tier: ${ctx.sourceTrustTier} (1 = most trusted, 5 = least). Published: ${ctx.publishedAt ?? 'unknown'}.`,
     `Markets of the event this news is about (ticker | what it pays | quote):\n${activeRows || 'none (no active event is available for entry)'}`,
     ...(otherRows
-      ? [`Markets of OTHER events where we hold positions (each judged on its own; the set rule above does not apply to them):\n${otherRows}`]
+      ? [`Markets of OTHER events where we hold positions (each judged on its own${multi ? '; the set rule above does not apply to them' : ''}):\n${otherRows}`]
       : []),
     ctx.positions.length === 0
       ? 'Positions we hold on this trade: none'
