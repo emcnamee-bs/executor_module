@@ -128,24 +128,29 @@ export async function main(): Promise<void> {
   const intakeStartedAtMs = Date.now();
   let silence = { alerted: false };
   const heartbeat = setInterval(() => {
-    const now = Date.now();
-    appendJournal(db, { tsMs: now, kind: 'heartbeat', payload: { status: engine.status(), intake: intake.counters } });
-    const quiet = checkSilence(silence, now, intake.lastEntryAtMs, intakeStartedAtMs);
-    silence = quiet.state;
-    if (quiet.alert) {
-      void alert(
-        `[PERP] no IIP items for ${Math.round(quiet.silentForMs / 60_000)} minutes: news-driven action is impaired; open positions stay protected by the exchange-side stop`
-      );
-    }
-    const day = new Date(now).toISOString().slice(0, 10);
-    if (lastCoverageAlertDay !== day) {
-      lastCoverageAlertDay = day;
-      try {
-        const days = calendarCoverageDays(calendarFile, now);
-        if (days < CALENDAR_MIN_COVERAGE_DAYS) void alert(`[PERP] the economic calendar file only covers the next ${days.toFixed(1)} days; add upcoming FOMC/CPI/jobs dates to ${calendarFile}.`);
-      } catch (err) {
-        void alert(`[PERP] the economic calendar file is unreadable: ${err instanceof Error ? err.message : String(err)}`);
+    // Never let a heartbeat failure (e.g. a SQLite error) escape: an exception in a timer callback kills the process.
+    try {
+      const now = Date.now();
+      const quiet = checkSilence(silence, now, intake.lastEntryAtMs, intakeStartedAtMs);
+      silence = quiet.state;
+      if (quiet.alert) {
+        void alert(
+          `[PERP] no IIP items for ${Math.round(quiet.silentForMs / 60_000)} minutes: news-driven action is impaired; open positions stay protected by the exchange-side stop`
+        );
       }
+      const day = new Date(now).toISOString().slice(0, 10);
+      if (lastCoverageAlertDay !== day) {
+        lastCoverageAlertDay = day;
+        try {
+          const days = calendarCoverageDays(calendarFile, now);
+          if (days < CALENDAR_MIN_COVERAGE_DAYS) void alert(`[PERP] the economic calendar file only covers the next ${days.toFixed(1)} days; add upcoming FOMC/CPI/jobs dates to ${calendarFile}.`);
+        } catch (err) {
+          void alert(`[PERP] the economic calendar file is unreadable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      appendJournal(db, { tsMs: now, kind: 'heartbeat', payload: { status: engine.status(), intake: intake.counters } });
+    } catch (err) {
+      console.error('[perp] heartbeat failed:', err instanceof Error ? err.message : String(err));
     }
   }, HEARTBEAT_MS);
 
