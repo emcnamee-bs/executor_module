@@ -136,12 +136,20 @@ describe('flat: entries', () => {
     expect(out.action.kind === 'hold' && out.action.reasons.join(' ')).toMatch(/volatility/);
   });
   it('refuses entries when governed leverage is below the minimum', () => {
-    expect(decide(input({ governors: computeGovernors(cfg, 80, null) })).action.kind).toBe('hold');
+    // realizedLeverage 1 is within the realized-leverage guard, so only the minimum-leverage rule can hold this.
+    const out = decide(input({ governors: computeGovernors(cfg, 80, null), realizedLeverage: 1 }));
+    expect(out.action.kind).toBe('hold');
+    expect(out.action.kind === 'hold' && out.action.reasons.join(' ')).toMatch(/below minimum/);
   });
   it('refuses an entry whose realized leverage exceeds 1.05 x governed leverage (review focus 5)', () => {
     expect(decide(input({ realizedLeverage: 4.19 })).action.kind).toBe('open'); // limit is 4 x 1.05 = 4.2
     expect(decide(input({ realizedLeverage: 4.3 })).action.kind).toBe('hold');
     expect(decide(input({ realizedLeverage: null })).action.kind).toBe('hold');
+  });
+  it('fails closed on NaN / non-positive realized leverage, pressure, or move-since-publish', () => {
+    for (const lev of [NaN, -1, 0, Infinity]) expect(decide(input({ realizedLeverage: lev })).action.kind).toBe('hold');
+    expect(decide(input({ pressureNow: NaN })).action.kind).toBe('hold');
+    expect(decide(input({ newItems: [item({ movedSincePublish: NaN })] })).action.kind).toBe('hold');
   });
   it('sizes the stop from REALIZED leverage', () => {
     const out = decide(input({ realizedLeverage: 2.75 }));
@@ -204,10 +212,37 @@ describe('long: exits', () => {
     expect(out.action.stopFrac).toBeCloseTo(0.01488, 4); // 1.5 * sigmaDay
     expect(out.action.holdMs).toBe(120 * MIN);
   });
+  it('does not tighten for an adverse major item that is not credible', () => {
+    const weak = item({ direction: 'down', bucket: 'major', confidence: 0.8, credibility: 0.5 });
+    expect(decide(input({ ...noNews, newItems: [weak] })).action.kind).toBe('hold');
+    const strong = item({ direction: 'down', bucket: 'major', confidence: 0.8, credibility: 0.9 });
+    expect(decide(input({ ...noNews, newItems: [strong] })).action.kind).toBe('set_stop');
+  });
+  it('bad data in position: NaN pressure or liqDistance never suppresses the shock and margin rules', () => {
+    const shock = item({ direction: 'down', bucket: 'shock', confidence: 0.8, credibility: 0.9 });
+    const bad = { ...noNews, pressureNow: NaN, pressure12hAgo: NaN };
+    expect(decide(input({ ...bad, newItems: [shock] })).action).toMatchObject({ kind: 'close', rule: 'shock' });
+    expect(decide(input({ ...bad, liqDistance: 0.07 })).action).toMatchObject({ kind: 'close', rule: 'margin_guard' });
+    expect(decide(input({ ...bad, liqDistance: NaN })).action.kind).toBe('hold');
+  });
+  it('never re-syncs (widens) the stop from fallback volatility', () => {
+    const noVol = computeGovernors(cfg, null, null);
+    const out = decide(input({ ...noNews, governors: noVol, position: longPos({ stopBps: 500 }) }));
+    expect(out.action.kind).toBe('hold');
+    expect(out.action.kind === 'hold' && out.action.reasons.join(' ')).toMatch(/no volatility estimate/);
+  });
+  it('holds on stale data even when an adverse shock is present', () => {
+    const shock = item({ direction: 'down', bucket: 'shock', confidence: 0.8, credibility: 0.9 });
+    const out = decide(input({ ...noNews, newItems: [shock], snapshot: { ...snap(), tsMs: NOW - 10 * MIN } }));
+    expect(out.action.kind).toBe('hold');
+    expect(out.action.kind === 'hold' && out.action.reasons.join(' ')).toMatch(/stale/);
+  });
   it('tightens ahead of a high-impact release and does not re-tighten once tight', () => {
     const events: ScheduledEvent[] = [{ tsMs: NOW + 30 * MIN, name: 'FOMC', impact: 'high' }];
     const out = decide(input({ ...noNews, snapshot: snap({}, events) }));
     expect(out.action.kind).toBe('set_stop');
+    // The tightening must outlast the release: (30 min to the event) + 120 min hold.
+    expect(out.action.kind === 'set_stop' && out.action.holdMs).toBe((30 + 120) * MIN);
     // 1.5 x sigmaDay is ~148.8 bps; a stop already at 148 bps is as tight as the target, so nothing to do.
     const tight = decide(input({ ...noNews, snapshot: snap({}, events), position: longPos({ stopBps: 148 }) }));
     expect(tight.action.kind).toBe('hold');
