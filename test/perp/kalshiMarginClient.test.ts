@@ -88,4 +88,42 @@ describe('KalshiMarginClient', () => {
     expect(err.body).toContain('slow down');
     expect(err.message).not.toContain('SECRET-KEY-ID');
   });
+
+  const FIXED_KEY_ERROR = 'Kalshi private key could not be read or parsed (check the key file path and format)';
+
+  it('fails at construction with a fixed message when the key file does not exist (no path, no key id)', () => {
+    const missing = path.join(dir, 'no-such-dir', 'missing-key.pem');
+    let err: unknown;
+    try {
+      new KalshiMarginClient({ env: 'prod', apiKeyId: 'SECRET-KEY-ID', privateKeyPath: missing });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const e = err as Error;
+    expect(e.message).toBe(FIXED_KEY_ERROR);
+    expect(String(e)).not.toContain(missing);
+    expect(String(e)).not.toContain('missing-key.pem');
+    expect(String(e)).not.toContain('SECRET-KEY-ID');
+    expect((e as { cause?: unknown }).cause).toBeUndefined();
+    expect((e as { path?: unknown }).path).toBeUndefined();
+  });
+
+  it('fails at construction with the same fixed message when the key file is not a PEM', () => {
+    const garbage = path.join(dir, 'garbage-key.pem');
+    writeFileSync(garbage, 'this is not a pem file');
+    let err: unknown;
+    try {
+      new KalshiMarginClient({ env: 'prod', apiKeyId: 'SECRET-KEY-ID', privateKeyPath: garbage });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const e = err as Error;
+    expect(e.message).toBe(FIXED_KEY_ERROR);
+    expect(String(e)).not.toContain(garbage);
+    expect(String(e)).not.toContain('garbage-key.pem');
+    expect(String(e)).not.toContain('SECRET-KEY-ID');
+    expect((e as { cause?: unknown }).cause).toBeUndefined();
+  });
 });

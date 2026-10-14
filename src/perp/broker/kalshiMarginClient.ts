@@ -33,7 +33,7 @@ export type Query = Record<string, string | number | undefined>;
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
 export class KalshiMarginClient {
-  private key: KeyObject | null = null;
+  private readonly key: KeyObject;
   private lastAt = 0;
   private chain: Promise<void> = Promise.resolve();
   private readonly minIntervalMs: number;
@@ -44,11 +44,12 @@ export class KalshiMarginClient {
     this.now = opts.now ?? (() => Date.now());
     this.fetchFn = opts.fetchFn ?? fetch;
     this.minIntervalMs = Math.max(1, Math.ceil(1000 / Math.max(1, cfg.requestsPerSecond ?? 5)));
-  }
-
-  private privateKey(): KeyObject {
-    if (this.key === null) this.key = createPrivateKey(readFileSync(this.cfg.privateKeyPath, 'utf8'));
-    return this.key;
+    try {
+      this.key = createPrivateKey(readFileSync(cfg.privateKeyPath, 'utf8'));
+    } catch {
+      // Fixed text on purpose: the original error carries the key path. No cause, no rethrow.
+      throw new Error('Kalshi private key could not be read or parsed (check the key file path and format)');
+    }
   }
 
   private throttle(): Promise<void> {
@@ -69,7 +70,7 @@ export class KalshiMarginClient {
     }
     const ts = String(this.now());
     const signature = cryptoSign('sha256', Buffer.from(`${ts}${method}${url.pathname}`, 'utf8'), {
-      key: this.privateKey(),
+      key: this.key,
       padding: constants.RSA_PKCS1_PSS_PADDING,
       saltLength: constants.RSA_PSS_SALTLEN_DIGEST,
     }).toString('base64');
