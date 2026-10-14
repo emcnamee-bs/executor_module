@@ -661,7 +661,7 @@ describe('stub-broker reconciliation (R22, R24)', () => {
       itemId: `r22-${++seq}`, receivedAtMs: now, publishedAtMs: now - 30_000, direction: 'up', bucket: 'major',
       horizon: 'days', credibility: 0.8, novelty: 'new', alreadyPriced: 'no', confidence: 0.75, rationale: 'test',
     });
-    return { db, alerts, engine, position, setTrailingStop, watch, item, now: () => now, advance: (ms: number) => { now += ms; } };
+    return { db, alerts, engine, position, setTrailingStop, watch, item, opens: () => opens, now: () => now, advance: (ms: number) => { now += ms; } };
   }
 
   it.each([
@@ -758,6 +758,33 @@ describe('stub-broker reconciliation (R22, R24)', () => {
     const giveUps = s.alerts.filter((a) => /could not confirm the exchange position/.test(a));
     expect(giveUps).toHaveLength(1);
     expect(giveUps[0]).toMatch(/at startup/);
+  });
+
+  it('W8: while a reconcile is pending and nothing is tracked, a bullish item places no order and journals the hold', async () => {
+    const s = setup(() => {
+      throw new Error('read failed');
+    });
+    await s.engine.start(); // fails: pending
+    s.advance(MIN);
+    await s.engine.tick(); // retry fails again, the snapshot is collected, evaluation holds
+    const item = s.item();
+    await s.engine.onAssessment(item);
+    expect(s.opens()).toBe(0);
+    const d = listJournal(s.db, 'decision', 1)[0].payload as { action: { kind: string; reasons: string[] }; items: string[] };
+    expect(d.action).toEqual({ kind: 'hold', reasons: ['reconcile pending: exchange position unconfirmed'] });
+    expect(d.items).toEqual([item.itemId]);
+  });
+
+  it('W8 control: once the pending reconcile succeeds (flat), the same kind of item does reach broker.open', async () => {
+    const s = setup((call) => {
+      if (call === 1) throw new Error('read failed');
+      return null;
+    });
+    await s.engine.start();
+    s.advance(MIN);
+    await s.engine.tick(); // retry reads flat: cleared
+    await s.engine.onAssessment(s.item());
+    expect(s.opens()).toBe(1);
   });
 
   it('W5: a startup reconcile that finds the broker flat with nothing stored watches nothing', async () => {

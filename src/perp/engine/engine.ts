@@ -265,6 +265,26 @@ export class PerpEngine {
       p.extreme = p.side === 'long' ? Math.max(p.extreme, mark) : Math.min(p.extreme, mark);
     }
 
+    if (this.position === null && this.reconcilePending) {
+      // The exchange may hold a position we have not confirmed: an entry now could double it. Exits of a tracked
+      // position are not affected (this branch is flat-only).
+      if (newItems.length > 0 || now - this.lastHoldJournalMs >= HOLD_JOURNAL_EVERY_MS) {
+        if (newItems.length === 0) this.lastHoldJournalMs = now;
+        appendJournal(db, {
+          tsMs: now,
+          kind: 'decision',
+          payload: {
+            action: { kind: 'hold', reasons: ['reconcile pending: exchange position unconfirmed'] },
+            pressureNow: this.book.at(now),
+            mark,
+            position: null,
+            items: newItems.map((i) => i.itemId),
+          },
+        });
+      }
+      return;
+    }
+
     const governors = computeGovernors(cfg, vixOf(snapshot), snapshot.realizedWeeklySigma);
     const bal = await broker.balance();
     const bp = this.position !== null ? await broker.position() : null;
