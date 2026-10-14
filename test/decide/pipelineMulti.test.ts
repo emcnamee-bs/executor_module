@@ -141,4 +141,60 @@ describe('runDecisionPipeline: multi trades', () => {
     expect((db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE would_trade = 1`).get() as { n: number }).n).toBe(0);
     expect((db.prepare(`SELECT COUNT(*) AS n FROM orders`).get() as { n: number }).n).toBe(0);
   });
+
+  const seedSell = (market: string) => {
+    const heldId = recordPaperPosition(db, {
+      trade: 'kxmulti-exclusive', itemId: `old-${market}`, structure: 'multi', eventTicker: 'FED-EV', marketTicker: market, side: 'yes', contracts: 2,
+      entryPriceCents: 30, direction: 'up', magnitude: 5, edgeCents: 3, reasoning: 'r', ladderJson: '[]',
+    });
+    recordExitReview(db, {
+      trade: 'kxmulti-exclusive', itemId: `older-${market}`, positionId: heldId, shift: -5, confidence: 1, reason: 'r', midCents: 30, fairAfterCents: 25,
+      lossCents: 5, exitCostCents: 1, verdict: 'sell', verdictReason: 'x', lagJson: null,
+    });
+  };
+  const fresh = () => positions().filter((r) => !String(r.item_id).startsWith('old-'));
+
+  it('a sell-triggered best-edge market does not take a leg slot on an exclusive group (two legs still open)', async () => {
+    seedSell('F-CUT');
+    decide({ moves: [mv('F-CUT', 20), mv('F-HOLD', -20), mv('F-HIKE', 5)] });
+    await runDecisionPipeline(makeItem(), deps);
+    const rows = fresh();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.market_ticker).sort()).toEqual(['F-HIKE', 'F-HOLD']);
+    expect(decisionFor('news-1')!.reason).toMatch(/^\[PAPER multi\]/);
+  });
+
+  it('a sell-triggered best move on a ladder group falls through to the second-best, not zero legs', async () => {
+    deps = { ...deps, profile: loadMulti('ladder') };
+    seedSell('F-CUT');
+    decide({ moves: [mv('F-CUT', 20), mv('F-HIKE', 8)] });
+    await runDecisionPipeline(makeItem(), deps);
+    const rows = fresh();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ market_ticker: 'F-HIKE', side: 'yes', leg: 1 });
+  });
+
+  it('records why when every move is on a sell-triggered market', async () => {
+    seedSell('F-CUT');
+    decide({ moves: [mv('F-CUT', 20)] });
+    await runDecisionPipeline(makeItem(), deps);
+    expect(fresh()).toHaveLength(0);
+    expect(decisionFor('news-1')!.reason).toMatch(/exit trigger already fired on F-CUT; not re-entering/);
+  });
+
+  it('records a skip, not a crash, when the model returns trade=true with no moves', async () => {
+    decide({ moves: [] });
+    await runDecisionPipeline(makeItem(), deps);
+    expect(positions()).toHaveLength(0);
+    expect(decisionFor('news-1')!.reason).toBe('multi sizing: no moves to size');
+  });
+
+  it('tags legs and the decision row when the low-tier relaxation is on (paper only)', async () => {
+    decide({ moves: [mv('F-CUT', 20), mv('F-HOLD', -20)], reasoning: 'a cut is likelier' });
+    await runDecisionPipeline(makeItem({ trust_tier: 4, story_key: null, corroborations: 0 }), { ...deps, paperLowTier: true });
+    const legs = db.prepare(`SELECT reasoning FROM paper_positions`).all() as { reasoning: string }[];
+    expect(legs).toHaveLength(2);
+    for (const l of legs) expect(l.reasoning).toMatch(/^\[low-tier relaxed: tier 4\] a cut is likelier/);
+    expect(decisionFor('news-1')!.reason).toMatch(/^\[low-tier relaxed: tier 4\] \[PAPER multi\]/);
+  });
 });

@@ -32,21 +32,29 @@ export interface MultiEntryArgs {
 
 export function applyMultiEntry(a: MultiEntryArgs): void {
   const { db, item, ladder } = a;
+  if (a.moves.length === 0) {
+    a.record(skipRecord(item, 'multi sizing: no moves to size', { rung: a.rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
+    return;
+  }
+
+  // A market that already had an exit trigger is never bought back on paper. Dropped BEFORE sizing,
+  // so it can never take a leg slot from a valid market.
+  const reasons: string[] = [];
+  const movesToSize = a.moves.filter((m) => {
+    if (!hasSellTrigger(db, m.market)) return true;
+    reasons.push(`exit trigger already fired on ${m.market}; not re-entering`);
+    return false;
+  });
   const sizing = evaluateMultiSizing({
     markets: ladder.bands,
-    moves: a.moves,
+    moves: movesToSize,
     maxLegs: a.outcomeGroup === 'exclusive' ? 2 : 1,
     rung: a.rung,
     currentTotalExposureCents: paperExposureCents(db, ladder.eventTicker),
     caps: PAPER_CAPS,
   });
-  const reasons = [...sizing.reasons];
-  // A market that already had an exit trigger is never bought back on paper.
-  const legs = sizing.legs.filter((leg) => {
-    if (!hasSellTrigger(db, leg.marketTicker)) return true;
-    reasons.push(`exit trigger already fired on ${leg.marketTicker}; not re-entering`);
-    return false;
-  });
+  reasons.push(...sizing.reasons);
+  const legs = sizing.legs;
 
   const lead = a.moves.reduce((best, m) => (Math.abs(m.shift) > Math.abs(best.shift) ? m : best), a.moves[0]);
   const base = { rung: a.rung, eventTicker: ladder.eventTicker, direction: lead.shift > 0 ? ('up' as const) : ('down' as const), magnitudePts: Math.abs(lead.shift), orderStatus: 'resolved' as const };
