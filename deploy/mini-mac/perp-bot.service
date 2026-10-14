@@ -5,8 +5,9 @@
 # SLACK_WEBHOOK_URL); tunables (PERP_*) may go in the optional %h/executor_module/.env.perp.
 #
 # The safety pins are on the ExecStart line, NOT in Environment=: systemd lets EnvironmentFile= override Environment=, so a pin
-# there could be undone by an env file. `/usr/bin/env -u PERP_LIVE PERP_MODE=paper` is applied after every env file and nothing
-# can override it. No unit for real money ships: it must be created deliberately after the Phase 1 gates (docs/runbook-perp.md).
+# there could be undone by an env file. `/usr/bin/env -u PERP_LIVE -u NODE_OPTIONS PERP_MODE=paper` is applied after every env file and
+# nothing can override it (NODE_OPTIONS is stripped so an env file cannot inject --require/--import code into the process).
+# No unit for real money ships: it must be created deliberately after the Phase 1 gates (docs/runbook-perp.md).
 Description=US500 perp bot (paper)
 After=network-online.target redis-server.service iip.service
 Wants=network-online.target
@@ -19,7 +20,7 @@ Type=simple
 WorkingDirectory=%h/executor_module-perp
 EnvironmentFile=%h/executor_module/.env
 EnvironmentFile=-%h/executor_module/.env.perp
-ExecStart=/usr/bin/env -u PERP_LIVE PERP_MODE=paper %h/executor_module-perp/node_modules/.bin/tsx %h/executor_module-perp/src/perp/main.ts
+ExecStart=/usr/bin/env -u PERP_LIVE -u NODE_OPTIONS PERP_MODE=paper %h/executor_module-perp/node_modules/.bin/tsx %h/executor_module-perp/src/perp/main.ts
 
 Restart=always
 RestartSec=10

@@ -37,12 +37,13 @@ function effectiveEnv(unit: Unit, envFiles: Record<string, string>): NodeJS.Proc
 const HOSTILE = {
   PERP_MODE: 'live', PERP_LIVE: `${T}:3`, PERP_SUBACCOUNT: '3',
   KALSHI_DEMO_API_KEY_ID: 'x', KALSHI_DEMO_PRIVATE_KEY_PATH: '/y',
+  NODE_OPTIONS: '--require /tmp/evil.js',
 };
 
 describe('perp-bot.service (paper)', () => {
   const unit = parseUnit(read('perp-bot.service'));
   it('pins PERP_MODE=paper and strips PERP_LIVE on the ExecStart line, and runs src/perp/main.ts', () => {
-    expect(unit.execStart).toMatch(/^\/usr\/bin\/env -u PERP_LIVE PERP_MODE=paper /);
+    expect(unit.execStart).toMatch(/^\/usr\/bin\/env -u PERP_LIVE -u NODE_OPTIONS PERP_MODE=paper /);
     expect(unit.execStart).toContain('src/perp/main.ts');
   });
   it('a hostile env file still yields a paper start', () => {
@@ -59,7 +60,7 @@ describe('perp-bot.service (paper)', () => {
 describe('perp-bot-demo.service', () => {
   const unit = parseUnit(read('perp-bot-demo.service'));
   it('pins PERP_MODE=demo and strips PERP_LIVE', () => {
-    expect(unit.execStart).toMatch(/^\/usr\/bin\/env -u PERP_LIVE PERP_MODE=demo /);
+    expect(unit.execStart).toMatch(/^\/usr\/bin\/env -u PERP_LIVE -u NODE_OPTIONS PERP_MODE=demo /);
   });
   it('a hostile env file can never make it live', () => {
     const env = effectiveEnv(unit, HOSTILE);
@@ -68,6 +69,16 @@ describe('perp-bot-demo.service', () => {
   });
   it('requires its own .env.perp-demo (no "-": a missing file fails the start)', () => {
     expect(unit.text).toMatch(/^EnvironmentFile=%h\/executor_module\/\.env\.perp-demo$/m);
+  });
+});
+
+describe('NODE_OPTIONS from an env file never reaches node (W14)', () => {
+  it.each(['perp-bot.service', 'perp-bot-demo.service'])('%s strips NODE_OPTIONS', (f) => {
+    const unit = parseUnit(read(f));
+    expect(unit.execStart.split(/\s+/).slice(0, 5)).toEqual(['/usr/bin/env', '-u', 'PERP_LIVE', '-u', 'NODE_OPTIONS']);
+    const env = effectiveEnv(unit, HOSTILE);
+    expect(HOSTILE.NODE_OPTIONS).toBeDefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
   });
 });
 
