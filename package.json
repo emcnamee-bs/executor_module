@@ -13,6 +13,7 @@
     "clear-breaker": "tsx scripts/clear-breaker.ts",
     "score-paper": "tsx scripts/score-paper.ts",
     "backtest-exit": "tsx scripts/backtest-exit.ts",
+    "multi-dryrun": "tsx scripts/multi-sizing-dryrun.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

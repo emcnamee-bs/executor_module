@@ -871,6 +871,7 @@ trade or no way to feed them.
 | `kxredistricting` | Kalshi restructured the series into "which states redistrict" markets; the Arizona profile is stale and no live process exists |
 | `kxflycancjfk` | ~1c tail event (>=50% of JFK flights cancelled on a day) and no free per-airport cancellation source |
 | `kxretirepelosi` | 1-2c; she announced her retirement in 2025, so a resignation is not expected |
+| `kxguilfoyleout` | all three markets at 99-100c, resolved in effect (retired 2026-10-13) |
 
 To revive one: `systemctl --user enable --now executor-module@<name>`, put it back in `TRADES` in `~/wall/paper-grid-publish.py`
 (the wall publishers are not in this repo), and if its series changed, rebuild its profile first (`npm run build-trade -- --series
@@ -906,6 +907,41 @@ it reviews the positions a paper trade holds and simulates a sell at the touch w
   Other flags: `--model`, `--max-items` (default 80 per position), `--fee`, `--out` (default `~/exit-backtest`, one `<name>-<date>.md`
   report per run). It prints settled-only and all-positions summaries and a warning when review calls failed (an unreliable run).
 - **Wall:** the publisher (`~/wall/paper-grid-publish.py`, not in git) counts the exits; its backups are `*.bak-pre-exits-*`.
+
+### 5a.9 Multi-market trades (paper)
+
+The design is `docs/superpowers/specs/2026-10-13-multi-market-structure-design.md`. A trade whose series has several open markets that
+are priced against each other (a Fed decision, "who will X", nested "before date" markets) is built with `marketStructure: "multi"` and
+an `outcomeGroup` (`ladder`, `exclusive` or `independent`) instead of the single-band structure. Which trades are `multi` and their
+group: set by `build-trade`; see `trades/<t>/profile.json` `outcomeGroup`. Multi entry sizes against `PAPER_CAPS` and writes only paper rows (it imports nothing that can place an order).
+
+- **Entry flow** (`src/decide/pipeline.ts` calls, in this order): `decideMulti` (one Sonnet call; the model answers with `moves`, each a
+  market, a YES-probability shift in points and a confidence 0..1) -> `checkMultiMoves` (validates the answer, see below) ->
+  `evaluateMultiSizing` -> `applyMultiEntry` (all in `src/decide/multiEntry.ts` / `sizing.ts`). A market that already has an exit
+  trigger (`hasSellTrigger`) is removed BEFORE sizing, so it never takes a leg slot from a valid market.
+- **Checks** (`checkMultiMoves`; an invalid answer is rejected whole, never partly used): at most 4 moves, each on a distinct open,
+  two-sided-quoted market of the event, `|shift| <= 100` (a probability-point ceiling), confidence within 0..1, zero shifts dropped.
+  `exclusive`: the shifts must net to within +/-5 points of zero. `ladder`: shifts are repaired to be monotone (an earlier date can never be
+  likelier than a later one); a move whose repaired shift is zero or would reverse the model's direction is dropped, never flipped.
+- **Sizing** (`evaluateMultiSizing`): a positive shift buys YES, a negative one buys NO, with fair YES = mid + shift clamped to 1..99.
+  Confidence is clamped to [0,1] and scales the Kelly fraction; a non-finite shift is skipped; one ticker never gets two legs. Each
+  candidate must clear the same gates as the band path: price 10-90c, spread <= 5c, depth >= 1 contract, edge >= 0.5c, then Kelly and the
+  rung stake (`reported` 0.25, `corroborated` 0.5, `confirmed` 1.0, `rumor` never trades). Paper caps (`PAPER_CAPS`): 1000c per trade
+  (leg) and 5000c total open exposure for the event. A skip row lists a plain reason per move that was not bought.
+- **Legs:** `ladder` and `independent` buy at most one leg per item; `exclusive` buys at most two, ranked by edge, on two different
+  markets. Leg 1 keeps the item's own `item_id`; leg 2 is stored as `<item_id>#2` because `item_id` is UNIQUE (that is what keeps a
+  redelivered stream entry harmless). Both rows carry the pairing in `source_item_id` (the original item id) and `leg` (1 or 2); both
+  are NULL on a single-leg band trade. Inspect the pairs:
+  `SELECT source_item_id, leg, market_ticker, side, contracts FROM paper_positions WHERE source_item_id IS NOT NULL ORDER BY id;`
+- **Exits and labels:** the exit review treats a multi position as a YES-probability shift on its own market. The market `label`
+  (Kalshi's `yes_sub_title`, such as "Hike 25bps") names the market in the exit prompt for multi profiles only; every other
+  structure's prompt is unchanged.
+- **Dry run before enabling a unit:** `npm run multi-dryrun -- --series KXFEDDECISION --move KXFEDDECISION-26OCT-H25=+6 --move
+  KXFEDDECISION-26OCT-H0=-6 --group exclusive [--rung confirmed]` prints the active event's markets and the legs the real sizing would
+  buy. It uses only Kalshi's public API: no model call, no ledger, no order. `--rung` defaults to `confirmed` (the largest stake, so the
+  most optimistic answer); `--group` defaults to `independent`. Shifts are given with confidence 1.
+- **Rollback:** restore the profile backup the build left in `~/trade-refresh/backups/` over `trades/<t>/profile.json`, then
+  `systemctl --user restart executor-module@<t>`. Positions already written stay in the ledger.
 
 ## 6. Instructions for whoever picks this up
 

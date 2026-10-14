@@ -46,7 +46,7 @@ model and the logs can say "Michael Cohen" or "Hike 25bps" instead of a ticker s
 **3.3 Decision call `decideMulti`.** One Sonnet call per gated, triaged item. Input: the item, the rung, the group type, and
 a table of the event's active markets (ticker, label, YES bid/ask). Output (structured, validated):
 `moves: [{ market, shift, confidence }]` (at most 4) plus `reasoning`. `shift` is a signed change in that market's YES
-probability in percentage points (|shift| <= min(maxMagnitude, 100)); `confidence` is 0..1. Code-enforced group rules:
+probability in percentage points (|shift| <= 100, a probability-point ceiling; the profile's `maxMagnitude` is in its own unit and is not used here); `confidence` is 0..1. Code-enforced group rules:
 `exclusive`: the shifts must sum to within +/-5 points of zero or the whole answer is rejected (probabilities must stay a
 distribution); `ladder`: after applying the shifts the probabilities are forced monotone non-decreasing in the horizon;
 `independent`: none. An invalid answer is a no-trade with the reason logged, never a trade.
