@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 
-export type AiStage = 'build_keyphrases' | 'build_bank' | 'gate' | 'triage' | 'decide' | 'exit_review';
+export type AiStage = 'build_keyphrases' | 'build_bank' | 'gate' | 'triage' | 'decide' | 'decide_multi' | 'exit_review';
 
 export interface AiCallRecord {
   trade: string;
