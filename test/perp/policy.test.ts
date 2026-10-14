@@ -249,6 +249,13 @@ describe('long: exits', () => {
     expect(out.action.kind).toBe('hold');
     expect(out.action.kind === 'hold' && out.action.reasons.join(' ')).toMatch(/stale/);
   });
+  it('the margin guard still closes on a stale snapshot (its input is the live broker liqDistance) (W16)', () => {
+    const stale = { ...snap(), tsMs: NOW - 10 * MIN };
+    expect(decide(input({ ...noNews, snapshot: stale, liqDistance: 0.07 })).action).toMatchObject({ kind: 'close', rule: 'margin_guard' });
+    expect(decide(input({ ...noNews, snapshot: stale, liqDistance: 0.2 })).action).toMatchObject({ kind: 'hold', reasons: [expect.stringMatching(/stale/)] });
+    // The market-closed hold stays first: nothing can trade while closed.
+    expect(decide(input({ ...noNews, snapshot: { ...snap({ marketOpen: false }), tsMs: NOW - 10 * MIN }, liqDistance: 0.07 })).action.kind).toBe('hold');
+  });
   it('tightens ahead of a high-impact release and does not re-tighten once tight', () => {
     const events: ScheduledEvent[] = [{ tsMs: NOW + 30 * MIN, name: 'FOMC', impact: 'high' }];
     const out = decide(input({ ...noNews, snapshot: snap({}, events) }));

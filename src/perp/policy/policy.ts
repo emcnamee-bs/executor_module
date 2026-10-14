@@ -70,14 +70,15 @@ function decideInPosition(inp: PolicyInput, pos: PositionState): PolicyOutput {
   // Nothing can be traded while the market is closed; the exchange-side trigger stays in force.
   if (!snapshot.perp.marketOpen) return hold('market closed; exchange trigger remains in force');
 
-  // Stale data: do not act on it; the exchange-side trigger stays in force.
-  const ageMs = Math.max(nowMs - snapshot.tsMs, snapshot.freshness.perpAgeMs);
-  if (ageMs > cfg.staleSnapshotMs) return hold('stale data; exchange trigger remains in force');
-
-  // Rule 2: margin guard.
+  // Rule 2: margin guard. Its input is the broker's live liquidation distance, not the snapshot, so a stale snapshot
+  // must not suppress it.
   if (liqDistance !== null && liqDistance < 2 * currentStop) {
     return close('margin_guard', `liquidation distance ${fmtPct(liqDistance)} < 2 x stop ${fmtPct(currentStop)}`);
   }
+
+  // Stale data: do not act on it; the exchange-side trigger stays in force.
+  const ageMs = Math.max(nowMs - snapshot.tsMs, snapshot.freshness.perpAgeMs);
+  if (ageMs > cfg.staleSnapshotMs) return hold('stale data; exchange trigger remains in force');
 
   // Rule 3: credible, novel, adverse shock closes the position.
   const against = inp.newItems.filter((i) => i.direction === adverseDirection(pos.side));
