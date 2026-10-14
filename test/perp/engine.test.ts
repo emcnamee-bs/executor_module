@@ -26,13 +26,14 @@ function harness(over: { startEquityUsd?: number } = {}) {
   let collectError: Error | null = null;
   let nextCloseTsMs: number | null = NOW0 + 3 * 24 * H;
   let marketOpen = true;
+  let macroAgeMs = 0;
   const collect = async (): Promise<Collected> => {
     if (collectError) throw collectError;
     return {
       perp: { bid: q.bid, ask: q.ask, mark: q.mark, marketOpen, nextCloseTsMs, fundingEstimate: 0.0001 },
       perpFetchedAtMs: now,
       macro: { vix: { value: 16, change1d: 0, asOf: '2026-10-13' } },
-      macroFetchedAtMs: now,
+      macroFetchedAtMs: now - macroAgeMs,
       events: [],
       kalshiEvents: [],
     };
@@ -51,6 +52,7 @@ function harness(over: { startEquityUsd?: number } = {}) {
     setCollectError: (e: Error | null) => { collectError = e; },
     setNextClose: (ts: number | null) => { nextCloseTsMs = ts; },
     setMarketOpen: (open: boolean) => { marketOpen = open; },
+    setMacroAge: (ms: number) => { macroAgeMs = ms; },
   };
 }
 type H = ReturnType<typeof harness>;
@@ -294,6 +296,24 @@ describe('paper collateral top-up (W1)', () => {
     await e2.onAssessment(assess(h));
     expect((await b2.position())?.side).toBe('long');
     expect(loadPosition(h.db)?.side).toBe('long');
+  });
+});
+
+describe('stale VIX (W4)', () => {
+  it('macro data fetched 5 days ago is not used: with no realized history the governor falls back to default and no entry is made', async () => {
+    const h = harness();
+    h.setMacroAge(5 * 24 * H);
+    await openLong(h);
+    expect(await h.broker.position()).toBeNull();
+    const d = listJournal(h.db, 'decision', 1)[0].payload as { sigmaSource: string; action: { reasons: string[] } };
+    expect(d.sigmaSource).toBe('default');
+    expect(d.action.reasons.join(' ')).toMatch(/no volatility estimate/);
+  });
+  it('macro data fetched 3 days ago is still used', async () => {
+    const h = harness();
+    h.setMacroAge(3 * 24 * H);
+    await openLong(h);
+    expect((await h.broker.position())?.side).toBe('long');
   });
 });
 

@@ -80,7 +80,13 @@ export function buildSnapshot(i: {
   };
 }
 
+/** FRED lags about a day, plus weekends and holidays; macro data fetched longer ago than this is not used for sizing. */
+export const VIX_MAX_AGE_MS = 4 * DAY_MS;
+
+/** The VIX level, or null when it is missing or the macro data is stale/of unknown age (then realized sigma, else 'default'). */
 export function vixOf(s: Snapshot): number | null {
+  const age = s.freshness.macroAgeMs;
+  if (age === null || !Number.isFinite(age) || age > VIX_MAX_AGE_MS) return null;
   const v = s.macro.vix?.value;
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }

@@ -113,6 +113,16 @@ describe('buildSnapshot', () => {
     expect(vixOf(s)).toBeNull();
     expect(s.freshness.macroAgeMs).toBeNull();
   });
+  it('vixOf is null when the macro data is stale (> 4 days), of infinite age, or of unknown age (W4)', () => {
+    const vix = { vix: { value: 16, change1d: 0, asOf: '2026-10-10' } };
+    const at = (macroFetchedAtMs: number | null) =>
+      vixOf(buildSnapshot({ nowMs: NOW, perp, perpFetchedAtMs: NOW, macro: vix, macroFetchedAtMs, events: [], kalshiEvents: [], history: [] }));
+    expect(at(NOW - 3 * D)).toBe(16);
+    expect(at(NOW - 4 * D)).toBe(16);
+    expect(at(NOW - 5 * D)).toBeNull();
+    expect(at(NaN)).toBeNull(); // age Infinity
+    expect(at(null)).toBeNull();
+  });
   const base = { perp, macro: {}, events: [], kalshiEvents: [], history: [] };
   it('maps a NaN perpFetchedAtMs, nowMs or macroFetchedAtMs to Infinity age (reads as stale, never fresh)', () => {
     expect(buildSnapshot({ ...base, nowMs: NOW, perpFetchedAtMs: NaN, macroFetchedAtMs: NOW }).freshness.perpAgeMs).toBe(Infinity);
