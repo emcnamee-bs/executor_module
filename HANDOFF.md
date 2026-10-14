@@ -966,7 +966,7 @@ code enforces; either side can veto:
   the trade-pacing limit set `entryAllowed=false`: the model is told entry is unavailable (its `entry` answer is then ignored) and the
   positions are STILL reviewed. "Story already has an open position for the active event" is checked after the call and likewise
   stops only the entry. Nothing is called when there is no open position to review and entry is not allowed.
-- **Failures never sell and never buy.** A model/API error, or an answer that fails validation (unknown, duplicate or missing
+- **A failed or invalid model answer never sells or buys.** A model/API error, or an answer that fails validation (unknown, duplicate or missing
   `position_id`, bad action, empty reason, shift beyond the sanity ceiling, confidence outside 0..1, invalid `moves`, an invalid
   `entry` when entry is available; the whole answer is rejected, never partly used) writes an `error` review row for EVERY reviewable
   position, sends ONE Slack alert `[UNIFIED ERROR] <trade> item <id>: <reason>`, and records the entry as a skip (`unified decision
@@ -984,11 +984,12 @@ code enforces; either side can veto:
 - **Enable per paper unit:** copy `deploy/mini-mac/executor-module@.service.d/decision-mode.conf.example` to
   `~/.config/systemd/user/executor-module@<trade>.service.d/decision-mode.conf` (the unit must also have its `exit-review.conf`), then
   `systemctl --user daemon-reload && systemctl --user restart executor-module@<trade>`.
-- **Roll back:** delete that `decision-mode.conf`, `systemctl --user daemon-reload`, restart the unit. The classic code path is
-  untouched; rows already written stay in the ledger.
+- **Roll back:** delete that `decision-mode.conf`, `systemctl --user daemon-reload`, restart the unit. Classic behaviour is
+  unchanged when the drop-in is absent; rows already written stay in the ledger.
 - **Rollout order** (all paper units, with the integrity checker after every wave; fix every violation before continuing): merge
   `feat/multi-unified` into the local `~/executor_module` main (no push without the user's approval) and run
-  `python3 ~/exit-analysis/integrity.py --no-alert` for a baseline. Wave 1: the units that already hold positions (`kxwti`,
+  `python3 ~/exit-analysis/integrity.py --no-alert` for a baseline (on ledgers that do not yet have the new columns the checker skips
+  the checks that need them without raising violations, so the baseline is expected to be 0 violations). Wave 1: the units that already hold positions (`kxwti`,
   `kxaaagasw`, `kxbrentmon`, `kxhormuzweekly`): install the drop-in, reload, restart ONE unit, wait for its first gated item, run the
   checker and read the unified review rows, then the rest of the wave. Wave 2: every other tradeable paper unit. Wave 3: the
   converted `multi` trades (after 5a.9's rollout). Check again after each wave and after the first hour of live items.
@@ -998,8 +999,8 @@ code enforces; either side can veto:
 **Ledger columns** (added automatically when a unit opens its ledger with the new code, so a unit's ledger has them only after its
 first restart on this version; before that these queries fail with `no such column`): `paper_exit_reviews.model_action`
 (`hold` | `sell`, what the model recommended) and `paper_exit_reviews.decision_mode` (`unified` is the only value the code writes).
-`NULL` in both means a classic or pre-existing review, and also the unified `error` rows and `market not open` rows (no model
-recommendation). In a unified `sell` row `verdict_reason` reads `model: sell (...); rule: ...`; a veto reads `the model recommended
+`NULL` in BOTH columns means a classic or pre-existing review only. Unified `error` rows and unified `market not open (closed or
+settled)` hold rows have `decision_mode='unified'` and a NULL `model_action` (the model was not asked about them). In a unified `sell` row `verdict_reason` reads `model: sell (...); rule: ...`; a veto reads `the model recommended
 sell (...) but the rule vetoed it: ...` or `the rule says sell (...) but the model recommended hold (...)`. The `decide_unified`
 calls are in `ai_calls` with `stage='decide_unified'` (its `verdict` is `<buy|none> sells:N holds:M`, or `invalid:<why>`).
 mini-mac has no `sqlite3` CLI; use python3 read-only, e.g.
@@ -1016,9 +1017,11 @@ every `<data>/<trade>/decisions.db` read-only (never writes a ledger), prints on
 per problem and a count line, and exits 0 clean / 1 for any violation line (including `IO` and `SKIP` lines: a ledger it cannot read, or a
 rule that raised, counts as a violation). Rules: `P1` position shape, `P2` exit fills versus contracts and pnl, `E1` exit rows (review
 linkage, price range, pnl arithmetic), `R1` review completeness (a sell has its arithmetic and `lag_json`, an error has a reason), `L1`
-two-leg entries, `A1` audit trail (a model call behind multi positions and, once a ledger has used unified, every later position; no
-`would_trade` decisions), `A2` the newest archive snapshot is a subset of the live ledger, `U1` unified consistency (every unified
-hold/sell has a `model_action`, a unified sell was recommended `sell`, every position a `decide_unified` call recommended has a review
+two-leg entries, `A1` audit trail (every `multi` position has a `decide_multi`/`decide_unified` call without error; once a ledger has a
+`decide_unified` call, every position created at or after the first one needs a `decide`/`decide_multi`/`decide_unified` call
+without error for its item, so a rollback to classic is not flagged; no `would_trade` decisions), `A2` the newest archive snapshot is a subset of the live ledger, `U1` unified consistency (every unified
+hold/sell review has a `model_action`, except the unified `market not open (closed or settled)` hold rows, which the checker exempts
+by that exact reason (the model was not asked), a unified sell was recommended `sell`, every position a `decide_unified` call recommended has a review
 row, i.e. no lost decision). Legacy NULL columns are skipped. On violations it posts ONE Slack message (an identical set is not
 re-alerted for 24 h; a clean run clears the state). Run by hand: `python3 ~/exit-analysis/integrity.py --no-alert` (no Slack, no state
 change). Timer logs: `journalctl --user -u integrity.service` (timer: `systemctl --user list-timers integrity.timer`). **A finding is
