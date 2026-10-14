@@ -36,14 +36,20 @@ The script refuses while the bot holds the database lock ("stop the perp-bot uni
 
 ## Phase 0 (before any order): run `npm run perp-verify` and record the answers here
 - [ ] Trading hours and any daily break confirmed (next close seen: Fri 5 pm ET).
-- [ ] Each collector (Kalshi margin API, FRED, news/IIP stream, calendar file) confirmed available, with its latency noted.
+  - 2026-10-14: next close confirmed Fri 2026-10-16 21:00 UTC (5 pm EDT). `next_open_ts` is null while open, so the reopen time and any daily break are NOT known; observe the first Friday close/reopen (prod and demo).
+- [x] Each collector (Kalshi margin API, FRED, news/IIP stream, calendar file) confirmed available, with its latency noted.
+  - 2026-10-14: Kalshi margin API ok (~0.3 s); FRED CSV ok (~0.2 s, no key, data lags ~1 day: last SP500/VIX row 2026-10-13); IIP `iip:items` fresh (newest item <1 min old, 83k items); Stooq NOT usable; calendar file filled (8 events through 2027-01-13, coverage 90.8 days).
 - [ ] Perp price tracks the S&P 500 (ratio to FRED SP500 is ~constant); contract price mapping understood.
+  - 2026-10-14: ratio perp/SP500 ~0.001756-0.001768 (about SPX/566), ~0.7% spread under both same-date and previous-date alignment. WEAK evidence: SPX was nearly flat over the window. Re-check after a larger move. Mapping unexplained: `contract_size` 0.001 x index is ~7.8, not the ~13.7 price.
 - [ ] Funding payer confirmed on the demo exchange (set `fundingLongPays` accordingly in `src/perp/broker/paper.ts` if it is the opposite).
 - [ ] Liquidation margin ratio definition confirmed with `/margin/risk` on a demo position.
 - [ ] Isolated vs cross exit-trigger path confirmed (`PERP_TRIGGER_MODE`).
 - [ ] Subaccount isolation confirmed (two subaccounts do not net).
 - [ ] Demo account + API key created; `perp-bot-demo.service` rehearsal run: open, trailing stop fires, forced margin-guard exit, restart with an open position.
-- [ ] Price-rule backtest recorded (`docs/perp-backtest-2026-10-14.txt`).
+- [x] Price-rule backtest recorded (`docs/perp-backtest-2026-10-14.txt`).
+  - Caveats: ~10 years (FRED limit, not 15); close-to-close, so stop-out/liquidation rates are understated.
+
+Phase 0 status 2026-10-14: prod subaccount 1 created (unfunded); demo RSA key + ID stored on mini-mac (`~/.kalshi-demo-key.pem`, `~/executor_module/.env.perp-demo`). The demo account is NOT yet enabled for margin trading (`GET /margin/enabled` false, 403 on `/margin/balance` and on the event_contract->margined transfer), which blocks the funding-payer, margin-ratio, trigger-path, subaccount-isolation and demo-rehearsal items.
 
 ## Phase 1 gates (paper, at least 4 weeks) — correctness, not profit
 - [ ] Zero accounting or state bugs (equity in `perp-report` reconciles with the exit rows).
