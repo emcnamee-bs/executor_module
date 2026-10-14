@@ -22,7 +22,7 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   fundingLongPays: true,
 };
 
-interface PaperPos {
+export interface PaperPos {
   side: Side;
   contracts: number;
   entryPrice: number;
@@ -30,6 +30,11 @@ interface PaperPos {
   extreme: number;
   stopBps: number;
   entryFeeUsd: number;
+}
+
+export interface PaperState {
+  cash: number;
+  pos: PaperPos | null;
 }
 
 /**
@@ -158,6 +163,16 @@ export class PaperBroker implements Broker {
       return [{ kind: 'stopped_out', rule: 'trailing_stop', side: r.side, fill: r, pnlUsd: r.pnlUsd }];
     }
     return [];
+  }
+
+  /** Serializable state, so a paper position and its cash survive a restart. */
+  exportState(): PaperState {
+    return { cash: this.cash, pos: this.pos === null ? null : { ...this.pos } };
+  }
+
+  importState(s: PaperState): void {
+    this.cash = s.cash;
+    this.pos = s.pos === null ? null : { ...s.pos };
   }
 
   /** Applies one funding settlement; returns USD charged (positive = paid, negative = received). */

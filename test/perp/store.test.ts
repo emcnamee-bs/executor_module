@@ -90,3 +90,14 @@ describe('exits, assessments, snapshots, equity', () => {
     expect(equityPeak(db)).toBe(6.5);
   });
 });
+
+describe('equityPeak window', () => {
+  it('limits the peak to rows at or after sinceMs', () => {
+    const db2 = openPerpDb(':memory:');
+    recordEquity(db2, T, 9);
+    recordEquity(db2, T + 10, 5);
+    expect(equityPeak(db2)).toBe(9);
+    expect(equityPeak(db2, T + 5)).toBe(5);
+    expect(equityPeak(db2, T + 100)).toBe(0);
+  });
+});

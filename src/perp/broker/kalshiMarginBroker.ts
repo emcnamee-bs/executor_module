@@ -80,6 +80,21 @@ interface Expected {
   attempts: number;
 }
 
+/** Perp bid/ask/mark from the margin market endpoint; throws when the quote is unusable. */
+export async function fetchMarginQuote(client: Pick<KalshiMarginClient, 'get'>, ticker: string, nowMs: number): Promise<BrokerQuote> {
+  const { market } = await client.get<{
+    market: { bid?: string; ask?: string; price?: string; liquidation_mark_price?: { price?: string } };
+  }>(`/margin/markets/${ticker}`);
+  const bid = num(market.bid);
+  const ask = num(market.ask);
+  // Assumption to verify in Phase 0: stops and liquidation are evaluated on the liquidation mark price.
+  const mark = num(market.liquidation_mark_price?.price ?? market.price);
+  if (![bid, ask, mark].every(Number.isFinite) || bid <= 0 || ask <= 0) {
+    throw new Error(`kalshi: unusable quote for ${ticker}`);
+  }
+  return { bid, ask, mark, tsMs: nowMs };
+}
+
 export class KalshiMarginBroker implements Broker {
   readonly mode: 'demo' | 'prod';
   private expected: Expected | null = null;
@@ -118,17 +133,7 @@ export class KalshiMarginBroker implements Broker {
   }
 
   async quote(): Promise<BrokerQuote> {
-    const { market } = await this.client.get<{
-      market: { bid?: string; ask?: string; price?: string; liquidation_mark_price?: { price?: string } };
-    }>(`/margin/markets/${this.cfg.ticker}`);
-    const bid = num(market.bid);
-    const ask = num(market.ask);
-    // Assumption to verify in Phase 0: stops and liquidation are evaluated on the liquidation mark price.
-    const mark = num(market.liquidation_mark_price?.price ?? market.price);
-    if (![bid, ask, mark].every(Number.isFinite) || bid <= 0 || ask <= 0) {
-      throw new Error(`kalshi: unusable quote for ${this.cfg.ticker}`);
-    }
-    return { bid, ask, mark, tsMs: this.now() };
+    return fetchMarginQuote(this.client, this.cfg.ticker, this.now());
   }
 
   async balance(): Promise<BrokerBalance> {

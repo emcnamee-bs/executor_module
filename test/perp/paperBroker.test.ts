@@ -171,3 +171,23 @@ describe('PaperBroker concurrency (quote in flight)', () => {
     }
   });
 });
+
+describe('PaperBroker persistence', () => {
+  it('restores cash, position, stop and watermark in a fresh broker', async () => {
+    const a = harness();
+    await a.broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    a.setMark(14.0);
+    await a.broker.poll(); // watermark 14.0
+    const saved = JSON.parse(JSON.stringify(a.broker.exportState()));
+
+    const b = harness();
+    b.broker.importState(saved);
+    b.setMark(14.0);
+    expect((await b.broker.position())?.side).toBe('long');
+    b.setMark(13.45); // below 14.0 * (1 - 0.0388): the carried-over watermark matters
+    expect((await b.broker.poll())[0]?.kind).toBe('stopped_out');
+  });
+  it('exports a flat state as pos=null', async () => {
+    expect(harness().broker.exportState()).toEqual({ cash: 3.5, pos: null });
+  });
+});

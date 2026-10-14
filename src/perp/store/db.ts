@@ -93,7 +93,7 @@ export function markSeries(db: Database.Database, sinceMs: number): Array<{ tsMs
 export function recordEquity(db: Database.Database, tsMs: number, equity: number): void {
   db.prepare('INSERT OR REPLACE INTO equity (ts_ms, equity) VALUES (?, ?)').run(tsMs, equity);
 }
-export function equityPeak(db: Database.Database): number {
-  const row = db.prepare('SELECT MAX(equity) AS m FROM equity').get() as { m: number | null };
+export function equityPeak(db: Database.Database, sinceMs = 0): number {
+  const row = db.prepare('SELECT MAX(equity) AS m FROM equity WHERE ts_ms >= ?').get(sinceMs) as { m: number | null };
   return row.m ?? 0;
 }
