@@ -80,6 +80,37 @@ describe('calendar (review focus 6)', () => {
   });
 });
 
+describe('calendar timestamps need an explicit offset', () => {
+  const NOW = Date.UTC(2026, 9, 14, 15, 0, 0);
+  function withFile(content: string, fn: (file: string) => void) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'perp-cal-'));
+    try {
+      const file = path.join(dir, 'cal.json');
+      writeFileSync(file, content);
+      fn(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  it.each(['2026-11-05T19:00:00', '2026-11-05', '11/05/2026 2pm'])('rejects %s in loadCalendar and calendarCoverageDays', (at) => {
+    withFile(JSON.stringify([{ at, name: 'x', impact: 'high' }]), (file) => {
+      expect(() => loadCalendar(file, NOW)).toThrow();
+      expect(() => calendarCoverageDays(file, NOW)).toThrow();
+    });
+  });
+  it('accepts Z and numeric offsets and yields the right epoch ms', () => {
+    const data = [
+      { at: '2026-10-15T19:00:00Z', name: 'zulu', impact: 'high' },
+      { at: '2026-10-15T14:00:00-05:00', name: 'minus5', impact: 'medium' },
+      { at: '2026-10-16T01:30:00.500+02:00', name: 'frac', impact: 'high' },
+    ];
+    withFile(JSON.stringify(data), (file) => {
+      const got = loadCalendar(file, NOW);
+      expect(got.map((e) => e.tsMs)).toEqual([Date.UTC(2026, 9, 15, 19, 0, 0), Date.UTC(2026, 9, 15, 19, 0, 0), Date.UTC(2026, 9, 15, 23, 30, 0, 500)]);
+    });
+  });
+});
+
 describe('Kalshi event markets', () => {
   it('returns the yes mid price for markets with both a bid and an ask, skipping the rest', async () => {
     const fetchFn = (async (url: string) => {
@@ -124,5 +155,17 @@ describe('collectPerp', () => {
     expect(out.marketOpen).toBe(true); // unknown schedule: the broker, not the collector, decides tradability
     expect(out.nextCloseTsMs).toBeNull();
     expect(out.fundingEstimate).toBeNull();
+  });
+  it('throws when the quote is unusable', async () => {
+    const withMarket = (m: Record<string, unknown>) => ({ get: async () => ({ market: { ...market.market, ...m } }) });
+    await expect(collectPerp(withMarket({ bid: '0' }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+    await expect(collectPerp(withMarket({ ask: undefined }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+    await expect(collectPerp(withMarket({ ask: 'abc' }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+    await expect(collectPerp(withMarket({ liquidation_mark_price: { price: 'abc' } }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+    await expect(collectPerp(withMarket({ liquidation_mark_price: undefined, price: undefined }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+  });
+  it('propagates a failing market request', async () => {
+    const client = { get: async () => { throw new Error('market 503'); } };
+    await expect(collectPerp(client as never, 'KXUS500PERP', NOW)).rejects.toThrow('market 503');
   });
 });

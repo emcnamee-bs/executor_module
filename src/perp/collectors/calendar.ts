@@ -3,8 +3,14 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { ScheduledEvent } from '../types.js';
 
+// An offset-less timestamp would be read in the machine's local zone and shift event windows between machines, so the offset is mandatory.
+const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
 const EntrySchema = z.object({
-  at: z.string().refine((s) => Number.isFinite(Date.parse(s)), 'at must be an ISO timestamp'),
+  at: z
+    .string()
+    .regex(ISO_WITH_OFFSET, 'at must be an ISO-8601 timestamp with a Z or +hh:mm offset')
+    .refine((s) => Number.isFinite(Date.parse(s)), 'at must be a valid ISO-8601 timestamp'),
   name: z.string().min(1),
   impact: z.enum(['high', 'medium']),
 });
