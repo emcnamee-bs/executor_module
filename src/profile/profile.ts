@@ -12,7 +12,11 @@ export const PROFILE_FILES = ['profile.json', 'keyphrases.json', 'bank.md', 'ban
 const NAME_RE = /^[a-z0-9][a-z0-9-]{1,40}$/;
 const MIN_KEYPHRASES = 20;
 
-export type MarketStructure = 'band' | 'threshold' | 'binary' | 'capture';
+export type MarketStructure = 'band' | 'threshold' | 'binary' | 'capture' | 'multi';
+
+/** How the markets of one `multi` event relate (see the multi-market spec, section 3.1). */
+export const OUTCOME_GROUPS = ['ladder', 'exclusive', 'independent'] as const;
+export type OutcomeGroup = (typeof OUTCOME_GROUPS)[number];
 
 export const ProfileSchema = z
   .object({
@@ -24,7 +28,8 @@ export const ProfileSchema = z
     gateKeepAlive: z.string().min(1),
     decideContext: z.string().min(40).max(1500),
     directSources: z.array(z.string().regex(/^[a-z0-9_]+$/)).default([]),
-    marketStructure: z.enum(['band', 'threshold', 'binary', 'capture']),
+    marketStructure: z.enum(['band', 'threshold', 'binary', 'capture', 'multi']),
+    outcomeGroup: z.enum(OUTCOME_GROUPS).optional(),
     magnitudeUnit: z.string().min(1).max(30),
     maxMagnitude: z.number().positive().finite(),
     ledgerPath: z
@@ -38,7 +43,15 @@ export const ProfileSchema = z
     generatedAt: z.string().min(1),
     generatorModel: z.string().min(1),
   })
-  .strict();
+  .strict()
+  .superRefine((p, ctx) => {
+    if (p.marketStructure === 'multi' && p.outcomeGroup === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['outcomeGroup'], message: 'outcomeGroup is required when marketStructure is "multi"' });
+    }
+    if (p.marketStructure !== 'multi' && p.outcomeGroup !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['outcomeGroup'], message: 'outcomeGroup is only allowed when marketStructure is "multi"' });
+    }
+  });
 
 export type TradeProfile = z.infer<typeof ProfileSchema>;
 

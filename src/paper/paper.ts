@@ -4,7 +4,7 @@ import type Database from 'better-sqlite3';
 export interface PaperPositionRecord {
   trade: string;
   itemId: string;
-  structure: 'band' | 'threshold' | 'binary' | 'capture';
+  structure: 'band' | 'threshold' | 'binary' | 'capture' | 'multi';
   eventTicker: string;
   marketTicker: string | null;
   side: 'yes' | 'no' | null;
