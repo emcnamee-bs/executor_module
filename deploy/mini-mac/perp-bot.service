@@ -1,0 +1,43 @@
+[Unit]
+# PAPER-TRADING instance of the US500 perp bot. It places no orders on Kalshi: it reads prices (GET only) and simulates fills.
+# Install: cp this file to ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now perp-bot
+# Secrets come from the shared %h/executor_module/.env (ANTHROPIC_API_KEY, REDIS_URL, KALSHI_API_KEY_ID/KALSHI_PRIVATE_KEY_PATH,
+# SLACK_WEBHOOK_URL); tunables (PERP_*) may go in the optional %h/executor_module/.env.perp.
+#
+# The safety pins are on the ExecStart line, NOT in Environment=: systemd lets EnvironmentFile= override Environment=, so a pin
+# there could be undone by an env file. `/usr/bin/env -u PERP_LIVE -u NODE_OPTIONS PERP_MODE=paper` is applied after every env file and
+# nothing can override it (NODE_OPTIONS is stripped so an env file cannot inject --require/--import code into the process).
+# No unit for real money ships: it must be created deliberately after the Phase 1 gates (docs/runbook-perp.md).
+Description=US500 perp bot (paper)
+After=network-online.target redis-server.service iip.service
+Wants=network-online.target
+
+StartLimitIntervalSec=3600
+StartLimitBurst=30
+
+[Service]
+Type=simple
+WorkingDirectory=%h/executor_module-perp
+EnvironmentFile=%h/executor_module/.env
+EnvironmentFile=-%h/executor_module/.env.perp
+ExecStart=/usr/bin/env -u PERP_LIVE -u NODE_OPTIONS PERP_MODE=paper %h/executor_module-perp/node_modules/.bin/tsx %h/executor_module-perp/src/perp/main.ts
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=perp-bot
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/executor_module-perp/data
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
