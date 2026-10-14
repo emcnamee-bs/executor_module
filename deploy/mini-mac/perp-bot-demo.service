@@ -1,0 +1,38 @@
+[Unit]
+# DEMO-EXCHANGE rehearsal of the US500 perp bot: real order/stop/liquidation mechanics against Kalshi's DEMO exchange (play money).
+# Needs a demo account + API key and a demo subaccount. It REQUIRES %h/executor_module/.env.perp-demo with:
+#   KALSHI_DEMO_API_KEY_ID, KALSHI_DEMO_PRIVATE_KEY_PATH, PERP_SUBACCOUNT (1-63)
+# Never trades real money: PERP_MODE=demo is pinned on the ExecStart line and PERP_LIVE is stripped.
+Description=US500 perp bot (demo exchange)
+After=network-online.target redis-server.service iip.service
+Wants=network-online.target
+
+StartLimitIntervalSec=3600
+StartLimitBurst=30
+
+[Service]
+Type=simple
+WorkingDirectory=%h/executor_module-perp
+EnvironmentFile=%h/executor_module/.env
+EnvironmentFile=%h/executor_module/.env.perp-demo
+ExecStart=/usr/bin/env -u PERP_LIVE PERP_MODE=demo %h/executor_module-perp/node_modules/.bin/tsx %h/executor_module-perp/src/perp/main.ts
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=perp-bot-demo
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/executor_module-perp/data
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
