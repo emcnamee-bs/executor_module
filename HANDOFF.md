@@ -862,7 +862,7 @@ gasoline: "sanctions on Russian oil" 73%; Hormuz weekly: "Strait of Hormuz" 95%)
 
 ### 5a.7 Retired paper trades
 
-Retired 2026-10-12 (units stopped and disabled; profiles and ledgers are kept; removed from the wall grid). Reason: nothing left to
+Retired 2026-10-12 (and `kxguilfoyleout` 2026-10-13; units stopped and disabled; profiles and ledgers are kept; removed from the wall grid). Reason: nothing left to
 trade or no way to feed them.
 
 | Trade | Why |
@@ -915,10 +915,12 @@ are priced against each other (a Fed decision, "who will X", nested "before date
 an `outcomeGroup` (`ladder`, `exclusive` or `independent`) instead of the single-band structure. Which trades are `multi` and their
 group: set by `build-trade`; see `trades/<t>/profile.json` `outcomeGroup`. Multi entry sizes against `PAPER_CAPS` and writes only paper rows (it imports nothing that can place an order).
 
-- **Entry flow** (`src/decide/pipeline.ts` calls, in this order): `decideMulti` (one Sonnet call; the model answers with `moves`, each a
-  market, a YES-probability shift in points and a confidence 0..1) -> `checkMultiMoves` (validates the answer, see below) ->
-  `evaluateMultiSizing` -> `applyMultiEntry` (all in `src/decide/multiEntry.ts` / `sizing.ts`). A market that already has an exit
-  trigger (`hasSellTrigger`) is removed BEFORE sizing, so it never takes a leg slot from a valid market.
+- **Entry flow:** `src/decide/pipeline.ts` calls `decideMulti` (`src/decide/decideMulti.ts`: one Sonnet call; the model answers with
+  `moves`, each a market, a YES-probability shift in points and a confidence 0..1). `decideMulti` runs `checkMultiMoves` on that answer
+  (unknown, duplicate or out-of-range markets, at most 4 moves, the exclusive net-to-zero rule, the ladder monotone repair that never
+  reverses a direction; see Checks below). If that yields moves, `pipeline.ts` calls `applyMultiEntry` (`src/decide/multiEntry.ts`),
+  which drops the markets that already had a sell trigger (`hasSellTrigger`) BEFORE sizing, so they never take a leg slot from a valid
+  market, then calls `evaluateMultiSizing` (`src/decide/sizing.ts`) and writes the legs and the decision row.
 - **Checks** (`checkMultiMoves`; an invalid answer is rejected whole, never partly used): at most 4 moves, each on a distinct open,
   two-sided-quoted market of the event, `|shift| <= 100` (a probability-point ceiling), confidence within 0..1, zero shifts dropped.
   `exclusive`: the shifts must net to within +/-5 points of zero. `ladder`: shifts are repaired to be monotone (an earlier date can never be
@@ -937,9 +939,14 @@ group: set by `build-trade`; see `trades/<t>/profile.json` `outcomeGroup`. Multi
   (Kalshi's `yes_sub_title`, such as "Hike 25bps") names the market in the exit prompt for multi profiles only; every other
   structure's prompt is unchanged.
 - **Dry run before enabling a unit:** `npm run multi-dryrun -- --series KXFEDDECISION --move KXFEDDECISION-26OCT-H25=+6 --move
-  KXFEDDECISION-26OCT-H0=-6 --group exclusive [--rung confirmed]` prints the active event's markets and the legs the real sizing would
-  buy. It uses only Kalshi's public API: no model call, no ledger, no order. `--rung` defaults to `confirmed` (the largest stake, so the
-  most optimistic answer); `--group` defaults to `independent`. Shifts are given with confidence 1.
+  KXFEDDECISION-26OCT-H0=-6 --group exclusive [--rung reported]` prints the active event's markets and the legs `evaluateMultiSizing`
+  would buy. It uses only Kalshi's public API: no model call, no ledger, no order. It runs ONLY `evaluateMultiSizing` on the moves you
+  type: it does NOT apply `checkMultiMoves` (group rules, ladder repair, 4-move cap) or the sell-trigger filter, so a result is "what
+  sizing would do with those moves", not what the pipeline would do with a model answer. Shifts are given with confidence 1.
+  `--rung` is one of `rumor|reported|corroborated|confirmed` and defaults to `reported` (stake 0.25), the realistic setting.
+  `confirmed` is not reachable in production (`computeRungDetailed` never returns it; the real maximum is `corroborated`, stake 0.5),
+  so it only shows an upper bound on size. `--group` is `ladder|exclusive|independent` (default `independent`; `exclusive` allows two
+  legs). An unknown flag, a flag without a value, or a bad `--rung` / `--group` value is an error.
 - **Rollback:** restore the profile backup the build left in `~/trade-refresh/backups/` over `trades/<t>/profile.json`, then
   `systemctl --user restart executor-module@<t>`. Positions already written stay in the ledger.
 
