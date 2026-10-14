@@ -544,3 +544,64 @@ describe('serialisation (R9)', () => {
     expect(events).toEqual([]);
   });
 });
+
+describe('watch: classify a position this instance did not open (W5)', () => {
+  const exitFills = {
+    fills: [
+      { fill_id: 'f2', order_id: 'o7', side: 'ask', count: '1.00', created_time: '2026-10-14T16:00:00Z', ticker: T, price: '13.2000', fees: '0.0010', realized_pnl: '-0.5600' },
+    ],
+  };
+  function restarted(reason: string) {
+    let pos: unknown = longPosition;
+    const f = mk({
+      'GET /margin/positions': () => pos,
+      'GET /margin/risk': () => risk,
+      'GET /margin/fills': () => exitFills,
+      'GET /margin/orders/o7': () => ({ order: { order_source: 'system', order_reason: reason } }),
+    });
+    return { ...f, vanish: () => { pos = noPos; } };
+  }
+
+  it.each([
+    ['take_profit_stop_loss', 'stopped_out'],
+    ['liquidation', 'liquidated'],
+  ])('after watch(), a vanished position with a %s order is classified as %s', async (reason, kind) => {
+    const r = restarted(reason);
+    r.broker.watch('long', 1_000_000);
+    expect(await r.broker.poll()).toEqual([]); // still open
+    r.vanish();
+    const events = await r.broker.poll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind, side: 'long' });
+    expect((events[0] as { pnlUsd: number }).pnlUsd).toBeCloseTo(-0.56 - 0.001, 6);
+    const fillsCall = r.calls.find((c) => c.path === '/margin/fills')!;
+    expect(fillsCall.query).toMatchObject({ min_ts: Math.floor((1_000_000 - 60_000) / 1000) });
+    expect(await r.broker.poll()).toEqual([]); // reported once
+  });
+
+  it('without watch(), the same vanished position is never classified (poll returns [] forever)', async () => {
+    const r = restarted('liquidation');
+    r.vanish();
+    for (let i = 0; i < 10; i++) expect(await r.broker.poll()).toEqual([]);
+    expect(r.calls.some((c) => c.path === '/margin/fills')).toBe(false);
+  });
+
+  it('watch() never overwrites a pending expectation from the broker\'s own open', async () => {
+    let pos: unknown = noPos;
+    const { broker, calls } = mk({
+      'GET /margin/positions': () => pos,
+      'GET /margin/risk': () => risk,
+      [`GET /margin/markets/${T}`]: () => market,
+      'POST /margin/orders': () => { pos = longPosition; return filled('13.7580'); },
+      [TRIG]: () => ({}),
+      'GET /margin/fills': () => exitFills,
+      'GET /margin/orders/o7': () => ({ order: { order_source: 'system', order_reason: 'take_profit_stop_loss' } }),
+    });
+    await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    broker.watch('short', 1_000_000);
+    pos = noPos;
+    const events = await broker.poll();
+    expect(events[0]).toMatchObject({ kind: 'stopped_out', side: 'long' });
+    expect(calls.find((c) => c.path === '/margin/fills')!.query).toMatchObject({ min_ts: Math.floor((5000 - 60_000) / 1000) });
+  });
+});

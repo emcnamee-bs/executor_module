@@ -395,6 +395,11 @@ export class KalshiMarginBroker implements Broker {
     return this.locked(() => this.pollInner());
   }
 
+  /** Classify the exit of a position this instance did not open (restart, adoption). A pending expectation wins. */
+  watch(side: Side, sinceMs: number): void {
+    if (this.expected === null) this.expected = { side, openedAtMs: sinceMs, attempts: 0 };
+  }
+
   private async pollInner(): Promise<BrokerEvent[]> {
     const exp = this.expected;
     if (exp === null) return [];

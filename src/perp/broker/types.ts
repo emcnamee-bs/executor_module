@@ -62,4 +62,9 @@ export interface Broker {
   setTrailingStop(stopBps: number): Promise<void>;
   /** Detects stop-outs, liquidations and external closes since the last call. */
   poll(): Promise<BrokerEvent[]>;
+  /**
+   * Start tracking exit classification for a position this broker did not open itself (adopted at startup, or kept
+   * across a restart), so poll() reports how it ends. Never replaces tracking that is already in place.
+   */
+  watch(side: Side, sinceMs: number): void;
 }

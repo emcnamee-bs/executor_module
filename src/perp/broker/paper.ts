@@ -165,6 +165,11 @@ export class PaperBroker implements Broker {
     return [];
   }
 
+  /** No-op: the paper broker classifies every exit of its own simulated position in poll(). */
+  watch(_side: Side, _sinceMs: number): void {
+    // nothing to do
+  }
+
   /** Serializable state, so a paper position and its cash survive a restart. */
   exportState(): PaperState {
     return { cash: this.cash, pos: this.pos === null ? null : { ...this.pos } };

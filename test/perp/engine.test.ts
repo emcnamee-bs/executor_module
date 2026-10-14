@@ -412,6 +412,7 @@ describe('positionMayBeOpen on a failed open (R18)', () => {
       },
       setTrailingStop,
       poll: async () => [],
+      watch: () => undefined,
     };
     const collect = async (): Promise<Collected> => ({
       perp: { bid: 13.75, ask: 13.76, mark: 13.755, marketOpen: true, nextCloseTsMs: NOW0 + 3 * 24 * H, fundingEstimate: 0.0001 },
@@ -610,6 +611,7 @@ describe('stub-broker reconciliation (R22, R24)', () => {
     let opens = 0;
     const position = vi.fn(async () => positionFn(position.mock.calls.length));
     const setTrailingStop = vi.fn(async (_bps: number) => undefined);
+    const watch = vi.fn((_side: 'long' | 'short', _sinceMs: number) => undefined);
     const stub: Broker = {
       mode: 'paper',
       quote: async () => ({ bid: 13.75, ask: 13.76, mark: 13.755, tsMs: now }),
@@ -624,6 +626,7 @@ describe('stub-broker reconciliation (R22, R24)', () => {
       },
       setTrailingStop,
       poll: async () => [],
+      watch,
     };
     const collect = async (): Promise<Collected> => ({
       perp: { bid: 13.75, ask: 13.76, mark: 13.755, marketOpen: true, nextCloseTsMs: NOW0 + 3 * 24 * H, fundingEstimate: 0.0001 },
@@ -639,7 +642,7 @@ describe('stub-broker reconciliation (R22, R24)', () => {
       itemId: `r22-${++seq}`, receivedAtMs: now, publishedAtMs: now - 30_000, direction: 'up', bucket: 'major',
       horizon: 'days', credibility: 0.8, novelty: 'new', alreadyPriced: 'no', confidence: 0.75, rationale: 'test',
     });
-    return { db, alerts, engine, position, setTrailingStop, item, advance: (ms: number) => { now += ms; } };
+    return { db, alerts, engine, position, setTrailingStop, watch, item, now: () => now, advance: (ms: number) => { now += ms; } };
   }
 
   it.each([
@@ -657,6 +660,7 @@ describe('stub-broker reconciliation (R22, R24)', () => {
     expect(loadPosition(s.db)?.side).toBe('long');
     expect(s.setTrailingStop).toHaveBeenCalledTimes(1);
     expect(s.setTrailingStop).toHaveBeenCalledWith(388);
+    expect(s.watch.mock.calls).toEqual([['long', s.now()]]); // W5: the adopted position is watched
   });
 
   it('R22: gives up after exactly 30 retries with exactly one alert and makes no further reconcile calls', async () => {
@@ -675,6 +679,22 @@ describe('stub-broker reconciliation (R22, R24)', () => {
     expect(s.alerts.join('\n')).not.toMatch(/startup/);
   });
 
+  it('W5: a consistent restart reconcile watches the stored position from its entry time', async () => {
+    const storedLong: PositionState = { ...storedShort, side: 'long' };
+    const s = setup(() => longBp, storedLong);
+    await s.engine.start();
+    expect(loadPosition(s.db)?.side).toBe('long');
+    expect(s.setTrailingStop).not.toHaveBeenCalled();
+    expect(s.watch.mock.calls).toEqual([['long', storedLong.entryTimeMs]]);
+    expect(listJournal(s.db, 'reconcile', 5).map((r) => (r.payload as { result: string }).result)).toEqual(['consistent']);
+  });
+
+  it('W5: a startup reconcile that finds the broker flat with nothing stored watches nothing', async () => {
+    const s = setup(() => null);
+    await s.engine.start();
+    expect(s.watch).not.toHaveBeenCalled();
+  });
+
   it('R24: a stored short against a broker long adopts the broker long, halts, sets a stop and alerts the mismatch', async () => {
     const s = setup(() => longBp, storedShort);
     await s.engine.start();
@@ -682,6 +702,7 @@ describe('stub-broker reconciliation (R22, R24)', () => {
     expect(s.engine.status().position?.side).toBe('long');
     expect(loadRiskState(s.db).halted).toBe(true);
     expect(s.setTrailingStop).toHaveBeenCalledWith(388);
+    expect(s.watch.mock.calls).toEqual([['long', NOW0]]); // W5: the adopted broker side is watched
     expect(s.alerts.join('\n')).toMatch(/side mismatch/);
     expect(listJournal(s.db, 'reconcile', 5).map((r) => (r.payload as { result: string }).result)).toEqual([
       'side_mismatch_adopted', 'side_mismatch',

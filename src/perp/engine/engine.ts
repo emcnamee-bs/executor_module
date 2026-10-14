@@ -482,6 +482,7 @@ export class PerpEngine {
       extreme: bp.markPrice, leverage: lev, stopBps, tightenedUntilMs: null,
     };
     savePosition(db, this.position);
+    broker.watch(bp.side, now); // this broker instance did not open it: make poll() classify how it ends
     appendJournal(db, { tsMs: now, kind: 'reconcile', payload: { result, position: this.position, ...extra } });
     return stopBps;
   }
@@ -533,6 +534,9 @@ export class PerpEngine {
         );
         return 'tracked';
       }
+      // Same side at both ends. After a restart this broker instance has no record of the position: watch it so a
+      // later stop-out or liquidation is classified instead of waiting out the synthetic 10-minute fallback.
+      if (stored !== null) broker.watch(stored.side, stored.entryTimeMs);
       appendJournal(db, { tsMs: now, kind: 'reconcile', payload: { result: 'consistent' } });
       return 'tracked';
     } catch (err) {
