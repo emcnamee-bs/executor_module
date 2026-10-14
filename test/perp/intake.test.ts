@@ -313,3 +313,36 @@ describe('checkSilence (W3)', () => {
     expect(checkSilence({ alerted: false }, NOW + T + 1, NOW, 0).alert).toBe(true);
   });
 });
+
+describe('intake time checks fail closed (W11)', () => {
+  it("an empty publish time falls back to first_seen_ts (fresh => assessed, old => skipped_old)", async () => {
+    const { intake, calls } = mk();
+    expect(await intake.handleItem(item({ source_publish_ts: '' }))).toBe('assessed');
+    expect(await intake.handleItem(item({ source_publish_ts: '', first_seen_ts: new Date(NOW - 7 * H).toISOString() }))).toBe('skipped_old');
+    expect(await intake.handleItem(item({ source_publish_ts: 'garbage', first_seen_ts: new Date(NOW - 7 * H).toISOString() }))).toBe('skipped_old');
+    expect(await intake.handleItem(item({ source_publish_ts: null, first_seen_ts: new Date(NOW - 7 * H).toISOString() }))).toBe('skipped_old');
+    expect(calls.gate).toBe(1);
+  });
+
+  it('neither time parses => skipped_bad_time, no model call, counted', async () => {
+    const { intake, calls } = mk();
+    expect(await intake.handleItem(item({ source_publish_ts: 'nope', first_seen_ts: '' }))).toBe('skipped_bad_time');
+    expect(await intake.handleItem(item({ source_publish_ts: null, first_seen_ts: 'also bad' }))).toBe('skipped_bad_time');
+    expect(calls.gate).toBe(0);
+    expect(intake.counters.skipped_bad_time).toBe(2);
+  });
+
+  it('a time more than 10 minutes in the future => skipped_bad_time; up to 10 minutes of skew is accepted', async () => {
+    const { intake, calls } = mk();
+    expect(await intake.handleItem(item({ source_publish_ts: new Date(NOW + 11 * 60_000).toISOString() }))).toBe('skipped_bad_time');
+    expect(await intake.handleItem(item({ source_publish_ts: '', first_seen_ts: new Date(NOW + 2 * H).toISOString() }))).toBe('skipped_bad_time');
+    expect(calls.gate).toBe(0);
+    expect(await intake.handleItem(item({ source_publish_ts: new Date(NOW + 9 * 60_000).toISOString() }))).toBe('assessed');
+  });
+
+  it('the 6h-old rule is unchanged', async () => {
+    const { intake } = mk();
+    expect(await intake.handleItem(item({ source_publish_ts: new Date(NOW - 6 * H + 60_000).toISOString() }))).toBe('assessed');
+    expect(await intake.handleItem(item({ source_publish_ts: new Date(NOW - 6 * H - 60_000).toISOString() }))).toBe('skipped_old');
+  });
+});

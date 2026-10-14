@@ -7,7 +7,7 @@ import { appendJournal } from '../store/db.js';
 import type { ImpactAssessment } from '../types.js';
 
 export type IntakeResult =
-  | 'assessed' | 'gated_out' | 'skipped_replay' | 'skipped_amended' | 'skipped_old' | 'skipped_seen'
+  | 'assessed' | 'gated_out' | 'skipped_replay' | 'skipped_amended' | 'skipped_old' | 'skipped_bad_time' | 'skipped_seen'
   | 'skipped_no_context' | 'parse_error' | 'error';
 
 export interface IntakeDeps {
@@ -24,9 +24,15 @@ export interface IntakeDeps {
 const SEEN_LIMIT = 5000;
 const OUTAGE_ERROR_THRESHOLD = 5;
 const OUTAGE_MESSAGE_MAX = 200;
+/** A publish time further than this in the future is clock trouble or garbage, not news: skip it. */
+const MAX_FUTURE_SKEW_MS = 10 * 60_000;
 const RESULTS: IntakeResult[] = [
-  'assessed', 'gated_out', 'skipped_replay', 'skipped_amended', 'skipped_old', 'skipped_seen', 'skipped_no_context', 'parse_error', 'error',
+  'assessed', 'gated_out', 'skipped_replay', 'skipped_amended', 'skipped_old', 'skipped_bad_time', 'skipped_seen',
+  'skipped_no_context', 'parse_error', 'error',
 ];
+
+/** Epoch ms of an ISO timestamp; NaN for a missing, empty or unparseable value. */
+const parseTs = (v: string | null | undefined): number => (typeof v === 'string' && v.trim() !== '' ? Date.parse(v) : NaN);
 
 export class NewsIntake {
   private readonly seen = new Set<string>();
@@ -90,8 +96,11 @@ export class NewsIntake {
     try {
       if (item.replay) return this.count('skipped_replay');
       if (item.event_type === 'item_amended') return this.count('skipped_amended');
-      const published = Date.parse(item.source_publish_ts ?? item.first_seen_ts);
-      if (Number.isFinite(published) && now - published > (this.d.maxAgeMs ?? 6 * 3_600_000)) return this.count('skipped_old');
+      // Fail closed on time: the publish time (else first-seen time) must parse and must not lie in the future.
+      const publishedRaw = parseTs(item.source_publish_ts);
+      const published = Number.isFinite(publishedRaw) ? publishedRaw : parseTs(item.first_seen_ts);
+      if (!Number.isFinite(published) || published - now > MAX_FUTURE_SKEW_MS) return this.count('skipped_bad_time');
+      if (now - published > (this.d.maxAgeMs ?? 6 * 3_600_000)) return this.count('skipped_old');
       if (this.seen.has(item.item_id)) return this.count('skipped_seen');
       const context = this.d.engine.contextText();
       if (context === null) return this.count('skipped_no_context');
