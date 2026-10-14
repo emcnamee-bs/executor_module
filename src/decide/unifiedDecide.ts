@@ -131,17 +131,24 @@ export function validateUnified(
     if (!positions.has(id)) throw new Error(`unified decision: no recommendation for position ${id}`);
   }
 
-  const e = obj(p.entry);
-  if ((e.action !== 'buy' && e.action !== 'none') || !text(e.reason)) {
-    throw new Error(`unified decision: invalid entry ${JSON.stringify(p.entry)}`);
+  // When entry is not available the model's entry field is ignored entirely (a blank reason there must not
+  // invalidate the position reviews).
+  let entry: { action: 'buy' | 'none'; reason: string } = { ...NO_ENTRY };
+  if (ctx.entryAllowed) {
+    const e = obj(p.entry);
+    if ((e.action !== 'buy' && e.action !== 'none') || !text(e.reason)) {
+      throw new Error(`unified decision: invalid entry ${JSON.stringify(p.entry)}`);
+    }
+    entry = { action: e.action, reason: e.reason };
   }
-  const entry = ctx.entryAllowed ? { action: e.action as 'buy' | 'none', reason: e.reason as string } : { ...NO_ENTRY };
 
   if (profile.marketStructure === 'multi') {
     const group = profile.outcomeGroup;
     if (group === undefined) throw new Error('unified decision: multi profile has no outcomeGroup');
     if (!text(p.reasoning)) throw new Error('unified decision: reasoning is missing or empty');
     if (!Array.isArray(p.moves)) throw new Error('unified decision: moves is not a list');
+    // Checked once on the whole answer: checkMultiMoves enforces it per call, so the split below could double it.
+    if (p.moves.length > MULTI_MAX_MOVES) throw new Error(`unified decision: at most ${MULTI_MAX_MOVES} moves are allowed, got ${p.moves.length}`);
     const active = new Set(ctx.activeTickers);
     const onActive = p.moves.filter((m) => active.has(String(obj(m).market)));
     const elsewhere = p.moves.filter((m) => !active.has(String(obj(m).market)));
@@ -169,7 +176,7 @@ export function buildUnifiedSystem(loaded: LoadedProfile): string {
   const multi = profile.marketStructure === 'multi';
   const yesPoints = multi || profile.marketStructure === 'binary';
   const assess = multi
-    ? `1. ASSESS the news per market. moves: at most ${MULTI_MAX_MOVES} entries { market, shift, confidence } over the markets listed below (ticker exactly as listed). "shift" is a SIGNED number of percentage points of that market's YES probability the news adds (positive) or removes (negative), beyond what its quoted prices already imply, at most +/-${MULTI_MAX_SHIFT}. "confidence" is 0 to 1: how sure you are the news is real, material and NOT already in the price. Leave out markets the news does not move. Give a brief "reasoning".\n${GROUP_RULE[profile.outcomeGroup ?? 'independent']}`
+    ? `1. ASSESS the news per market. moves: at most ${MULTI_MAX_MOVES} entries { market, shift, confidence } over the markets listed below (ticker exactly as listed). "shift" is a SIGNED number of percentage points of that market's YES probability the news adds (positive) or removes (negative), beyond what its quoted prices already imply, at most +/-${MULTI_MAX_SHIFT}. "confidence" is 0 to 1: how sure you are the news is real, material and NOT already in the price. Leave out markets the news does not move. Give a brief "reasoning".\nThe rule below applies to the markets of the event this news is about (the first list). Markets in the second list (other events where we hold positions), if there is one, are each independent: the rule does not apply to them.\n${GROUP_RULE[profile.outcomeGroup ?? 'independent']}`
     : yesPoints
       ? `1. ASSESS the news. assessment.shift is a SIGNED number of percentage points of the YES probability the news adds (positive) or removes (negative), beyond what the quoted prices already imply, at most +/-${MULTI_MAX_SHIFT}; 0 if already priced in or irrelevant. assessment.confidence is 0 to 1: how sure you are the item is real, material and NOT already in the price. assessment.reason is one sentence.`
       : `1. ASSESS the news. assessment.shift is a SIGNED number in ${profile.magnitudeUnit}: how far the news moves the settlement quantity (positive = higher, negative = lower), beyond what the quoted prices already imply, at most +/-${profile.maxMagnitude} in absolute value; 0 if already priced in or irrelevant. assessment.confidence is 0 to 1: how sure you are the item is real, material and NOT already in the price. assessment.reason is one sentence.`;
@@ -190,7 +197,7 @@ const fmtCents = (v: number | null): string => (v === null ? 'none' : `${v}c`);
 function describePosition(v: UnifiedPositionView): string {
   const trajectory = v.trajectory.map((t) => `${t.minutesAgo} min ago: ${t.markCents === null ? 'unknown' : `${t.markCents}c`}`).join('; ');
   return (
-    `position_id=${v.id}: ${v.side.toUpperCase()} on ${v.marketTicker}${v.label ? ` ("${v.label}")` : ''}; ${v.remaining} of ${v.contracts} contracts, ` +
+    `position_id=${v.id}: ${v.side.toUpperCase()} on ${v.marketTicker}${v.label ? ` ("${v.label}")` : ''}; ${v.remaining} of ${v.contracts} contracts still held, ` +
     `bought at ${v.entryPriceCents}c (${v.side.toUpperCase()} cents); we could sell at ${fmtCents(v.heldBidCents)} now (mid ${fmtCents(v.heldMidCents)}); ` +
     `unrealised ${v.unrealisedCents === null ? 'unknown' : `${v.unrealisedCents}c`} in total; recent held-side value: ${trajectory || 'unknown'}.`
   );
@@ -206,10 +213,16 @@ function marketRows(markets: BandMarket[]): string {
 
 export async function positionAwareDecide(client: Anthropic, db: Database.Database, ctx: UnifiedContext): Promise<UnifiedDecision> {
   const multi = ctx.loaded.profile.marketStructure === 'multi';
+  const activeSet = new Set(ctx.activeTickers);
+  const activeRows = marketRows(ctx.markets.filter((m) => activeSet.has(m.ticker)));
+  const otherRows = marketRows(ctx.markets.filter((m) => !activeSet.has(m.ticker)));
   const lines: string[] = [
     `Evidentiary rung: ${ctx.rung}${ctx.lowTierRelaxed === true ? ' (low-tier relaxed, paper test)' : ''}`,
     `Source trust tier: ${ctx.sourceTrustTier} (1 = most trusted, 5 = least). Published: ${ctx.publishedAt ?? 'unknown'}.`,
-    `Markets (ticker | what it pays | quote):\n${marketRows(ctx.markets)}`,
+    `Markets of the event this news is about (ticker | what it pays | quote):\n${activeRows || 'none (no active event is available for entry)'}`,
+    ...(otherRows
+      ? [`Markets of OTHER events where we hold positions (each judged on its own; the set rule above does not apply to them):\n${otherRows}`]
+      : []),
     ctx.positions.length === 0
       ? 'Positions we hold on this trade: none'
       : `Positions we hold on this trade:\n${ctx.positions.map(describePosition).join('\n')}`,

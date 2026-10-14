@@ -65,6 +65,17 @@ describe('validateUnified (threshold trade)', () => {
     const d = validateUnified(good({ entry: { action: 'buy', reason: 'cheap' } }), base({ entryAllowed: false }));
     expect(d.entry).toEqual({ action: 'none', reason: 'entry is not available for this item' });
   });
+  it('does not validate the entry field at all when entry is not available', () => {
+    const d = validateUnified(good({ entry: { action: 'buy', reason: '' } }), base({ entryAllowed: false }));
+    expect(d.entry).toEqual({ action: 'none', reason: 'entry is not available for this item' });
+    expect(validateUnified(good({ entry: undefined }), base({ entryAllowed: false })).entry.action).toBe('none');
+  });
+  it('rejects a missing or non-object assessment, a string position_id and a positions field that is not a list', () => {
+    expect(() => validateUnified(good({ assessment: undefined }), base())).toThrow(/shift/);
+    expect(() => validateUnified(good({ assessment: 'bearish' }), base())).toThrow(/shift/);
+    expect(() => validateUnified(good({ positions: [{ position_id: '7', action: 'hold', reason: 'x' }] }), base())).toThrow(/not a position we hold/);
+    expect(() => validateUnified(good({ positions: 'none' }), base())).toThrow(/not a list/);
+  });
 });
 
 describe('validateUnified (multi trade)', () => {
@@ -89,6 +100,30 @@ describe('validateUnified (multi trade)', () => {
     expect(() => validateUnified(answer([mv('F-CUT', 20)]), ctx())).toThrow(/net to 20/);
     expect(() => validateUnified(answer([mv('NOPE', 3)]), ctx())).toThrow(/NOPE/);
     expect(() => validateUnified(answer([mv('F-CUT', 3), mv('F-HOLD', -3)], { reasoning: '' }), ctx())).toThrow(/reasoning/);
+  });
+  it('rejects a move with confidence outside 0..1, a shift beyond 100 and a duplicated market', () => {
+    expect(() => validateUnified(answer([mv('F-CUT', 3, 1.5), mv('F-HOLD', -3)]), ctx())).toThrow(/confidence/);
+    expect(() => validateUnified(answer([mv('F-CUT', 101)]), ctx())).toThrow(/shift/);
+    expect(() => validateUnified(answer([mv('F-CUT', 3), mv('F-CUT', -3)]), ctx())).toThrow(/twice/);
+  });
+  it('enforces the move limit on the whole answer, not per event (3 active + 2 elsewhere is rejected)', () => {
+    const a = [mk('A-1', 'One', 29, 31), mk('A-2', 'Two', 29, 31), mk('A-3', 'Three', 29, 31)];
+    const o = [mk('O-1', 'Other 1', 39, 41), mk('O-2', 'Other 2', 39, 41)];
+    const c = ctx({ markets: [...a, ...o], activeTickers: a.map((m) => m.ticker), positions: [] });
+    const five = [mv('A-1', 1), mv('A-2', -1), mv('A-3', 0), mv('O-1', 5), mv('O-2', 5)];
+    expect(() => validateUnified(answer(five, { positions: [] }), c)).toThrow(/at most 4 moves are allowed, got 5/);
+    expect(validateUnified(answer(five.slice(0, 4), { positions: [] }), c).moves).toHaveLength(3);
+  });
+  it('still validates moves when entry is not available, and forces entry to none', () => {
+    const d = validateUnified(answer([mv('F-CUT', 8), mv('F-HOLD', -8)]), ctx({ entryAllowed: false }));
+    expect(d.entry).toEqual({ action: 'none', reason: 'entry is not available for this item' });
+    expect(d.moves).toHaveLength(2);
+    expect(() => validateUnified(answer([mv('F-CUT', 20)]), ctx({ entryAllowed: false }))).toThrow(/net to 20/);
+  });
+  it('accepts an answer with no active event, only a held market of another event', () => {
+    const c = ctx({ markets: [old], activeTickers: [] });
+    expect(validateUnified(answer([]), c).moves).toEqual([]);
+    expect(validateUnified(answer([mv('OLD-X', -15)]), c).moves.map((m) => m.market)).toEqual(['OLD-X']);
   });
 });
 
@@ -123,7 +158,7 @@ describe('positionAwareDecide', () => {
     await positionAwareDecide(clientReturning(good()), db, base());
     const user: string = calls[0].messages[0].content;
     expect(user).toMatch(/position_id=7: YES on T-94/);
-    expect(user).toMatch(/4 of 4 contracts, bought at 50c/);
+    expect(user).toMatch(/4 of 4 contracts still held, bought at 50c/);
     expect(user).toMatch(/5 min ago: 50c; 15 min ago: 55c/);
     expect(user).toMatch(/T-94 \|/);
     expect(user).toMatch(/Entry is available: yes/);
@@ -137,6 +172,39 @@ describe('positionAwareDecide', () => {
     const user: string = calls[0].messages[0].content;
     expect(user).toMatch(/Positions we hold on this trade: none/);
     expect(user).toMatch(/Entry is available: no/);
+  });
+
+  it('splits the markets into the active event and other held events, and ties the multi rule to the first list', async () => {
+    const mk = (ticker: string, label: string): BandMarket => ({
+      ticker, label, floorStrike: null, capStrike: null, strikeType: 'custom', status: 'active', yesBidCents: 29, yesAskCents: 31, yesAskSizeContracts: 50, yesBidSizeContracts: 50,
+    });
+    const ctx = base({
+      loaded: fed, markets: [mk('F-CUT', 'Cut'), mk('OLD-X', 'Old market')], activeTickers: ['F-CUT'],
+      positions: [view(3, { marketTicker: 'OLD-X', label: 'Old market' })],
+    });
+    const answer = { moves: [], reasoning: 'nothing', positions: [{ position_id: 3, action: 'hold', reason: 'unaffected' }], entry: { action: 'none', reason: 'no edge' } };
+    await positionAwareDecide(clientReturning(answer), db, ctx);
+    const user: string = calls[0].messages[0].content;
+    const first = user.indexOf('Markets of the event this news is about');
+    const second = user.indexOf('Markets of OTHER events where we hold positions');
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+    expect(user.slice(first, second)).toMatch(/F-CUT \|/);
+    expect(user.slice(first, second)).not.toMatch(/OLD-X/);
+    expect(user.slice(second)).toMatch(/OLD-X \| "Old market"/);
+    expect(calls[0].system).toMatch(/applies to the markets of the event this news is about \(the first list\)/);
+    expect(calls[0].system).toMatch(/second list.*independent/s);
+  });
+
+  it('prints only the first block when no other-event markets exist, and says so when there is no active event', async () => {
+    await positionAwareDecide(clientReturning(good()), db, base());
+    expect(calls[0].messages[0].content).toMatch(/Markets of the event this news is about/);
+    expect(calls[0].messages[0].content).not.toMatch(/OTHER events/);
+    const held = thresholdBands(1)[0]!;
+    await positionAwareDecide(clientReturning(good()), db, base({ markets: [held], activeTickers: [], positions: [view(7, { marketTicker: held.ticker })] }));
+    const user: string = calls[1].messages[0].content;
+    expect(user).toMatch(/none \(no active event is available for entry\)/);
+    expect(user).toMatch(/Markets of OTHER events where we hold positions/);
   });
 
   it('an invalid answer throws and is logged as invalid', async () => {
