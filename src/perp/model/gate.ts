@@ -1,7 +1,7 @@
 // src/perp/model/gate.ts
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
-import { wrapUntrusted } from '../../guard/untrusted.js';
+import { sanitizeNote, wrapUntrusted } from '../../guard/untrusted.js';
 import type { Item } from '../../item.js';
 import { callJson, type CallJsonArgs } from './callJson.js';
 
@@ -34,7 +34,7 @@ const GATE_SYSTEM =
 
 export async function runPerpGate(deps: ModelDeps, item: Item): Promise<{ relevant: boolean; reason: string }> {
   const text = `${item.headline}${item.snippet ? `\n${item.snippet}` : ''}`;
-  const user = `Source: ${item.source_id} (trust tier ${item.trust_tier})\n${wrapUntrusted(text, 1200)}`;
+  const user = `Source: ${sanitizeNote(item.source_id, 60)} (trust tier ${item.trust_tier})\n${wrapUntrusted(text, 1200)}`;
   return callJson({
     client: deps.client,
     db: deps.db,

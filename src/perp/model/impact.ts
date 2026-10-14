@@ -1,6 +1,6 @@
 // src/perp/model/impact.ts
 import { z } from 'zod';
-import { wrapUntrusted } from '../../guard/untrusted.js';
+import { sanitizeNote, wrapUntrusted } from '../../guard/untrusted.js';
 import type { Item } from '../../item.js';
 import type { ImpactAssessment } from '../types.js';
 import { callJson } from './callJson.js';
@@ -61,7 +61,7 @@ export async function extractImpact(deps: ModelDeps, item: Item, contextText: st
   const text = `${item.headline}${item.snippet ? `\n${item.snippet}` : ''}`;
   const user =
     `Market context (computed by code):\n${contextText}\n\n` +
-    `Source: ${item.source_id} (trust tier ${item.trust_tier})\n${wrapUntrusted(text, 1800)}`;
+    `Source: ${sanitizeNote(item.source_id, 60)} (trust tier ${item.trust_tier})\n${wrapUntrusted(text, 1800)}`;
   const out = await callJson({
     client: deps.client,
     db: deps.db,
