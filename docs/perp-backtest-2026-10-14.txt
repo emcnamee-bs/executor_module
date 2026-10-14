@@ -1,4 +1,13 @@
-bars=2511 from 2016-10-14 to 2026-10-12; enter every 5 bars, hold <= 5 bars
-LONG {"trades":502,"stopOutOrLiquidatedPct":5.4,"avgMarginReturnPct":0.92,"worstMarginReturnPct":-35.5,"touched3pctDrawdownPct":8.8,"weeksWith5pctAdverseMovePct":2.6}
-SHORT {"trades":502,"stopOutOrLiquidatedPct":4.4,"avgMarginReturnPct":-1.07,"worstMarginReturnPct":-22.7,"touched3pctDrawdownPct":8.8,"weeksWith5pctAdverseMovePct":2.6}
-NOTE: close-to-close, price rules only (stops, governor, 3% drawdown frequency). The news rules cannot be backtested on this data.
+# npm run perp-backtest -- --years 15 --every 5 --hold 5   (run 2026-10-14)
+command: years=15 every=5 hold=5
+window: bars=2511 from 2016-10-14 to 2026-10-12; enter every 5 bars, hold <= 5 bars
+WARNING: the requested 15 years of history (from 2011-10-14) is not available from FRED SP500 (it covers only about the last 10 years); the window above is shorter than requested.
+LONG {"trades":502,"stopOutOrLiquidatedPct":5.4,"avgMarginReturnPct":0.92,"worstMarginReturnPct":-35.5,"touchedMinus3pctFromEntryByExitPct":8.8,"indexMoveAtExitAdverse5pctPct":2.6}
+SHORT {"trades":502,"stopOutOrLiquidatedPct":4.4,"avgMarginReturnPct":-1.07,"worstMarginReturnPct":-22.7,"touchedMinus3pctFromEntryByExitPct":8.8,"indexMoveAtExitAdverse5pctPct":2.6}
+NOTE: close-to-close, price rules only (stops, governor, 3% touch frequency); the news rules cannot be backtested on this data.
+Intraday wicks are ignored, so stop-out and liquidation frequencies are UNDERSTATED while exits are modelled at the close (gaps hurt).
+Funding and slippage are not modelled.
+touchedMinus3pctFromEntryByExitPct: share of trades whose worst close was 3% or more against the ENTRY price (not a drawdown from the peak), up to the exit bar.
+indexMoveAtExitAdverse5pctPct: share of trades whose index move AT THE EXIT BAR was 5% or more against the side.
+Both rate columns are measured from entry / at the exit bar and are truncated by the stops; they are not market-wide frequencies.
+Average margin return is dominated by index drift (positive long, negative short), not by edge.
