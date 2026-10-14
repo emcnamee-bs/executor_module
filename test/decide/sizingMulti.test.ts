@@ -1,6 +1,7 @@
 // test/decide/sizingMulti.test.ts
 import { describe, it, expect } from 'vitest';
-import { evaluateMultiSizing } from '../../src/decide/sizing.js';
+import { evaluateMultiSizing, MAX_NOTIONAL_CENTS_PER_TRADE } from '../../src/decide/sizing.js';
+import { MAX_TOTAL_EXPOSURE_CENTS } from '../../src/decide/ledger.js';
 import type { BandMarket } from '../../src/decide/kalshi.js';
 import { PAPER_CAPS } from '../../src/paper/paper.js';
 
@@ -55,11 +56,53 @@ describe('evaluateMultiSizing', () => {
 
   it('sizes the second leg against what the first one left of the exposure cap', () => {
     const markets = [mk('A', 39, 41), mk('B', 39, 41)];
-    const caps = { perTradeCents: 1000, totalExposureCents: 1100 };
-    const r = evaluateMultiSizing({ ...base, caps, maxLegs: 2, markets, moves: [mv('A', 20), mv('B', 15)] });
-    const total = r.legs.reduce((t, l) => t + l.notionalCents, 0);
-    expect(total).toBeLessThanOrEqual(1100);
-    expect(r.legs[0].notionalCents).toBeLessThanOrEqual(1000);
+    // Leg 1 (A, 7 contracts, 287c) leaves 113c; leg 2 (B) wants 5 contracts (205c) unconstrained but is cut to 2 (82c).
+    const caps = { perTradeCents: 1000, totalExposureCents: 400 };
+    const moves = [mv('A', 20), mv('B', 15)];
+    const r = evaluateMultiSizing({ ...base, caps, maxLegs: 2, markets, moves });
+    expect(r.legs.map((l) => l.marketTicker)).toEqual(['A', 'B']);
+    expect(r.legs[0].notionalCents).toBeLessThanOrEqual(400);
+    expect(r.legs[1].notionalCents).toBeLessThanOrEqual(400 - r.legs[0].notionalCents);
+    const alone = evaluateMultiSizing({ ...base, caps, maxLegs: 1, markets, moves: [mv('B', 15)] });
+    expect(r.legs[1].contracts).toBeLessThan(alone.legs[0].contracts);
+  });
+
+  it('clamps a confidence above 1 so it sizes exactly like 1', () => {
+    const markets = [mk('A', 39, 41)];
+    const one = evaluateMultiSizing({ ...base, markets, moves: [mv('A', 10, 1)] }).legs[0];
+    const over = evaluateMultiSizing({ ...base, markets, moves: [mv('A', 10, 1.5)] }).legs[0];
+    expect(over.contracts).toBe(one.contracts);
+    expect(over.confidence).toBe(1);
+  });
+
+  it('yields no leg for a NaN or negative confidence', () => {
+    const markets = [mk('A', 39, 41)];
+    expect(evaluateMultiSizing({ ...base, markets, moves: [mv('A', 10, NaN)] }).legs).toHaveLength(0);
+    expect(evaluateMultiSizing({ ...base, markets, moves: [mv('A', 10, -1)] }).legs).toHaveLength(0);
+  });
+
+  it('skips a non-finite shift with a reason', () => {
+    const markets = [mk('A', 39, 41)];
+    for (const shift of [NaN, Infinity, -Infinity]) {
+      const r = evaluateMultiSizing({ ...base, markets, moves: [mv('A', shift)] });
+      expect(r.legs).toHaveLength(0);
+      expect(r.reasons).toEqual(['A: shift is not a finite number']);
+    }
+  });
+
+  it('never puts two legs on the same market', () => {
+    const r = evaluateMultiSizing({ ...base, maxLegs: 2, markets: [mk('A', 39, 41)], moves: [mv('A', 10), mv('A', 8)] });
+    expect(r.legs).toHaveLength(1);
+    expect(r.legs[0]).toMatchObject({ marketTicker: 'A', shift: 10 });
+    expect(r.reasons.join(' ')).toMatch(/A: already has a leg from this item/);
+  });
+
+  it('keeps every leg within the live per-trade cap when caps is omitted', () => {
+    const markets = [mk('A', 19, 21), mk('B', 19, 21)];
+    const r = evaluateMultiSizing({ ...base, caps: undefined, maxLegs: 2, markets, moves: [mv('A', 30), mv('B', 30)] });
+    expect(r.legs.length).toBeGreaterThan(0);
+    for (const l of r.legs) expect(l.notionalCents).toBeLessThanOrEqual(MAX_NOTIONAL_CENTS_PER_TRADE);
+    expect(r.legs.reduce((t, l) => t + l.notionalCents, 0)).toBeLessThanOrEqual(MAX_TOTAL_EXPOSURE_CENTS);
   });
 
   it('counts exposure already on the event', () => {

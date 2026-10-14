@@ -556,6 +556,8 @@ export function evaluateMultiSizing(input: {
   const candidates: Array<{ cand: BandCandidate; kelly: number; shift: number; confidence: number; fairYesCents: number }> = [];
 
   for (const move of input.moves) {
+    if (!Number.isFinite(move.shift)) { reasons.push(`${move.market}: shift is not a finite number`); continue; }
+    const confidence = Number.isFinite(move.confidence) ? Math.min(1, Math.max(0, move.confidence)) : 0;
     const m = input.markets.find((x) => x.ticker === move.market);
     if (m === undefined) { reasons.push(`${move.market}: not among the event's open markets`); continue; }
     if (m.status !== 'active') { reasons.push(`${m.ticker}: market is ${m.status}, not active`); continue; }
@@ -580,7 +582,7 @@ export function evaluateMultiSizing(input: {
     if (!verdict.ok) { reasons.push(`${m.ticker}: ${verdict.reason}`); continue; }
     const kelly = kellyFraction(cand.fairPriceCents, cand.askCents);
     if (kelly <= 0) { reasons.push(`${m.ticker}: zero Kelly fraction`); continue; }
-    candidates.push({ cand, kelly, shift: move.shift, confidence: move.confidence, fairYesCents });
+    candidates.push({ cand, kelly, shift: move.shift, confidence, fairYesCents });
   }
 
   candidates.sort((a, b) => b.cand.edgeCents - a.cand.edgeCents || a.cand.ticker.localeCompare(b.cand.ticker));
@@ -590,6 +592,7 @@ export function evaluateMultiSizing(input: {
   const legs: MultiLeg[] = [];
   for (const c of candidates) {
     if (legs.length >= input.maxLegs) break;
+    if (legs.some((l) => l.marketTicker === c.cand.ticker)) { reasons.push(`${c.cand.ticker}: already has a leg from this item`); continue; }
     const remainingExposureCents = totalCap - exposure;
     if (remainingExposureCents <= 0) {
       reasons.push(`total exposure cap reached (${exposure}c of ${totalCap}c)`);
@@ -603,7 +606,7 @@ export function evaluateMultiSizing(input: {
       remainingExposureCents,
       perTradeCents: input.caps?.perTradeCents,
     });
-    if (contracts <= 0) { reasons.push(`${c.cand.ticker}: sized to zero contracts after Kelly/stake/depth/exposure clamps`); continue; }
+    if (!(contracts > 0)) { reasons.push(`${c.cand.ticker}: sized to zero contracts after Kelly/stake/depth/exposure clamps`); continue; }
     const notionalCents = contracts * c.cand.askCents;
     exposure += notionalCents;
     legs.push({
