@@ -13,6 +13,12 @@
     "clear-breaker": "tsx scripts/clear-breaker.ts",
     "score-paper": "tsx scripts/score-paper.ts",
     "backtest-exit": "tsx scripts/backtest-exit.ts",
+    "perp-verify": "tsx scripts/perp-verify.ts",
+    "perp-backtest": "tsx scripts/perp-backtest.ts",
+    "perp-bot": "tsx src/perp/main.ts",
+    "perp-report": "tsx scripts/perp-report.ts",
+    "perp-clear-halt": "tsx scripts/perp-clear-halt.ts",
+    "perp-paper-fund": "tsx scripts/perp-paper-fund.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
