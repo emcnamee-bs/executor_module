@@ -1,0 +1,4 @@
+bars=2511 from 2016-10-14 to 2026-10-12; enter every 5 bars, hold <= 5 bars
+LONG {"trades":502,"stopOutOrLiquidatedPct":5.4,"avgMarginReturnPct":0.92,"worstMarginReturnPct":-35.5,"touched3pctDrawdownPct":8.8,"weeksWith5pctAdverseMovePct":2.6}
+SHORT {"trades":502,"stopOutOrLiquidatedPct":4.4,"avgMarginReturnPct":-1.07,"worstMarginReturnPct":-22.7,"touched3pctDrawdownPct":8.8,"weeksWith5pctAdverseMovePct":2.6}
+NOTE: close-to-close, price rules only (stops, governor, 3% drawdown frequency). The news rules cannot be backtested on this data.
