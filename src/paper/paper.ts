@@ -15,6 +15,10 @@ export interface PaperPositionRecord {
   edgeCents: number | null;
   reasoning: string | null;
   ladderJson: string;
+  /** The news item that opened this position; set by recordPaperLegs (NULL on older rows). */
+  sourceItemId?: string | null;
+  /** 1, or 2 for the second market bought on an exclusive set (NULL on older rows). */
+  leg?: 1 | 2 | null;
 }
 
 /**
@@ -28,17 +32,48 @@ export function recordPaperPosition(db: Database.Database, rec: PaperPositionRec
     .prepare(
       `INSERT INTO paper_positions
         (trade, item_id, structure, event_ticker, market_ticker, side, contracts,
-         entry_price_cents, direction, magnitude, edge_cents, reasoning, ladder_json)
+         entry_price_cents, direction, magnitude, edge_cents, reasoning, ladder_json, source_item_id, leg)
        VALUES
         (@trade, @itemId, @structure, @eventTicker, @marketTicker, @side, @contracts,
-         @entryPriceCents, @direction, @magnitude, @edgeCents, @reasoning, @ladderJson)`
+         @entryPriceCents, @direction, @magnitude, @edgeCents, @reasoning, @ladderJson, @sourceItemId, @leg)`
     )
-    .run(rec);
+    .run({ ...rec, sourceItemId: rec.sourceItemId ?? null, leg: rec.leg ?? null });
   return Number(info.lastInsertRowid);
 }
 
+export const SECOND_LEG_SUFFIX = '#2';
+
+export function secondLegItemId(itemId: string): string {
+  return `${itemId}${SECOND_LEG_SUFFIX}`;
+}
+
+/** True when this delivery already opened a position: either leg counts. */
 export function hasPaperPosition(db: Database.Database, itemId: string): boolean {
-  return db.prepare(`SELECT 1 FROM paper_positions WHERE item_id = ?`).get(itemId) !== undefined;
+  return db.prepare(`SELECT 1 FROM paper_positions WHERE item_id IN (?, ?)`).get(itemId, secondLegItemId(itemId)) !== undefined;
+}
+
+/**
+ * Records the one or two legs a news item opens, atomically and idempotently. Leg 1 keeps the item's
+ * own id; leg 2 is stored as `<item>#2` because item_id is UNIQUE (that is what makes a redelivered
+ * stream entry harmless). Both rows carry the pairing in source_item_id / leg. Returns the new row
+ * ids, or [] when this item already has a paper row.
+ */
+export function recordPaperLegs(db: Database.Database, sourceItemId: string, legs: PaperPositionRecord[]): number[] {
+  if (legs.length < 1 || legs.length > 2) throw new Error(`a news item opens one or two paper legs, got ${legs.length}`);
+  if (legs.length === 2 && legs[0].marketTicker === legs[1].marketTicker) {
+    throw new Error('the two legs of one item must be on different markets');
+  }
+  return db.transaction((): number[] => {
+    if (hasPaperPosition(db, sourceItemId)) return [];
+    return legs.map((l, i) =>
+      recordPaperPosition(db, {
+        ...l,
+        itemId: i === 0 ? sourceItemId : secondLegItemId(sourceItemId),
+        sourceItemId,
+        leg: (i + 1) as 1 | 2,
+      })
+    );
+  })();
 }
 
 /**

@@ -232,6 +232,8 @@ CREATE TABLE IF NOT EXISTS paper_positions (
   ladder_json TEXT NOT NULL,         -- every market in the event with strike type, strikes, bid/ask at decision time
   settled_at TEXT, result TEXT CHECK (result IN ('yes','no') OR result IS NULL),
   pnl_cents INTEGER,                 -- GROSS of fees, per project convention
+  source_item_id TEXT,               -- the news item that opened this position (NULL on rows from before two-leg entries)
+  leg INTEGER CHECK (leg IS NULL OR leg IN (1, 2)),
   CHECK (side IS NULL OR (market_ticker IS NOT NULL AND contracts > 0 AND entry_price_cents IS NOT NULL))
 );
 
@@ -322,6 +324,22 @@ function migrateDecisionsRealizedPnlCents(db: Database.Database): void {
 }
 
 /**
+ * Two-leg entries (multi-market spec, section 3.4): `CREATE TABLE IF NOT EXISTS` is a no-op against an
+ * existing paper_positions table, so a ledger written before this change gets the two columns by
+ * ADD COLUMN. Nullable with no default: NULL is exactly right for every pre-existing row.
+ */
+function migratePaperPositionsLegs(db: Database.Database): void {
+  const columns = db.prepare(`PRAGMA table_info(paper_positions)`).all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'source_item_id')) {
+    db.exec(`ALTER TABLE paper_positions ADD COLUMN source_item_id TEXT`);
+  }
+  if (!columns.some((c) => c.name === 'leg')) {
+    db.exec(`ALTER TABLE paper_positions ADD COLUMN leg INTEGER CHECK (leg IS NULL OR leg IN (1, 2))`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_paper_positions_source ON paper_positions(source_item_id)`);
+}
+
+/**
  * `circuit_breaker_trips`'s `signal` CHECK constraint is fixed at table-creation
  * time and SQLite cannot ALTER a CHECK constraint -- unlike migrateDecisionsSettledAt
  * and migrateDecisionsRealizedPnlCents above (plain ADD COLUMN), adding a new
@@ -379,6 +397,7 @@ export function openLedger(dbPath: string): Database.Database {
   db.exec(SCHEMA);
   migrateDecisionsSettledAt(db);
   migrateDecisionsRealizedPnlCents(db);
+  migratePaperPositionsLegs(db);
   migrateCircuitBreakerTripsSignal(db);
   return db;
 }
