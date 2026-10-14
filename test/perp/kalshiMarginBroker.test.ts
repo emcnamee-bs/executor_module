@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   KalshiMarginBroker, OrderNotFilledError, StopNotSetError, type KalshiMarginBrokerConfig,
 } from '../../src/perp/broker/kalshiMarginBroker.js';
+import { MarginApiError } from '../../src/perp/broker/kalshiMarginClient.js';
 
 type Handler = (query?: Record<string, unknown>, body?: unknown) => unknown;
 interface Recorded { method: string; path: string; query?: Record<string, unknown>; body?: unknown }
@@ -27,9 +28,9 @@ const longPosition = { positions: [{ subaccount: 3, market_ticker: T, position: 
 const risk = { total_position_notional: '13.76', total_maintenance_margin: '0.69', positions: [{ subaccount: 3, market_ticker: T, position: '1.00', mark_price: '13.7500', position_notional: '13.75', estimated_liquidation_price: '10.8000', is_portfolio: false }] };
 const filled = (price: string, fee = '0.0010') => ({ order_id: 'o1', fill_count: '1.00', remaining_count: '0.00', average_fill_price: price, average_fee_paid: fee });
 
-function mk(handlers: Record<string, Handler>, over: Partial<KalshiMarginBrokerConfig> = {}) {
+function mk(handlers: Record<string, Handler>, over: Partial<KalshiMarginBrokerConfig> = {}, opts: { maxPollAttempts?: number } = {}) {
   const f = fakeClient(handlers);
-  const broker = new KalshiMarginBroker(f.client, { ...cfg, ...over }, { now: () => 5000, newOrderId: () => 'cid-1' });
+  const broker = new KalshiMarginBroker(f.client, { ...cfg, ...over }, { now: () => 5000, newOrderId: () => 'cid-1', delay: async () => {}, ...opts });
   return { broker, calls: f.calls };
 }
 
@@ -224,5 +225,322 @@ describe('poll (review focus 3)', () => {
     const broker = await opened(undefined);
     expect((await broker.poll())[0]).toMatchObject({ kind: 'closed_externally', side: 'long' });
     expect(await broker.poll()).toEqual([]);
+  });
+});
+
+const TRIG = `PUT /margin/isolated/positions/${T}/exit_trigger`;
+const posReads = (calls: Recorded[]) => calls.filter((c) => c.method === 'GET' && c.path === '/margin/positions').length;
+const finiteNumbers = (o: object) => Object.values(o).every((v) => typeof v !== 'number' || Number.isFinite(v));
+
+describe('open: unknown order outcome (R10)', () => {
+  const base = (extra: Record<string, Handler> = {}) => ({
+    [`GET /margin/markets/${T}`]: () => market,
+    [TRIG]: () => ({ id: 't1', status: 'active' }),
+    ...extra,
+  });
+  // first positions read = the pre-open check (flat); later reads see the long position
+  const flatThenLong = () => { let n = 0; return () => (n++ === 0 ? noPos : longPosition); };
+
+  it('a POST timeout with a position on the exchange is treated as filled: stop is set, result built from the position', async () => {
+    const { broker, calls } = mk(base({
+      'POST /margin/orders': () => { throw new Error('timeout'); },
+      'GET /margin/positions': flatThenLong(),
+      'GET /margin/risk': () => risk,
+    }));
+    const fill = await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    expect(calls.some((c) => c.method === 'PUT')).toBe(true);
+    expect(fill).toEqual({ side: 'long', contracts: 1, price: 13.76, feeUsd: 0.001, tsMs: 5000 });
+  });
+
+  it('a POST failure with no position ever appearing throws OrderNotFilledError(positionMayBeOpen false)', async () => {
+    const { broker, calls } = mk(base({
+      'POST /margin/orders': () => { throw new Error('timeout'); },
+      'GET /margin/positions': () => noPos,
+    }));
+    const e = await broker.open({ side: 'long', contracts: 1, stopBps: 388 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(OrderNotFilledError);
+    expect((e as OrderNotFilledError).positionMayBeOpen).toBe(false);
+    expect(posReads(calls)).toBe(1 + 3);
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  it('a POST failure whose position reads also fail reports positionMayBeOpen true', async () => {
+    let n = 0;
+    const { broker } = mk(base({
+      'POST /margin/orders': () => { throw new Error('timeout'); },
+      'GET /margin/positions': () => { if (n++ === 0) return noPos; throw new Error('down'); },
+    }));
+    const e = await broker.open({ side: 'long', contracts: 1, stopBps: 388 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(OrderNotFilledError);
+    expect((e as OrderNotFilledError).positionMayBeOpen).toBe(true);
+  });
+
+  it.each([400, 409])('a definitive %i rejection is rethrown as-is and positions are not re-read', async (status) => {
+    const rejection = new MarginApiError('rejected', status, 'x', null);
+    const { broker, calls } = mk(base({
+      'POST /margin/orders': () => { throw rejection; },
+      'GET /margin/positions': () => noPos,
+    }));
+    await expect(broker.open({ side: 'long', contracts: 1, stopBps: 388 })).rejects.toBe(rejection);
+    expect(posReads(calls)).toBe(1);
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  it('a 500 MarginApiError is an unknown outcome: the position is re-read and protected', async () => {
+    const { broker, calls } = mk(base({
+      'POST /margin/orders': () => { throw new MarginApiError('boom', 500, 'x', null); },
+      'GET /margin/positions': flatThenLong(),
+      'GET /margin/risk': () => risk,
+    }));
+    await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    expect(calls.some((c) => c.method === 'PUT')).toBe(true);
+  });
+
+  it('an unknown outcome whose stop is rejected flattens and throws StopNotSetError', async () => {
+    let n = 0;
+    const { broker, calls } = mk(base({
+      'POST /margin/orders': () => { if (n++ === 0) throw new Error('timeout'); return filled('13.4000'); },
+      [TRIG]: () => { throw new Error('409 conflict'); },
+      'GET /margin/positions': flatThenLong(),
+      'GET /margin/risk': () => risk,
+      [`DELETE /margin/isolated/positions/${T}/exit_trigger`]: () => null,
+    }));
+    const e = await broker.open({ side: 'long', contracts: 1, stopBps: 388 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(StopNotSetError);
+    expect((e as StopNotSetError).positionMayBeOpen).toBe(false);
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2);
+  });
+
+  it("an unparseable fill_count with a position present is protected, not reported as 'no fill'", async () => {
+    const { broker, calls } = mk(base({
+      'POST /margin/orders': () => ({ order_id: 'o1', fill_count: 'garbage' }),
+      'GET /margin/positions': flatThenLong(),
+      'GET /margin/risk': () => risk,
+    }));
+    const fill = await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    expect(calls.some((c) => c.method === 'PUT')).toBe(true);
+    expect(fill.contracts).toBe(1);
+  });
+
+  it('a NaN average price and fee fall back to the position entry price and fees; nothing is NaN', async () => {
+    const { broker } = mk(base({
+      'POST /margin/orders': () => ({ order_id: 'o1', fill_count: '1.00', remaining_count: '0.00' }),
+      'GET /margin/positions': flatThenLong(),
+      'GET /margin/risk': () => risk,
+    }));
+    const fill = await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    expect(fill.price).toBe(13.76);
+    expect(fill.feeUsd).toBe(0.001);
+    expect(finiteNumbers(fill)).toBe(true);
+  });
+});
+
+describe('close: unknown order outcome and flatten failures (R10)', () => {
+  const closeBase = (extra: Record<string, Handler> = {}) => ({
+    [`GET /margin/markets/${T}`]: () => market,
+    [`DELETE /margin/isolated/positions/${T}/exit_trigger`]: () => null,
+    ...extra,
+  });
+
+  it('a close POST failure with the position gone is a close at a position-derived price, no NaN', async () => {
+    let n = 0;
+    const { broker } = mk(closeBase({
+      'POST /margin/orders': () => { throw new Error('timeout'); },
+      'GET /margin/positions': () => (n++ === 0 ? longPosition : noPos),
+      'GET /margin/risk': () => risk,
+    }));
+    const r = await broker.close();
+    expect(r.price).toBe(13.75);
+    expect(finiteNumbers(r)).toBe(true);
+  });
+
+  it('a close POST failure with the position still there throws positionMayBeOpen true', async () => {
+    const { broker } = mk(closeBase({
+      'POST /margin/orders': () => { throw new Error('timeout'); },
+      'GET /margin/positions': () => longPosition,
+      'GET /margin/risk': () => risk,
+    }));
+    const e = await broker.close().catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(OrderNotFilledError);
+    expect((e as OrderNotFilledError).positionMayBeOpen).toBe(true);
+  });
+
+  it('a NaN close fill price is never reported: it falls back to a position-derived price', async () => {
+    const { broker } = mk(closeBase({
+      'GET /margin/positions': () => longPosition,
+      'GET /margin/risk': () => risk,
+      'POST /margin/orders': () => ({ order_id: 'o1', fill_count: '1.00', remaining_count: '0.00' }),
+    }));
+    const r = await broker.close();
+    expect(finiteNumbers(r)).toBe(true);
+  });
+
+  it('closeBestEffort retries: a lagging positions endpoint does not fail the flatten', async () => {
+    let posN = 0;
+    let orders = 0;
+    const { broker } = mk({
+      [`GET /margin/markets/${T}`]: () => market,
+      [TRIG]: () => { throw new Error('409 conflict'); },
+      'POST /margin/orders': () => { orders++; return filled(orders === 1 ? '13.7580' : '13.4000'); },
+      // reads: 1 pre-open (flat), 2 first close attempt (still lagging, flat), 3 second attempt sees it
+      'GET /margin/positions': () => (posN++ < 2 ? noPos : longPosition),
+      'GET /margin/risk': () => risk,
+      [`DELETE /margin/isolated/positions/${T}/exit_trigger`]: () => null,
+    });
+    const e = await broker.open({ side: 'long', contracts: 1, stopBps: 388 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(StopNotSetError);
+    expect((e as StopNotSetError).positionMayBeOpen).toBe(false);
+    expect(orders).toBe(2);
+  });
+
+  it('stop rejected AND every close attempt fails: positionMayBeOpen true, and poll() later reports how the naked position ended', async () => {
+    let pos: unknown = noPos;
+    let posN = 0;
+    let orderN = 0;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { broker } = mk({
+        [`GET /margin/markets/${T}`]: () => market,
+        [TRIG]: () => { throw new Error('409 conflict'); },
+        'POST /margin/orders': () => { if (orderN++ === 0) return filled('13.7580'); throw new Error('500 down'); },
+        'GET /margin/positions': () => (posN++ === 0 ? noPos : pos),
+        'GET /margin/risk': () => risk,
+        'GET /margin/fills': () => ({
+          fills: [
+            { fill_id: 'f1', order_id: 'o1', side: 'bid', count: '1.00', created_time: '2026-10-14T15:00:00Z', ticker: T, price: '13.7600', fees: '0.0010', realized_pnl: '0.0000' },
+            { fill_id: 'f2', order_id: 'o9', side: 'ask', count: '1.00', created_time: '2026-10-14T16:00:00Z', ticker: T, price: '10.0000', fees: '0.0010', realized_pnl: '-3.7600' },
+          ],
+        }),
+        'GET /margin/orders/o9': () => ({ order: { order_source: 'system', order_reason: 'liquidation' } }),
+      });
+      pos = longPosition;
+      const e = await broker.open({ side: 'long', contracts: 1, stopBps: 388 }).catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(StopNotSetError);
+      expect((e as StopNotSetError).positionMayBeOpen).toBe(true);
+      expect((e as Error).message).toMatch(/CLOSE FAILED/);
+      pos = noPos;
+      const events = await broker.poll();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ kind: 'liquidated', side: 'long' });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe('poll: retry until classified (R11)', () => {
+  const closingFills = {
+    fills: [
+      { fill_id: 'f1', order_id: 'o1', side: 'bid', count: '1.00', created_time: '2026-10-14T15:00:00Z', ticker: T, price: '13.7600', fees: '0.0010', realized_pnl: '0.0000' },
+      { fill_id: 'f2', order_id: 'o2', side: 'ask', count: '1.00', created_time: '2026-10-14T16:00:00Z', ticker: T, price: '13.2000', fees: '0.0010', realized_pnl: '-0.5600' },
+    ],
+  };
+  const openedFills = { fills: [closingFills.fills[0]] };
+  const liquidationOrder = () => ({ order: { order_source: 'system', order_reason: 'liquidation' } });
+  async function setup(h: { fills: Handler; order?: Handler }, maxPollAttempts?: number) {
+    const { broker } = mk({
+      'GET /margin/positions': () => noPos,
+      [`GET /margin/markets/${T}`]: () => market,
+      'POST /margin/orders': () => filled('13.7580'),
+      [TRIG]: () => ({}),
+      'GET /margin/fills': h.fills,
+      'GET /margin/orders/o2': h.order ?? liquidationOrder,
+    }, {}, { maxPollAttempts });
+    await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    return broker;
+  }
+
+  it('a failed fills fetch returns [] and keeps expected; the next poll emits exactly one event', async () => {
+    let n = 0;
+    const broker = await setup({ fills: () => { if (n++ === 0) throw new Error('net'); return closingFills; } });
+    expect(await broker.poll()).toEqual([]);
+    const events = await broker.poll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'liquidated' });
+    expect(await broker.poll()).toEqual([]);
+  });
+
+  it('no closing fills yet returns [], then the event appears once the fills do', async () => {
+    let n = 0;
+    const broker = await setup({ fills: () => (n++ === 0 ? openedFills : closingFills) });
+    expect(await broker.poll()).toEqual([]);
+    expect((await broker.poll())[0]).toMatchObject({ kind: 'liquidated' });
+  });
+
+  it('fills that never appear fall back to closed_externally after maxPollAttempts', async () => {
+    const broker = await setup({ fills: () => openedFills }, 3);
+    expect(await broker.poll()).toEqual([]);
+    expect(await broker.poll()).toEqual([]);
+    expect(await broker.poll()).toEqual([{ kind: 'closed_externally', side: 'long', pnlUsd: null }]);
+    expect(await broker.poll()).toEqual([]);
+  });
+
+  it('a failed order lookup retries and is then classified, not reported as closed_externally', async () => {
+    let n = 0;
+    const broker = await setup({ fills: () => closingFills, order: () => { if (n++ === 0) throw new Error('404'); return liquidationOrder(); } });
+    expect(await broker.poll()).toEqual([]);
+    expect((await broker.poll())[0]).toMatchObject({ kind: 'liquidated', rule: 'liquidated' });
+  });
+
+  it('an order lookup that keeps failing falls back to closed_externally with the pnl from the fills', async () => {
+    const broker = await setup({ fills: () => closingFills, order: () => { throw new Error('404'); } }, 2);
+    expect(await broker.poll()).toEqual([]);
+    const ev = (await broker.poll())[0] as { kind: string; pnlUsd: number };
+    expect(ev.kind).toBe('closed_externally');
+    expect(ev.pnlUsd).toBeCloseTo(-0.56 - 0.002, 6);
+  });
+});
+
+describe('serialisation (R9)', () => {
+  it('two concurrent open() calls place exactly one order', async () => {
+    let pos: unknown = noPos;
+    const { broker, calls } = mk({
+      'GET /margin/positions': () => pos,
+      'GET /margin/risk': () => risk,
+      [`GET /margin/markets/${T}`]: () => market,
+      'POST /margin/orders': () => { pos = longPosition; return filled('13.7580'); },
+      [TRIG]: () => ({}),
+    });
+    const params = { side: 'long' as const, contracts: 1, stopBps: 388 };
+    const results = await Promise.allSettled([broker.open(params), broker.open(params)]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+  });
+
+  it("a poll racing the bot's own close() emits no spurious event", async () => {
+    let pos: unknown = noPos;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let postStarted!: () => void;
+    const started = new Promise<void>((r) => { postStarted = r; });
+    let orders = 0;
+    const { broker } = mk({
+      'GET /margin/positions': () => pos,
+      'GET /margin/risk': () => risk,
+      [`GET /margin/markets/${T}`]: () => market,
+      'POST /margin/orders': async () => {
+        if (orders++ === 0) { pos = longPosition; return filled('13.7580'); }
+        pos = noPos; // the exchange position is already gone while close() is still in flight
+        postStarted();
+        await gate;
+        return filled('13.4000');
+      },
+      [TRIG]: () => ({}),
+      [`DELETE /margin/isolated/positions/${T}/exit_trigger`]: () => null,
+      'GET /margin/fills': () => ({
+        fills: [
+          { fill_id: 'f1', order_id: 'o1', side: 'bid', count: '1.00', created_time: '2026-10-14T15:00:00Z', ticker: T, price: '13.7600', fees: '0.0010', realized_pnl: '0.0000' },
+          { fill_id: 'f2', order_id: 'o2', side: 'ask', count: '1.00', created_time: '2026-10-14T16:00:00Z', ticker: T, price: '13.4000', fees: '0.0010', realized_pnl: '-0.3600' },
+        ],
+      }),
+      'GET /margin/orders/o2': () => ({ order: { order_source: 'user' } }),
+    });
+    await broker.open({ side: 'long', contracts: 1, stopBps: 388 });
+    const closeP = broker.close();
+    await started;
+    const pollP = broker.poll();
+    release();
+    const [, events] = await Promise.all([closeP, pollP]);
+    expect(events).toEqual([]);
   });
 });

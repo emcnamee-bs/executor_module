@@ -1,15 +1,31 @@
 // src/perp/broker/kalshiMarginBroker.ts
 import { randomUUID } from 'node:crypto';
 import type { Side } from '../types.js';
-import type { KalshiMarginClient } from './kalshiMarginClient.js';
+import { MarginApiError, type KalshiMarginClient } from './kalshiMarginClient.js';
 import type {
   Broker, BrokerBalance, BrokerEvent, BrokerPosition, BrokerQuote, CloseResult, FillResult, OpenParams,
 } from './types.js';
 
 type Client = Pick<KalshiMarginClient, 'get' | 'post' | 'put' | 'del'>;
 
-export class OrderNotFilledError extends Error {}
-export class StopNotSetError extends Error {}
+/**
+ * The order was not (or not completely) filled. `positionMayBeOpen` is true whenever a close/flatten did not
+ * definitely succeed or the outcome of the order could not be established: the caller must not assume it is flat.
+ */
+export class OrderNotFilledError extends Error {
+  constructor(message: string, readonly positionMayBeOpen: boolean = false) {
+    super(message);
+    this.name = 'OrderNotFilledError';
+  }
+}
+
+/** The trailing stop could not be set. `positionMayBeOpen` is true when the follow-up close did not definitely succeed. */
+export class StopNotSetError extends Error {
+  constructor(message: string, readonly positionMayBeOpen: boolean = false) {
+    super(message);
+    this.name = 'StopNotSetError';
+  }
+}
 
 export interface KalshiMarginBrokerConfig {
   env: 'prod' | 'demo';
@@ -25,6 +41,21 @@ export interface KalshiMarginBrokerConfig {
 const num = (v: unknown): number =>
   typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
 
+const fin = (x: number): boolean => Number.isFinite(x);
+/** First finite value, else NaN. */
+const firstFinite = (...xs: number[]): number => xs.find(fin) ?? NaN;
+
+/** US500 taker fee fraction of notional (global constraints). Only used to estimate a fee the exchange response did not give us. */
+const ESTIMATED_TAKER_FEE_FRAC = 0.000072;
+
+const RECONCILE_ATTEMPTS = 3;
+const defaultDelay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const RECONCILE_DELAY_MS = 300;
+
+/** A definitive rejection: the exchange answered 4xx, so the order was not accepted. Anything else is an unknown outcome. */
+const isDefinitiveRejection = (err: unknown): boolean =>
+  err instanceof MarginApiError && err.status >= 400 && err.status < 500;
+
 interface FillDto {
   order_id: string;
   side: 'bid' | 'ask';
@@ -36,20 +67,50 @@ interface FillDto {
   realized_pnl: string;
 }
 
+type OrderOutcome =
+  /** avgPrice and feeUsd may be NaN when the response lacked them. */
+  | { known: true; fillCount: number; avgPrice: number; feeUsd: number }
+  /** The POST threw (timeout, network, 5xx, bad body) or fill_count was unparseable: the order may have filled. */
+  | { known: false };
+
+interface Expected {
+  side: Side;
+  openedAtMs: number;
+  /** Failed attempts to obtain the exit fills / order reason so far. */
+  attempts: number;
+}
+
 export class KalshiMarginBroker implements Broker {
   readonly mode: 'demo' | 'prod';
-  private expected: { side: Side; openedAtMs: number } | null = null;
+  private expected: Expected | null = null;
+  private tail: Promise<unknown> = Promise.resolve();
   private readonly now: () => number;
   private readonly newOrderId: () => string;
+  private readonly delay: (ms: number) => Promise<void>;
+  private readonly maxPollAttempts: number;
 
   constructor(
     private readonly client: Client,
     private readonly cfg: KalshiMarginBrokerConfig,
-    opts: { now?: () => number; newOrderId?: () => string } = {}
+    opts: {
+      now?: () => number;
+      newOrderId?: () => string;
+      delay?: (ms: number) => Promise<void>;
+      maxPollAttempts?: number;
+    } = {}
   ) {
     this.mode = cfg.env;
     this.now = opts.now ?? (() => Date.now());
     this.newOrderId = opts.newOrderId ?? (() => randomUUID());
+    this.delay = opts.delay ?? defaultDelay;
+    this.maxPollAttempts = Math.max(1, opts.maxPollAttempts ?? 5);
+  }
+
+  /** Serialises open/close/poll/setTrailingStop. A rejection never blocks later calls. */
+  private locked<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(fn);
+    this.tail = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private get subQuery(): { subaccount?: number } {
@@ -107,83 +168,198 @@ export class KalshiMarginBroker implements Broker {
     };
   }
 
-  private async placeIoc(side: 'bid' | 'ask', count: number, price: number, reduceOnly: boolean) {
-    const res = await this.client.post<{
-      order_id: string;
-      fill_count: string;
-      average_fill_price?: string;
-      average_fee_paid?: string;
-    }>('/margin/orders', {
-      ticker: this.cfg.ticker,
-      client_order_id: this.newOrderId(),
-      side,
-      count: count.toFixed(2),
-      price: price.toFixed(4),
-      time_in_force: 'immediate_or_cancel',
-      self_trade_prevention_type: 'taker_at_cross',
-      reduce_only: reduceOnly,
-      ...this.subQuery,
-    });
-    const fillCount = num(res.fill_count);
-    const feePerContract = num(res.average_fee_paid);
+  /**
+   * Places one IOC order. Throws only for a definitive rejection (4xx). Any other failure of the POST, or an
+   * unparseable fill_count, is an UNKNOWN outcome (the order may have filled) and is returned as `known: false`.
+   */
+  private async placeIoc(side: 'bid' | 'ask', count: number, price: number, reduceOnly: boolean): Promise<OrderOutcome> {
+    let res: { order_id?: string; fill_count?: string; average_fill_price?: string; average_fee_paid?: string } | null;
+    try {
+      res = await this.client.post<{
+        order_id?: string;
+        fill_count?: string;
+        average_fill_price?: string;
+        average_fee_paid?: string;
+      } | null>('/margin/orders', {
+        ticker: this.cfg.ticker,
+        client_order_id: this.newOrderId(),
+        side,
+        count: count.toFixed(2),
+        price: price.toFixed(4),
+        time_in_force: 'immediate_or_cancel',
+        self_trade_prevention_type: 'taker_at_cross',
+        reduce_only: reduceOnly,
+        ...this.subQuery,
+      });
+    } catch (err) {
+      if (isDefinitiveRejection(err)) throw err;
+      return { known: false };
+    }
+    const fillCount = num(res?.fill_count);
+    if (!fin(fillCount)) return { known: false };
+    const feePerContract = num(res?.average_fee_paid);
     return {
-      fillCount: Number.isFinite(fillCount) ? fillCount : 0,
-      avgPrice: num(res.average_fill_price),
-      feeUsd: Number.isFinite(feePerContract) ? feePerContract * (Number.isFinite(fillCount) ? fillCount : 0) : 0,
+      known: true,
+      fillCount,
+      avgPrice: num(res?.average_fill_price),
+      feeUsd: fin(feePerContract) ? feePerContract * fillCount : NaN,
     };
   }
 
-  async open(p: OpenParams): Promise<FillResult> {
+  /** Re-reads the position (bounded retries) after an unknown order outcome. */
+  private async findPosition(): Promise<{ pos: BrokerPosition | null; readFailed: boolean }> {
+    let readFailed = false;
+    for (let i = 0; i < RECONCILE_ATTEMPTS; i++) {
+      if (i > 0) await this.delay(RECONCILE_DELAY_MS);
+      try {
+        const pos = await this.position();
+        if (pos !== null) return { pos, readFailed };
+      } catch {
+        readFailed = true;
+      }
+    }
+    return { pos: null, readFailed };
+  }
+
+  /** After an unknown close outcome: did the position go away? 'unknown' = it could never be read. */
+  private async confirmFlat(): Promise<'flat' | 'open' | 'unknown'> {
+    let state: 'open' | 'unknown' = 'unknown';
+    for (let i = 0; i < RECONCILE_ATTEMPTS; i++) {
+      if (i > 0) await this.delay(RECONCILE_DELAY_MS);
+      try {
+        if ((await this.position()) === null) return 'flat';
+        state = 'open';
+      } catch {
+        // keep the previous state
+      }
+    }
+    return state;
+  }
+
+  open(p: OpenParams): Promise<FillResult> {
+    return this.locked(() => this.openInner(p));
+  }
+
+  private async openInner(p: OpenParams): Promise<FillResult> {
     if ((await this.position()) !== null) throw new Error('kalshi: a position is already open');
     const q = await this.quote();
     const buy = p.side === 'long';
     const limit = buy ? q.ask * (1 + this.cfg.slippageFrac) : q.bid * (1 - this.cfg.slippageFrac);
     const res = await this.placeIoc(buy ? 'bid' : 'ask', p.contracts, limit, false);
-    if (res.fillCount <= 0) throw new OrderNotFilledError(`kalshi: ${p.side} order for ${p.contracts} contract(s) did not fill`);
-    if (res.fillCount < p.contracts) {
+
+    let pos: BrokerPosition | null = null;
+    let fillCount: number;
+    if (!res.known) {
+      // Unknown outcome: the exchange may have filled. Establish the truth from the position, never assume "no fill".
+      const found = await this.findPosition();
+      if (found.pos === null) {
+        throw new OrderNotFilledError(
+          `kalshi: ${p.side} order outcome unknown and no position found` + (found.readFailed ? ' (position reads failed)' : ''),
+          found.readFailed
+        );
+      }
+      if (found.pos.side !== p.side) {
+        throw new OrderNotFilledError(`kalshi: unexpected ${found.pos.side} position after a ${p.side} order; position may be open`, true);
+      }
+      pos = found.pos;
+      fillCount = pos.contracts;
+    } else {
+      fillCount = res.fillCount;
+      if (fillCount <= 0) throw new OrderNotFilledError(`kalshi: ${p.side} order for ${p.contracts} contract(s) did not fill`, false);
+      if (!fin(res.avgPrice) || !fin(res.feeUsd)) pos = (await this.findPosition()).pos;
+    }
+
+    if (fillCount < p.contracts) {
       // A partial fill cannot be left unprotected or half-sized: flatten what filled.
-      const flat = await this.closeBestEffort();
+      const flat = await this.closeBestEffort(p.side);
       throw new OrderNotFilledError(
-        `kalshi: partial fill ${res.fillCount} of ${p.contracts}; ${flat ? 'flattened' : 'FLATTEN FAILED, position may still be open'}`
+        `kalshi: partial fill ${fillCount} of ${p.contracts}; ${flat ? 'flattened' : 'FLATTEN FAILED, position may still be open'}`,
+        !flat
       );
     }
     try {
-      await this.setTrailingStop(p.stopBps);
+      await this.setTrailingStopInner(p.stopBps);
     } catch (err) {
-      const flat = await this.closeBestEffort();
+      const flat = await this.closeBestEffort(p.side);
       throw new StopNotSetError(
         `kalshi: trailing stop could not be set (${err instanceof Error ? err.message : String(err)}); ` +
-          (flat ? 'position closed' : 'CLOSE FAILED, position may be open WITHOUT a stop')
+          (flat ? 'position closed' : 'CLOSE FAILED, position may be open WITHOUT a stop'),
+        !flat
       );
     }
-    this.expected = { side: p.side, openedAtMs: this.now() };
-    return { side: p.side, contracts: res.fillCount, price: res.avgPrice, feeUsd: res.feeUsd, tsMs: this.now() };
+    this.expected = { side: p.side, openedAtMs: this.now(), attempts: 0 };
+
+    // Never emit NaN: fall back to the position, then (last resort) to the limit price and the taker fee estimate.
+    const price = res.known ? firstFinite(res.avgPrice, pos?.entryPrice ?? NaN, limit) : firstFinite(pos?.entryPrice ?? NaN, limit);
+    const feeUsd = res.known
+      ? firstFinite(res.feeUsd, pos?.feesUsd ?? NaN, price * fillCount * ESTIMATED_TAKER_FEE_FRAC)
+      : firstFinite(pos?.feesUsd ?? NaN, price * fillCount * ESTIMATED_TAKER_FEE_FRAC);
+    return { side: p.side, contracts: fillCount, price, feeUsd, tsMs: this.now() };
   }
 
-  /** True only if the position was actually flattened. */
-  private async closeBestEffort(): Promise<boolean> {
-    try {
-      await this.close();
-      return true;
-    } catch (err) {
-      console.error('[kalshi-broker] best-effort close failed:', err instanceof Error ? err.message : String(err));
-      return false;
+  /**
+   * Flattens (up to 3 attempts, with a delay between). True only if the position was actually flattened.
+   * When it definitively fails, the position is still ours: keep watching it so poll() reports how it ends.
+   */
+  private async closeBestEffort(side: Side): Promise<boolean> {
+    let last = '';
+    for (let i = 0; i < RECONCILE_ATTEMPTS; i++) {
+      if (i > 0) await this.delay(RECONCILE_DELAY_MS);
+      try {
+        await this.closeInner();
+        return true;
+      } catch (err) {
+        last = err instanceof Error ? err.message : String(err);
+      }
     }
+    console.error('[kalshi-broker] best-effort close failed:', last);
+    this.expected = { side, openedAtMs: this.now(), attempts: 0 };
+    return false;
   }
 
-  async close(): Promise<CloseResult> {
+  close(): Promise<CloseResult> {
+    return this.locked(() => this.closeInner());
+  }
+
+  private async closeInner(): Promise<CloseResult> {
     const pos = await this.position();
     if (pos === null) throw new Error('kalshi: no open position');
     const q = await this.quote();
     const sell = pos.side === 'long';
     const limit = sell ? q.bid * (1 - this.cfg.slippageFrac) : q.ask * (1 + this.cfg.slippageFrac);
     const res = await this.placeIoc(sell ? 'ask' : 'bid', pos.contracts, limit, true);
-    if (res.fillCount < pos.contracts) throw new OrderNotFilledError(`kalshi: close filled ${res.fillCount} of ${pos.contracts}`);
     const dir = pos.side === 'long' ? 1 : -1;
-    const pnlUsd = (res.avgPrice - pos.entryPrice) * pos.contracts * dir - pos.feesUsd - res.feeUsd;
+    const entryFees = fin(pos.feesUsd) ? pos.feesUsd : 0;
+
+    let price: number;
+    let feeUsd: number;
+    let pnlUsd: number;
+    if (!res.known) {
+      const state = await this.confirmFlat();
+      if (state !== 'flat') {
+        throw new OrderNotFilledError(
+          `kalshi: close order outcome unknown and the position ${state === 'open' ? 'is still open' : 'could not be read'}; position may be open`,
+          true
+        );
+      }
+      // The order response was lost, so the real exit price and fee are unknown. Approximation: exit at the
+      // position's mark price (else the quote mid), taker fee estimated, P&L from the position's unrealized P&L.
+      price = firstFinite(pos.markPrice, (q.bid + q.ask) / 2);
+      feeUsd = price * pos.contracts * ESTIMATED_TAKER_FEE_FRAC;
+      pnlUsd = firstFinite(pos.unrealizedPnlUsd - entryFees - feeUsd, (price - pos.entryPrice) * pos.contracts * dir - entryFees - feeUsd);
+    } else {
+      if (res.fillCount < pos.contracts) {
+        throw new OrderNotFilledError(`kalshi: close filled ${res.fillCount} of ${pos.contracts}; position may be open`, true);
+      }
+      price = firstFinite(res.avgPrice, pos.markPrice, (q.bid + q.ask) / 2);
+      feeUsd = fin(res.feeUsd) ? res.feeUsd : price * pos.contracts * ESTIMATED_TAKER_FEE_FRAC;
+      pnlUsd = (price - pos.entryPrice) * pos.contracts * dir - entryFees - feeUsd;
+      if (!fin(pnlUsd)) pnlUsd = pos.unrealizedPnlUsd - entryFees - feeUsd;
+    }
     this.expected = null;
     await this.cancelTrigger();
-    return { side: pos.side, contracts: pos.contracts, price: res.avgPrice, feeUsd: res.feeUsd, tsMs: this.now(), pnlUsd };
+    if (!fin(pnlUsd)) throw new Error('kalshi: position closed but its P&L could not be computed (non-numeric position data)');
+    return { side: pos.side, contracts: pos.contracts, price, feeUsd, tsMs: this.now(), pnlUsd };
   }
 
   private triggerPath(): string {
@@ -193,7 +369,11 @@ export class KalshiMarginBroker implements Broker {
     return this.cfg.triggerMode === 'cross' && this.cfg.subaccount !== null ? { subaccount: this.cfg.subaccount } : undefined;
   }
 
-  async setTrailingStop(stopBps: number): Promise<void> {
+  setTrailingStop(stopBps: number): Promise<void> {
+    return this.locked(() => this.setTrailingStopInner(stopBps));
+  }
+
+  private async setTrailingStopInner(stopBps: number): Promise<void> {
     const trail_bps = Math.min(9999, Math.max(1, Math.round(stopBps)));
     await this.client.put(this.triggerPath(), { kind: 'trailing', trail_bps }, this.triggerQuery());
   }
@@ -206,23 +386,40 @@ export class KalshiMarginBroker implements Broker {
     }
   }
 
-  async poll(): Promise<BrokerEvent[]> {
+  poll(): Promise<BrokerEvent[]> {
+    return this.locked(() => this.pollInner());
+  }
+
+  private async pollInner(): Promise<BrokerEvent[]> {
     const exp = this.expected;
     if (exp === null) return [];
     if ((await this.position()) !== null) return [];
-    this.expected = null;
 
-    const { fills } = await this.client.get<{ fills: FillDto[] }>('/margin/fills', {
-      min_ts: Math.floor((exp.openedAtMs - 60_000) / 1000),
-      limit: 100,
-      ...this.subQuery,
-    });
-    const mine = fills
-      .filter((f) => f.ticker === this.cfg.ticker)
-      .sort((a, b) => Date.parse(a.created_time) - Date.parse(b.created_time));
+    // `expected` is cleared only once the classification is complete. Until then a failure means "ask again next
+    // poll"; after maxPollAttempts failures we give up and report a closed_externally event.
+    const retry = (pnlUsd: number | null): BrokerEvent[] => {
+      exp.attempts += 1;
+      if (exp.attempts < this.maxPollAttempts) return [];
+      this.expected = null;
+      return [{ kind: 'closed_externally', side: exp.side, pnlUsd }];
+    };
+
+    let mine: FillDto[];
+    try {
+      const { fills } = await this.client.get<{ fills: FillDto[] }>('/margin/fills', {
+        min_ts: Math.floor((exp.openedAtMs - 60_000) / 1000),
+        limit: 100,
+        ...this.subQuery,
+      });
+      mine = fills
+        .filter((f) => f.ticker === this.cfg.ticker)
+        .sort((a, b) => Date.parse(a.created_time) - Date.parse(b.created_time));
+    } catch {
+      return retry(null);
+    }
     const openSide = exp.side === 'long' ? 'bid' : 'ask';
     const closing = mine.filter((f) => f.side !== openSide);
-    if (closing.length === 0) return [{ kind: 'closed_externally', side: exp.side, pnlUsd: null }];
+    if (closing.length === 0) return retry(null);
 
     const count = closing.reduce((s, f) => s + num(f.count), 0);
     const price = closing.reduce((s, f) => s + num(f.price) * num(f.count), 0) / count;
@@ -240,8 +437,9 @@ export class KalshiMarginBroker implements Broker {
       const r = await this.client.get<{ order: { order_reason?: string } }>(`/margin/orders/${last.order_id}`);
       reason = r.order.order_reason;
     } catch {
-      reason = undefined;
+      return retry(fin(pnlUsd) ? pnlUsd : null);
     }
+    this.expected = null;
     if (reason === 'liquidation') return [{ kind: 'liquidated', rule: 'liquidated', side: exp.side, fill, pnlUsd }];
     if (reason === 'take_profit_stop_loss') return [{ kind: 'stopped_out', rule: 'trailing_stop', side: exp.side, fill, pnlUsd }];
     return [{ kind: 'closed_externally', side: exp.side, pnlUsd }];
