@@ -60,6 +60,9 @@ export interface ExitReviewRecord {
   verdict: ExitVerdict;
   verdictReason: string | null;
   lagJson: string | null;
+  /** Unified mode: what the model recommended for this position (NULL for a classic review). */
+  modelAction?: 'hold' | 'sell' | null;
+  decisionMode?: 'classic' | 'unified' | null;
 }
 
 /** One audit row per review. UNIQUE (item_id, position_id): a redelivered item cannot be reviewed twice. */
@@ -68,12 +71,12 @@ export function recordExitReview(db: Database.Database, rec: ExitReviewRecord): 
     .prepare(
       `INSERT INTO paper_exit_reviews
         (trade, item_id, position_id, shift, confidence, reason, mid_cents, fair_after_cents,
-         loss_cents, exit_cost_cents, verdict, verdict_reason, lag_json)
+         loss_cents, exit_cost_cents, verdict, verdict_reason, lag_json, model_action, decision_mode)
        VALUES
         (@trade, @itemId, @positionId, @shift, @confidence, @reason, @midCents, @fairAfterCents,
-         @lossCents, @exitCostCents, @verdict, @verdictReason, @lagJson)`
+         @lossCents, @exitCostCents, @verdict, @verdictReason, @lagJson, @modelAction, @decisionMode)`
     )
-    .run(rec);
+    .run({ ...rec, modelAction: rec.modelAction ?? null, decisionMode: rec.decisionMode ?? null });
   return Number(info.lastInsertRowid);
 }
 

@@ -250,6 +250,8 @@ CREATE TABLE IF NOT EXISTS paper_exit_reviews (
   verdict TEXT NOT NULL CHECK (verdict IN ('sell','hold','error')),
   verdict_reason TEXT,
   lag_json TEXT,
+  model_action TEXT CHECK (model_action IS NULL OR model_action IN ('hold','sell')),   -- unified mode: what the model recommended
+  decision_mode TEXT CHECK (decision_mode IS NULL OR decision_mode IN ('classic','unified')),
   UNIQUE (item_id, position_id)
 );
 CREATE INDEX IF NOT EXISTS idx_paper_exit_reviews_position ON paper_exit_reviews(position_id);
@@ -339,6 +341,17 @@ function migratePaperPositionsLegs(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_paper_positions_source ON paper_positions(source_item_id)`);
 }
 
+/** Unified-decision columns on paper_exit_reviews (unified-decision spec, section 3). Nullable: NULL = a classic or pre-existing review. */
+function migratePaperExitReviewsUnified(db: Database.Database): void {
+  const columns = db.prepare(`PRAGMA table_info(paper_exit_reviews)`).all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'model_action')) {
+    db.exec(`ALTER TABLE paper_exit_reviews ADD COLUMN model_action TEXT CHECK (model_action IS NULL OR model_action IN ('hold','sell'))`);
+  }
+  if (!columns.some((c) => c.name === 'decision_mode')) {
+    db.exec(`ALTER TABLE paper_exit_reviews ADD COLUMN decision_mode TEXT CHECK (decision_mode IS NULL OR decision_mode IN ('classic','unified'))`);
+  }
+}
+
 /**
  * `circuit_breaker_trips`'s `signal` CHECK constraint is fixed at table-creation
  * time and SQLite cannot ALTER a CHECK constraint -- unlike migrateDecisionsSettledAt
@@ -398,6 +411,7 @@ export function openLedger(dbPath: string): Database.Database {
   migrateDecisionsSettledAt(db);
   migrateDecisionsRealizedPnlCents(db);
   migratePaperPositionsLegs(db);
+  migratePaperExitReviewsUnified(db);
   migrateCircuitBreakerTripsSignal(db);
   return db;
 }
