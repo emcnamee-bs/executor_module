@@ -240,6 +240,25 @@ describe('resilience (review focus 5)', () => {
     errSpy.mockRestore();
   });
 
+  it('W7: a collector failure in the same tick as a paper stop-out still records the exit and persists the paper state', async () => {
+    const h = harness();
+    await openLong(h);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined); // the failed tick is logged
+    h.setCollectError(new Error('collector down'));
+    h.setMark(13.2); // through the 388 bps trail
+    h.advance(MIN);
+    await h.engine.tick();
+    errSpy.mockRestore();
+    expect(listJournal(h.db, 'tick_error', 5)).toHaveLength(1);
+    expect(listExits(h.db, 0).map((e) => [e.rule, e.side])).toEqual([['trailing_stop', 'long']]);
+    expect(loadPosition(h.db)).toBeNull();
+    expect(h.engine.status().position).toBeNull();
+    const saved = getState<PaperState>(h.db, 'paper')!;
+    expect(saved.pos).toBeNull();
+    expect(saved.cash).toBeCloseTo((await h.broker.balance()).equityUsd, 9);
+    expect(saved.cash).toBeLessThan(3.5);
+  });
+
   it('serializes a tick and a news item that arrive at the same time', async () => {
     const h = harness();
     await h.engine.tick();

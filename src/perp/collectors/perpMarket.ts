@@ -18,10 +18,22 @@ export async function collectPerp(client: Getter, ticker: string, nowMs: number)
       schedule?: { is_open?: boolean; next_close_ts?: number | null } | null;
     };
   }>(`/margin/markets/${ticker}`);
-  const bid = num(market.bid);
-  const ask = num(market.ask);
-  const mark = num(market.liquidation_mark_price?.price ?? market.price);
-  if (![bid, ask, mark].every(Number.isFinite) || bid <= 0 || ask <= 0) throw new Error(`perp market ${ticker}: unusable quote`);
+  const schedule = market.schedule ?? null;
+  let bid = num(market.bid);
+  let ask = num(market.ask);
+  let mark = num(market.liquidation_mark_price?.price ?? market.price);
+  if (schedule?.is_open === false) {
+    // A closed market may publish no (or a zero) bid/ask. Nothing can trade then, but the snapshot must still be
+    // collected so the tick goes on (exits, journaling, the market-closed holds): a positive mark is enough.
+    const pos = (x: number): boolean => Number.isFinite(x) && x > 0;
+    const liq = num(market.liquidation_mark_price?.price);
+    mark = pos(liq) ? liq : num(market.price);
+    if (!pos(mark)) throw new Error(`perp market ${ticker}: unusable quote (market closed and no mark)`);
+    bid = mark;
+    ask = mark;
+  } else if (![bid, ask, mark].every(Number.isFinite) || bid <= 0 || ask <= 0) {
+    throw new Error(`perp market ${ticker}: unusable quote`);
+  }
 
   let fundingEstimate: number | null = null;
   try {
@@ -30,7 +42,6 @@ export async function collectPerp(client: Getter, ticker: string, nowMs: number)
   } catch {
     fundingEstimate = null;
   }
-  const schedule = market.schedule ?? null;
   const close = schedule?.next_close_ts;
   return {
     bid,

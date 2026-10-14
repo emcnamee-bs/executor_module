@@ -164,6 +164,37 @@ describe('collectPerp', () => {
     await expect(collectPerp(withMarket({ liquidation_mark_price: { price: 'abc' } }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
     await expect(collectPerp(withMarket({ liquidation_mark_price: undefined, price: undefined }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
   });
+  describe('closed market (W7)', () => {
+    const closed = (m: Record<string, unknown>) => ({
+      get: get({ market: { ...market.market, schedule: { is_open: false, next_close_ts: null, next_open_ts: 1792400000 }, ...m } }, { funding_rate: 0.0001 }),
+    });
+    it.each([
+      ['missing', { bid: undefined, ask: undefined }],
+      ['zero', { bid: '0.0000', ask: '0.0000' }],
+      ['garbage', { bid: 'abc', ask: '' }],
+    ])('a %s bid/ask does not throw: bid = ask = the liquidation mark, marketOpen false', async (_l, m) => {
+      const out = await collectPerp(closed(m) as never, 'KXUS500PERP', NOW);
+      expect(out).toMatchObject({ bid: 13.7571, ask: 13.7571, mark: 13.7571, marketOpen: false, nextCloseTsMs: null });
+    });
+    it('falls back to the last price when the liquidation mark is unusable', async () => {
+      const out = await collectPerp(closed({ bid: undefined, liquidation_mark_price: { price: '' } }) as never, 'KXUS500PERP', NOW);
+      expect(out).toMatchObject({ bid: 13.7576, ask: 13.7576, mark: 13.7576, marketOpen: false });
+    });
+    it('still throws when there is no finite positive mark at all', async () => {
+      for (const m of [
+        { liquidation_mark_price: undefined, price: undefined },
+        { liquidation_mark_price: { price: '0' }, price: '0' },
+        { liquidation_mark_price: { price: 'abc' }, price: '-1' },
+      ]) {
+        await expect(collectPerp(closed({ bid: undefined, ...m }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+      }
+    });
+    it('an open market keeps the strict checks', async () => {
+      const open = (m: Record<string, unknown>) => ({ get: get({ market: { ...market.market, ...m } }, { funding_rate: 0.0001 }) });
+      await expect(collectPerp(open({ bid: undefined }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+      await expect(collectPerp(open({ ask: '0' }) as never, 'KXUS500PERP', NOW)).rejects.toThrow(/unusable/);
+    });
+  });
   it('propagates a failing market request', async () => {
     const client = { get: async () => { throw new Error('market 503'); } };
     await expect(collectPerp(client as never, 'KXUS500PERP', NOW)).rejects.toThrow('market 503');

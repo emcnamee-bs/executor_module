@@ -126,11 +126,13 @@ export class PerpEngine {
       this.risk = loadRiskState(this.d.db); // picks up an operator halt-clear
       // Retried whether or not a position is tracked: a failed startup reconcile leaves even a stored position unconfirmed.
       if (this.reconcilePending) await this.retryPendingReconcile();
+      // Exits first, and persisted at once: a failing collector below must never delay recording a stop-out.
+      const events = await this.d.broker.poll();
+      if (events.length > 0) this.handleBrokerEvents(events, now);
+      this.d.persistBroker?.();
       const snapshot = await this.collectSnapshot(now);
       this.applyFundingIfDue(now); // uses the estimate from BEFORE this snapshot: the new period's estimate has reset
       this.lastFundingEstimate = snapshot.perp.fundingEstimate ?? this.lastFundingEstimate;
-      const events = await this.d.broker.poll();
-      if (events.length > 0) this.handleBrokerEvents(events, now);
       await this.checkKillSwitch(now);
       await this.evaluate(snapshot, [], true);
       if (this.position !== null) savePosition(this.d.db, this.position);
