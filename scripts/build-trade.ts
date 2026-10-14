@@ -32,7 +32,7 @@ async function main(): Promise<void> {
     { client }
   );
   console.log(`[build-trade] wrote ${dir}`);
-  console.log(`[build-trade] structure=${profile.marketStructure} unit=${profile.magnitudeUnit} maxMagnitude=${profile.maxMagnitude} direct=${JSON.stringify(profile.directSources)}`);
+  console.log(`[build-trade] structure=${profile.marketStructure} unit=${profile.magnitudeUnit} maxMagnitude=${profile.maxMagnitude} direct=${JSON.stringify(profile.directSources)} outcomeGroup=${profile.outcomeGroup ?? '-'}`);
 
   if (args.validate) {
     try {

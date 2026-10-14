@@ -5,7 +5,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { openLedger } from '../decide/ledger.js';
 import { callStructured, SONNET_MODEL } from '../decide/structured.js';
 import { validateBank } from './bank.js';
-import { TRADES_ROOT, ProfileSchema, type MarketStructure, type TradeProfile } from './profile.js';
+import { TRADES_ROOT, ProfileSchema, OUTCOME_GROUPS, type MarketStructure, type OutcomeGroup, type TradeProfile } from './profile.js';
 import {
   GENERIC_KEYPHRASE_RULES,
   GENERIC_LIST_SIZE_AND_STYLE,
@@ -35,8 +35,9 @@ const PROFILE_SCHEMA = {
     magnitudeUnit: { type: 'string' },
     maxMagnitude: { type: 'number' },
     bank: { type: 'string' },
+    outcomeGroup: { type: 'string', enum: ['ladder', 'exclusive', 'independent'] },
   },
-  required: ['title', 'settlement', 'decideContext', 'magnitudeUnit', 'maxMagnitude', 'bank'],
+  required: ['title', 'settlement', 'decideContext', 'magnitudeUnit', 'maxMagnitude', 'bank', 'outcomeGroup'],
   additionalProperties: false,
 };
 
@@ -127,12 +128,33 @@ export async function fetchSeriesSpec(
 
 export function deriveStructure(strikeTypes: Array<string | null>, marketCount: number): MarketStructure {
   const set = new Set(strikeTypes);
-  if (set.has('custom')) return 'capture';
+  // Separate outcomes of one question ("who", "which decision", "before which date"): tradeable as `multi`
+  // when there are at least two markets to choose between.
+  if (set.has('custom')) return marketCount >= 2 ? 'multi' : 'capture';
   if (marketCount === 1 && strikeTypes.length === 1 && strikeTypes[0] === null) return 'binary';
   if (set.has('between')) return 'band';
   const threshold = ['greater', 'greater_or_equal', 'less'];
   if (strikeTypes.length > 0 && strikeTypes.every((t) => t !== null && threshold.includes(t))) return 'threshold';
+  if (marketCount >= 2 && strikeTypes.length >= 2 && strikeTypes.every((t) => t === null)) return 'multi';
   return 'capture';
+}
+
+/**
+ * Deterministic outcome-group guess, used only when the builder's model gives no valid answer: nested
+ * "Before <date>" markets are a ladder; anything else is treated as independent (the group with no
+ * cross-market rule, so a wrong guess can never wrongly reject a model answer; see the spec, 3.1).
+ */
+export function fallbackOutcomeGroup(subtitles: string[]): OutcomeGroup {
+  const cleaned = subtitles.map((s) => s.trim()).filter((s) => s !== '');
+  if (cleaned.length >= 2 && cleaned.every((s) => /^before\b/i.test(s))) return 'ladder';
+  return 'independent';
+}
+
+export function resolveOutcomeGroup(modelAnswer: unknown, subtitles: string[]): { group: OutcomeGroup; source: 'model' | 'fallback' } {
+  if (typeof modelAnswer === 'string' && (OUTCOME_GROUPS as readonly string[]).includes(modelAnswer)) {
+    return { group: modelAnswer as OutcomeGroup, source: 'model' };
+  }
+  return { group: fallbackOutcomeGroup(subtitles), source: 'fallback' };
 }
 
 const BANK_SYSTEM = `You prepare the knowledge bank that a small local model uses to screen news for one Kalshi trade. Reply with the requested JSON fields.
@@ -146,7 +168,8 @@ MOVES THE PRICE:
 SETTLEMENT-SENSITIVE FACTS: <comma-separated facts about how the resolution source behaves that affect how news translates into the number>
 IGNORE: <comma-separated look-alike topics that are NOT relevant (at least 4)>
 
-"title" is one question line for the market, "settlement" is 1-3 sentences from the rules text, "decideContext" is 1-3 sentences telling an analyst what quantity they are estimating the effect on and how the market resolves, "magnitudeUnit" is the unit of the settlement quantity (for example pts, %, USD/gal, count), and "maxMagnitude" is a generous positive sanity ceiling on how far one news item could plausibly move that quantity in that unit.`;
+"title" is one question line for the market, "settlement" is 1-3 sentences from the rules text, "decideContext" is 1-3 sentences telling an analyst what quantity they are estimating the effect on and how the market resolves, "magnitudeUnit" is the unit of the settlement quantity (for example pts, %, USD/gal, count), and "maxMagnitude" is a generous positive sanity ceiling on how far one news item could plausibly move that quantity in that unit.
+ "outcomeGroup" says how this event's markets relate (always answer; it only matters when the event has several separate outcome markets): "ladder" = nested "before date X" markets where an earlier date implies every later one; "exclusive" = exactly one market can resolve YES, so the probabilities sum to 100% (one market per candidate or per decision outcome); "independent" = every market is its own separate yes/no question.`;
 
 /**
  * True when `target` is the live ledger by name (case-insensitive: macOS volumes usually
@@ -362,6 +385,15 @@ export async function buildTradeProfile(
           decideContext: parsed.decideContext,
           directSources: opts.directSources,
           marketStructure: structure,
+          ...(structure === 'multi'
+            ? (() => {
+                const resolved = resolveOutcomeGroup(parsed.outcomeGroup, spec.sampleSubtitles);
+                if (resolved.source === 'fallback') {
+                  console.warn(`[build-trade] the model gave no valid outcomeGroup; using the fallback "${resolved.group}"`);
+                }
+                return { outcomeGroup: resolved.group };
+              })()
+            : {}),
           magnitudeUnit: parsed.magnitudeUnit,
           maxMagnitude: parsed.maxMagnitude,
           ledgerPath,
