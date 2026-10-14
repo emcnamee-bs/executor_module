@@ -950,6 +950,80 @@ group: set by `build-trade`; see `trades/<t>/profile.json` `outcomeGroup`. Multi
 - **Rollback:** restore the profile backup the build left in `~/trade-refresh/backups/` over `trades/<t>/profile.json`, then
   `systemctl --user restart executor-module@<t>`. Positions already written stay in the ledger.
 
+### 5a.10 Unified decisions (paper): operator notes
+
+The design is `docs/superpowers/specs/2026-10-13-unified-position-aware-decision-design.md`. `DECISION_MODE=unified` makes a paper unit
+make **one `decide_unified` model call per gated item** (one that passed the Haiku/Ollama relevance gate) in place of triage + decide
+(or `decideMulti`) + one exit review per open position. The call sees the news, the market table, every open position (with its own
+event's ladder and its 5/15/60-minute held-side trajectory) and whether an entry is possible, and answers with a shared belief
+(`assessment`, or `moves[]` on `multi` trades), a `hold`/`sell` per position and a `buy`/`none` for entry. The model recommends and
+code enforces; either side can veto:
+
+- **A sell needs both:** the model says `sell` AND the existing 2% of cost / exit-cost rule (`evaluateExit`, via `settleReview`) passes.
+- **A buy needs both:** the model says `buy` AND the existing sizing gates (price, spread, depth, edge, Kelly, rung stake, paper caps)
+  pass. On a `multi` trade a `buy` also needs at least one move on the active event, and the unchanged sell-trigger filter still applies.
+- **Entry blockers stop only the entry.** Kill switch / `EXECUTOR_TRADING_HALTED`, an open circuit-breaker trip, the `rumor` rung and
+  the trade-pacing limit set `entryAllowed=false`: the model is told entry is unavailable (its `entry` answer is then ignored) and the
+  positions are STILL reviewed. "Story already has an open position for the active event" is checked after the call and likewise
+  stops only the entry. Nothing is called when there is no open position to review and entry is not allowed.
+- **Failures never sell and never buy.** A model/API error, or an answer that fails validation (unknown, duplicate or missing
+  `position_id`, bad action, empty reason, shift beyond the sanity ceiling, confidence outside 0..1, invalid `moves`, an invalid
+  `entry` when entry is available; the whole answer is rejected, never partly used) writes an `error` review row for EVERY reviewable
+  position, sends ONE Slack alert `[UNIFIED ERROR] <trade> item <id>: <reason>`, and records the entry as a skip (`unified decision
+  failed: ...`). A per-position recommendation that is missing at settle time is an `error` row (`the model gave no recommendation for
+  this position`), never a rule-only verdict. A position whose event ladder cannot be fetched gets an `error` row (one
+  `[UNIFIED ERROR] ... ladder for <event> failed` alert per event per item) while positions on other events are still sent to the
+  model; a position whose market is no longer open gets a `hold` row (`market not open (closed or settled)`) with no model action.
+- **Prompt:** the markets of the event the news is about are listed first (the `multi` group rule applies to them only); held markets
+  of OTHER events are listed separately and each is judged on its own (on `multi` trades a move there is checked as `independent`).
+- **Same guards as the exit review:** `DECISION_MODE` unset, empty or `classic` = classic. `unified` requires `EXIT_REVIEW=on` (it
+  reuses the exit review's fills, retry timer and lateness) and refuses to start on a live-capable process (`KALSHI_DRY_RUN` not
+  `true`, `EXECUTOR_LIVE_TRADE` set, the live ledger or live consumer group); any other value refuses. The pipeline re-checks the
+  dry-run/non-live condition on every item. The startup `[profile]` line ends with `decision=classic|unified`; check it after every
+  restart. The model is `EXIT_REVIEW_MODEL` (default `claude-sonnet-5`) and `EXIT_FEE_CENTS` applies as in 5a.8.
+- **Enable per paper unit:** copy `deploy/mini-mac/executor-module@.service.d/decision-mode.conf.example` to
+  `~/.config/systemd/user/executor-module@<trade>.service.d/decision-mode.conf` (the unit must also have its `exit-review.conf`), then
+  `systemctl --user daemon-reload && systemctl --user restart executor-module@<trade>`.
+- **Roll back:** delete that `decision-mode.conf`, `systemctl --user daemon-reload`, restart the unit. The classic code path is
+  untouched; rows already written stay in the ledger.
+- **Rollout order** (all paper units, with the integrity checker after every wave; fix every violation before continuing): merge
+  `feat/multi-unified` into the local `~/executor_module` main (no push without the user's approval) and run
+  `python3 ~/exit-analysis/integrity.py --no-alert` for a baseline. Wave 1: the units that already hold positions (`kxwti`,
+  `kxaaagasw`, `kxbrentmon`, `kxhormuzweekly`): install the drop-in, reload, restart ONE unit, wait for its first gated item, run the
+  checker and read the unified review rows, then the rest of the wave. Wave 2: every other tradeable paper unit. Wave 3: the
+  converted `multi` trades (after 5a.9's rollout). Check again after each wave and after the first hour of live items.
+- **Cost:** the `[EXIT-REVIEW BUDGET]` alert (alert-only, once per UTC day, `EXIT_DAILY_USD_CAP`) now sums the `exit_review` AND
+  `decide_unified` stages of `ai_calls`.
+
+**Ledger columns** (added automatically when a unit opens its ledger with the new code, so a unit's ledger has them only after its
+first restart on this version; before that these queries fail with `no such column`): `paper_exit_reviews.model_action`
+(`hold` | `sell`, what the model recommended) and `paper_exit_reviews.decision_mode` (`unified` is the only value the code writes).
+`NULL` in both means a classic or pre-existing review, and also the unified `error` rows and `market not open` rows (no model
+recommendation). In a unified `sell` row `verdict_reason` reads `model: sell (...); rule: ...`; a veto reads `the model recommended
+sell (...) but the rule vetoed it: ...` or `the rule says sell (...) but the model recommended hold (...)`. The `decide_unified`
+calls are in `ai_calls` with `stage='decide_unified'` (its `verdict` is `<buy|none> sells:N holds:M`, or `invalid:<why>`).
+mini-mac has no `sqlite3` CLI; use python3 read-only, e.g.
+`python3 -c "import sqlite3;c=sqlite3.connect('file:/home/emac/executor_module/data/kxwti/decisions.db?mode=ro',uri=True);print(c.execute(\"<SQL>\").fetchall())"`.
+
+- Latest unified reviews:
+  `SELECT verdict, model_action, verdict_reason FROM paper_exit_reviews WHERE decision_mode = 'unified' ORDER BY id DESC LIMIT 20;`
+- Disagreements (the model and the rule did not agree, so nothing was sold):
+  `SELECT id, item_id, position_id, verdict, model_action, verdict_reason FROM paper_exit_reviews WHERE decision_mode = 'unified' AND ((verdict = 'hold' AND model_action = 'sell') OR (verdict = 'hold' AND verdict_reason LIKE 'the rule says sell%')) ORDER BY id DESC;`
+- Unified failures: `SELECT id, item_id, position_id, verdict_reason FROM paper_exit_reviews WHERE decision_mode = 'unified' AND verdict = 'error' ORDER BY id DESC;`
+
+**Integrity checker** (`~/exit-analysis/integrity.py`, not in git; user timer `integrity.timer`, hourly, runs `integrity.service`). It opens
+every `<data>/<trade>/decisions.db` read-only (never writes a ledger), prints one `VIOLATION <trade> <table>#<id> <RULE>: <message>` line
+per problem and a count line, and exits 0 clean / 1 for any violation line (including `IO` and `SKIP` lines: a ledger it cannot read, or a
+rule that raised, counts as a violation). Rules: `P1` position shape, `P2` exit fills versus contracts and pnl, `E1` exit rows (review
+linkage, price range, pnl arithmetic), `R1` review completeness (a sell has its arithmetic and `lag_json`, an error has a reason), `L1`
+two-leg entries, `A1` audit trail (a model call behind multi positions and, once a ledger has used unified, every later position; no
+`would_trade` decisions), `A2` the newest archive snapshot is a subset of the live ledger, `U1` unified consistency (every unified
+hold/sell has a `model_action`, a unified sell was recommended `sell`, every position a `decide_unified` call recommended has a review
+row, i.e. no lost decision). Legacy NULL columns are skipped. On violations it posts ONE Slack message (an identical set is not
+re-alerted for 24 h; a clean run clears the state). Run by hand: `python3 ~/exit-analysis/integrity.py --no-alert` (no Slack, no state
+change). Timer logs: `journalctl --user -u integrity.service` (timer: `systemctl --user list-timers integrity.timer`). **A finding is
+fixed (correct the code, repair the rows from the audit trail, or put the unit back to classic), never silenced or accepted.**
+
 ## 6. Instructions for whoever picks this up
 
 1. Read this whole file before writing code.

@@ -31,9 +31,11 @@ for entry (`buy` or `none`), so its own judgement about selling, holding or buyi
 1. Haiku gate (unchanged).
 2. One Sonnet `positionAwareDecide` call (replaces triage + decide + all exit reviews). Input: the item; the market table (a
    compact ladder for curve trades, the label table for `multi` trades); **all open positions** (market, side, remaining,
-   entry, current held-side bid/mid, unrealised cents, 5/15/60-minute trajectory); the rung. Output: `assessment`
-   (`shift`, `confidence`, `reason`, or `moves[]` for `multi`), `positions: [{position_id, action: hold|sell, reason}]`,
-   `entry: { action: buy|none, reason }`.
+   entry, current held-side bid/mid, unrealised cents, 5/15/60-minute trajectory); the rung. Output: for single-quantity trades
+   one shared `assessment` (`shift`, `confidence`, `reason`: one belief about the settlement quantity applied to every position
+   on that curve; for `binary` trades the shift is in YES-probability points); for `multi` trades `moves[]` per market (the
+   group rule applies to the active event's markets; a move on a held market of another event is checked as independent); in
+   both cases `positions: [{position_id, action: hold|sell, reason}]` and `entry: {action: buy|none, reason}`.
 3. Code, in this order and independently of each other:
    - for each held position: run `evaluateExit` on the model's shift/confidence for that market; **sell only if the model
      said `sell` and the 2% / exit-cost rule passes** (either side can veto; both are logged);
