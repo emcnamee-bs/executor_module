@@ -29,7 +29,7 @@ const HOLD_JOURNAL_EVERY_MS = 10 * MIN;
 const CONSECUTIVE_FAILURE_ALERT = 5;
 /** How long a tracked position may be invisible to the broker before the engine classifies the exit itself. */
 const AWAIT_CLASSIFICATION_MAX_MS = 10 * MIN;
-/** Tick-loop reconcile retries after a failed open that may have left an unprotected position. */
+/** Tick-loop reconcile retries after a failed reconcile (startup or after a failed open). */
 const RECONCILE_RETRY_MAX = 30;
 
 type ReconcileContext = 'startup' | 'after_failed_open';
@@ -71,6 +71,8 @@ export class PerpEngine {
   private awaitingSinceMs: number | null = null;
   private reconcilePending = false;
   private reconcileAttempts = 0;
+  /** Why the pending reconcile started; the retries and the give-up alert say so. */
+  private reconcilePendingContext: ReconcileContext = 'after_failed_open';
 
   constructor(private readonly d: EngineDeps) {
     this.book = new PressureBook(d.cfg);
@@ -122,7 +124,8 @@ export class PerpEngine {
     const now = this.d.now();
     try {
       this.risk = loadRiskState(this.d.db); // picks up an operator halt-clear
-      if (this.reconcilePending && this.position === null) await this.retryPendingReconcile();
+      // Retried whether or not a position is tracked: a failed startup reconcile leaves even a stored position unconfirmed.
+      if (this.reconcilePending) await this.retryPendingReconcile();
       const snapshot = await this.collectSnapshot(now);
       this.applyFundingIfDue(now); // uses the estimate from BEFORE this snapshot: the new period's estimate has reset
       this.lastFundingEstimate = snapshot.perp.fundingEstimate ?? this.lastFundingEstimate;
@@ -384,6 +387,7 @@ export class PerpEngine {
           if (this.position === null) {
             this.reconcilePending = true;
             this.reconcileAttempts = 0;
+            this.reconcilePendingContext = 'after_failed_open';
           }
         }
         return;
@@ -453,10 +457,11 @@ export class PerpEngine {
 
   // ---- reconciliation -----------------------------------------------------------------------------------------
 
-  /** Re-runs reconciliation after a failed open that may have left a position; bounded, then gives up loudly once. */
+  /** Re-runs a failed or inconclusive reconciliation; bounded, then gives up loudly once. */
   private async retryPendingReconcile(): Promise<void> {
     this.reconcileAttempts += 1;
-    const result = await this.reconcile('after_failed_open');
+    const context = this.reconcilePendingContext;
+    const result = await this.reconcile(context);
     if (result !== 'failed') {
       this.reconcilePending = false; // a position was adopted, or the broker is confirmed flat on a successful read
       return;
@@ -464,7 +469,7 @@ export class PerpEngine {
     if (this.reconcileAttempts >= RECONCILE_RETRY_MAX) {
       this.reconcilePending = false;
       this.d.alert(
-        `[PERP ${this.d.broker.mode}] URGENT: could not confirm the exchange position after a failed open (${RECONCILE_RETRY_MAX} reconcile attempts); check Kalshi manually. Not retrying again.`
+        `[PERP ${this.d.broker.mode}] URGENT: could not confirm the exchange position ${context === 'startup' ? 'at startup' : 'after a failed open'} (${RECONCILE_RETRY_MAX} reconcile attempts); check Kalshi manually. Not retrying again.`
       );
     }
   }
@@ -542,6 +547,12 @@ export class PerpEngine {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       appendJournal(db, { tsMs: now, kind: 'reconcile_error', payload: { error: msg, context } });
+      if (!this.reconcilePending) {
+        // Any failed reconcile is retried from the tick loop (bounded), whatever its context.
+        this.reconcilePending = true;
+        this.reconcileAttempts = 0;
+        this.reconcilePendingContext = context;
+      }
       this.d.alert(
         context === 'startup'
           ? `[PERP ${this.d.broker.mode}] startup reconciliation failed: ${msg}`

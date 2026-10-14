@@ -689,6 +689,58 @@ describe('stub-broker reconciliation (R22, R24)', () => {
     expect(listJournal(s.db, 'reconcile', 5).map((r) => (r.payload as { result: string }).result)).toEqual(['consistent']);
   });
 
+  it('W6: a failed startup reconcile with a stored position is retried on the next tick and then cleared', async () => {
+    const storedLong: PositionState = { ...storedShort, side: 'long' };
+    const s = setup((call) => {
+      if (call === 1) throw new Error('read failed');
+      return longBp;
+    }, storedLong);
+    await s.engine.start();
+    expect(listJournal(s.db, 'reconcile_error', 5).map((r) => (r.payload as { context: string }).context)).toEqual(['startup']);
+    expect(s.watch).not.toHaveBeenCalled();
+    s.advance(MIN);
+    await s.engine.tick();
+    expect(listJournal(s.db, 'reconcile', 5).map((r) => (r.payload as { result: string }).result)).toEqual(['consistent']);
+    expect(s.watch.mock.calls).toEqual([['long', storedLong.entryTimeMs]]);
+    expect(loadPosition(s.db)?.side).toBe('long');
+    s.advance(MIN);
+    await s.engine.tick();
+    expect(listJournal(s.db, 'reconcile', 5)).toHaveLength(1); // cleared: no further reconcile
+    expect(listJournal(s.db, 'reconcile_error', 5)).toHaveLength(1);
+  });
+
+  it('W6: a failed startup reconcile with nothing stored is retried and cleared by a flat read', async () => {
+    const s = setup((call) => {
+      if (call === 1) throw new Error('read failed');
+      return null;
+    });
+    await s.engine.start();
+    s.advance(MIN);
+    await s.engine.tick();
+    expect(s.position).toHaveBeenCalledTimes(2);
+    s.advance(MIN);
+    await s.engine.tick();
+    expect(s.position).toHaveBeenCalledTimes(2); // flat and confirmed: no more reconcile reads
+  });
+
+  it('W6: a startup reconcile that keeps failing gives up after 30 retries with exactly one alert naming startup', async () => {
+    const storedLong: PositionState = { ...storedShort, side: 'long' };
+    const s = setup(() => {
+      throw new Error('read failed');
+    }, storedLong);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined); // each failed tick is logged
+    await s.engine.start();
+    for (let i = 0; i < 40; i++) {
+      s.advance(MIN);
+      await s.engine.tick();
+    }
+    errSpy.mockRestore();
+    expect(listJournal(s.db, 'reconcile_error', 100)).toHaveLength(31); // 1 at startup + 30 retries
+    const giveUps = s.alerts.filter((a) => /could not confirm the exchange position/.test(a));
+    expect(giveUps).toHaveLength(1);
+    expect(giveUps[0]).toMatch(/at startup/);
+  });
+
   it('W5: a startup reconcile that finds the broker flat with nothing stored watches nothing', async () => {
     const s = setup(() => null);
     await s.engine.start();
