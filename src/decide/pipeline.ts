@@ -24,6 +24,9 @@ import {
 import { evaluateSizing, evaluateBinarySizing, type SizingResult } from './sizing.js';
 import { triageItem } from './triage.js';
 import { decideTrade } from './decide.js';
+import { decideMulti } from './decideMulti.js';
+import { applyMultiEntry } from './multiEntry.js';
+import { skipRecord } from './skipRecord.js';
 import { makePrepare, type PreparedItem } from './prepare.js';
 import { runExitReview, type ExitReviewDeps } from './exitPipeline.js';
 import { hasSellTrigger } from '../paper/exits.js';
@@ -78,36 +81,6 @@ function lowTierRelaxationAllowed(deps: Pick<PipelineDeps, 'paperLowTier'>): boo
     process.env.KALSHI_DRY_RUN === 'true' &&
     process.env.EXECUTOR_LIVE_TRADE === undefined
   );
-}
-
-/**
- * `rung` is required, not defaulted: it is computed from `Item` fields alone, before
- * any model call and therefore before every skip point below, so no skip row ever
- * needs a placeholder standing in for "not yet computed".
- */
-function skipRecord(
-  item: Item,
-  reason: string,
-  { rung, ...overrides }: Partial<DecisionRecord> & { rung: Rung }
-): DecisionRecord {
-  return {
-    itemId: item.item_id,
-    storyKey: item.story_key,
-    eventTicker: null,
-    marketTicker: null,
-    side: null,
-    rung,
-    direction: null,
-    magnitudePts: null,
-    contracts: 0,
-    entryPriceCents: null,
-    notionalCents: 0,
-    edgeCents: null,
-    wouldTrade: false,
-    reason,
-    orderStatus: 'resolved',
-    ...overrides,
-  };
 }
 
 export async function runDecisionPipeline(item: Item, deps: PipelineDeps): Promise<void> {
@@ -235,6 +208,21 @@ async function runEntryPipeline(item: Item, deps: PipelineDeps, prep: () => Prom
           orderStatus: 'resolved',
         })
       );
+      return;
+    }
+
+    if (structure === 'multi') {
+      const outcomeGroup = loaded.profile.outcomeGroup;
+      if (outcomeGroup === undefined) throw new Error('multi profile has no outcomeGroup'); // the schema forbids this
+      const multi = await decideMulti(anthropicClient, db, {
+        loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit,
+        triageReason: triage.reason, markets: ladder.bands, group: outcomeGroup,
+      });
+      if (!multi.shouldTrade) {
+        record(skipRecord(item, multi.reasoning, { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
+        return;
+      }
+      applyMultiEntry({ db, item, trade, rung, ladder, moves: multi.moves, reasoning: multi.reasoning, outcomeGroup, tag: lowTierTag, record });
       return;
     }
 
