@@ -40,13 +40,15 @@ export function resolveMode(env: NodeJS.ProcessEnv, ticker: string): ModeConfig 
 
 export function createBroker(
   mode: ModeConfig,
-  d: { env: NodeJS.ProcessEnv; ticker: string; prodClient: MarginClientLike; demoClient: MarginClientLike | null; now: () => number }
+  d: { env: NodeJS.ProcessEnv; ticker: string; prodClient: MarginClientLike | null; demoClient: MarginClientLike | null; now: () => number }
 ): { broker: Broker; paper: PaperBroker | null } {
   if (mode.mode === 'paper') {
+    const prodClient = d.prodClient;
+    if (prodClient === null) throw new Error('paper mode needs the production client (it reads live prices; GET only)');
     const equity = Number(d.env.PERP_PAPER_EQUITY_USD ?? DEFAULT_PAPER_CONFIG.startEquityUsd);
     if (!Number.isFinite(equity) || equity <= 0) throw new Error('PERP_PAPER_EQUITY_USD must be a positive number of dollars');
     const paper = new PaperBroker(
-      () => fetchMarginQuote(d.prodClient, d.ticker, d.now()),
+      () => fetchMarginQuote(prodClient, d.ticker, d.now()),
       { ...DEFAULT_PAPER_CONFIG, startEquityUsd: equity },
       d.now
     );
@@ -58,7 +60,7 @@ export function createBroker(
   const slippage = Number(d.env.PERP_SLIPPAGE_FRAC ?? 0.002);
   if (!Number.isFinite(slippage) || slippage <= 0 || slippage > 0.02) throw new Error('PERP_SLIPPAGE_FRAC must be between 0 and 0.02');
   const client = mode.mode === 'demo' ? d.demoClient : d.prodClient;
-  if (client === null) throw new Error('demo mode needs a demo client');
+  if (client === null) throw new Error(mode.mode === 'demo' ? 'demo mode needs a demo client' : 'live mode needs the production client');
   const broker = new KalshiMarginBroker(
     client,
     { env: mode.mode === 'demo' ? 'demo' : 'prod', ticker: mode.marketTicker, subaccount: mode.subaccount, triggerMode, slippageFrac: slippage },

@@ -59,12 +59,17 @@ export async function main(): Promise<void> {
   // sendAlert has its own per-request timeout and never rejects, so the intake can await it safely.
   const alert = (m: string): Promise<void> => sendAlert(m);
 
-  const prodClient = new KalshiMarginClient({ env: 'prod', apiKeyId: must('KALSHI_API_KEY_ID'), privateKeyPath: must('KALSHI_PRIVATE_KEY_PATH') });
+  // The production key is read only where it is used: paper (prices, GET only) and live. Demo never touches it.
+  const prodClient =
+    mode.mode === 'demo'
+      ? null
+      : new KalshiMarginClient({ env: 'prod', apiKeyId: must('KALSHI_API_KEY_ID'), privateKeyPath: must('KALSHI_PRIVATE_KEY_PATH') });
   const demoClient =
     mode.mode === 'demo'
       ? new KalshiMarginClient({ env: 'demo', apiKeyId: must('KALSHI_DEMO_API_KEY_ID'), privateKeyPath: must('KALSHI_DEMO_PRIVATE_KEY_PATH') })
       : null;
   const marketClient = demoClient ?? prodClient;
+  if (marketClient === null) throw new Error('no Kalshi client for market data');
   const { broker, paper } = createBroker(mode, { env, ticker: cfg.ticker, prodClient, demoClient, now: () => Date.now() });
   if (paper !== null) {
     const saved = getState<PaperState>(db, 'paper');

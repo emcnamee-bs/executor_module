@@ -73,6 +73,13 @@ describe('createBroker', () => {
     const env = { PERP_MODE: 'live', PERP_SUBACCOUNT: '3', PERP_LIVE: `${T}:3` };
     expect(createBroker(resolveMode(env, T), { env, ticker: T, prodClient: client, demoClient: null, now: () => 1 }).broker.mode).toBe('prod');
   });
+  it('demo works without any production client; paper and live refuse to start without one (W15)', () => {
+    const demo = createBroker(resolveMode(demoEnv, T), { env: demoEnv, ticker: T, prodClient: null, demoClient: client, now: () => 1 });
+    expect(demo.broker.mode).toBe('demo');
+    expect(() => createBroker(resolveMode({}, T), { env: {}, ticker: T, prodClient: null, demoClient: null, now: () => 1 })).toThrow(/paper mode needs the production client/);
+    const live = { PERP_MODE: 'live', PERP_SUBACCOUNT: '3', PERP_LIVE: `${T}:3` };
+    expect(() => createBroker(resolveMode(live, T), { env: live, ticker: T, prodClient: null, demoClient: client, now: () => 1 })).toThrow(/live mode needs the production client/);
+  });
   it('rejects a bad trigger mode or slippage', () => {
     const env = { ...demoEnv, PERP_TRIGGER_MODE: 'weird' };
     expect(() => createBroker(resolveMode(env, T), { env, ticker: T, prodClient: client, demoClient: client, now: () => 1 })).toThrow(/PERP_TRIGGER_MODE/);
