@@ -87,3 +87,40 @@ describe('PressureBook', () => {
     expect(book.size).toBe(1);
   });
 });
+
+describe('PressureBook non-finite hardening', () => {
+  it('rejects an item with a non-finite receivedAtMs and leaves the book clean', () => {
+    const book = new PressureBook(cfg);
+    book.add(a({ itemId: 'ok' }));
+    expect(book.add(a({ itemId: 'bad', receivedAtMs: NaN }))).toBe(false);
+    expect(book.add(a({ itemId: 'inf', receivedAtMs: -Infinity }))).toBe(false);
+    expect(book.size).toBe(1);
+    expect(book.at(T0)).toBeCloseTo(0.009, 10);
+    expect(book.top(T0, 5).map((r) => r.itemId)).toEqual(['ok']);
+  });
+  it('returns 0 / [] when the evaluation time is not finite', () => {
+    const book = new PressureBook(cfg);
+    book.add(a());
+    expect(book.at(NaN)).toBe(0);
+    expect(book.at(Infinity)).toBe(0);
+    expect(book.top(NaN, 3)).toEqual([]);
+  });
+  it('treats an unknown bucket/novelty/alreadyPriced as weight 0, never NaN', () => {
+    const book = new PressureBook(cfg);
+    book.add(a({ itemId: 'b1', bucket: 'bogus' as never }));
+    book.add(a({ itemId: 'b2', novelty: 'bogus' as never }));
+    book.add(a({ itemId: 'b3', alreadyPriced: 'bogus' as never }));
+    book.add(a({ itemId: 'good' }));
+    expect(book.at(T0)).toBeCloseTo(0.009, 10);
+    expect(book.top(T0, 10).every((r) => Number.isFinite(r.contribution))).toBe(true);
+  });
+  it('rejects an item whose decay constant is unknown or not positive', () => {
+    const book = new PressureBook(cfg);
+    expect(book.add(a({ itemId: 'h', horizon: 'bogus' as never }))).toBe(false);
+    const zero = new PressureBook({ ...cfg, horizonTauFactor: { ...cfg.horizonTauFactor, days: 0 } });
+    expect(zero.add(a())).toBe(false);
+    expect(zero.size).toBe(0);
+    expect(zero.at(T0)).toBe(0);
+    expect(book.size).toBe(0);
+  });
+});

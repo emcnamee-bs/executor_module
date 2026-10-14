@@ -31,33 +31,46 @@ export class PressureBook {
 
   constructor(private readonly cfg: PerpConfig) {}
 
-  /** Returns false (and changes nothing) when this item id was already added. */
+  /**
+   * Returns false (and changes nothing) when this item id was already added, its receive time is not
+   * finite, or its decay constant is not a finite positive number (unknown horizon / zero factor).
+   * A non-finite weight (e.g. unknown bucket) is stored as 0 so it can never poison the sum.
+   */
   add(a: ImpactAssessment): boolean {
     if (this.entries.has(a.itemId)) return false;
+    if (!Number.isFinite(a.receivedAtMs)) return false;
+    const tauMs = this.cfg.tauDays * MS_PER_DAY * this.cfg.horizonTauFactor[a.horizon];
+    if (!Number.isFinite(tauMs) || tauMs <= 0) return false;
+    const w = itemWeight(a, this.cfg);
     this.entries.set(a.itemId, {
-      weight: itemWeight(a, this.cfg),
+      weight: Number.isFinite(w) ? w : 0,
       receivedAtMs: a.receivedAtMs,
-      tauMs: this.cfg.tauDays * MS_PER_DAY * this.cfg.horizonTauFactor[a.horizon],
+      tauMs,
       rationale: a.rationale,
     });
     return true;
   }
 
-  /** Pressure as of time `tMs`: only items already received by then, each decayed to `tMs`. */
+  /** One entry's decayed contribution at `tMs`; 0 if it has not been received yet. Entries are finite by construction. */
+  private contribution(e: Entry, tMs: number): number {
+    if (e.receivedAtMs > tMs) return 0;
+    return e.weight * Math.exp(-(tMs - e.receivedAtMs) / e.tauMs);
+  }
+
+  /** Pressure as of time `tMs`: only items already received by then, each decayed to `tMs`. 0 if `tMs` is not finite. */
   at(tMs: number): number {
+    if (!Number.isFinite(tMs)) return 0;
     let p = 0;
-    for (const e of this.entries.values()) {
-      if (e.receivedAtMs > tMs) continue;
-      p += e.weight * Math.exp(-(tMs - e.receivedAtMs) / e.tauMs);
-    }
+    for (const e of this.entries.values()) p += this.contribution(e, tMs);
     return p;
   }
 
   top(tMs: number, n: number): Array<{ itemId: string; contribution: number; rationale: string }> {
+    if (!Number.isFinite(tMs)) return [];
     const rows: Array<{ itemId: string; contribution: number; rationale: string }> = [];
     for (const [itemId, e] of this.entries) {
       if (e.receivedAtMs > tMs) continue;
-      rows.push({ itemId, contribution: e.weight * Math.exp(-(tMs - e.receivedAtMs) / e.tauMs), rationale: e.rationale });
+      rows.push({ itemId, contribution: this.contribution(e, tMs), rationale: e.rationale });
     }
     rows.sort((x, y) => Math.abs(y.contribution) - Math.abs(x.contribution));
     return rows.slice(0, n);
