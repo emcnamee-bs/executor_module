@@ -5,10 +5,10 @@ import type { BrokerQuote } from '../../src/perp/broker/types.js';
 import { PerpEngine, type Collected } from '../../src/perp/engine/engine.js';
 import { clearHaltInDb } from '../../src/perp/ops/clearHalt.js';
 import {
-  getState, listExits, listJournal, loadPosition, loadRiskState, openPerpDb, setState,
+  getState, listExits, listJournal, loadPosition, loadRiskState, openPerpDb, savePosition, setState,
 } from '../../src/perp/store/db.js';
-import type { Broker, BrokerPosition } from '../../src/perp/broker/types.js';
-import type { ImpactAssessment } from '../../src/perp/types.js';
+import type { Broker, BrokerEvent, BrokerPosition } from '../../src/perp/broker/types.js';
+import type { ImpactAssessment, PositionState } from '../../src/perp/types.js';
 
 const NOW0 = Date.UTC(2026, 9, 14, 15, 0, 0);
 const MIN = 60_000;
@@ -34,10 +34,10 @@ function harness(over: { startEquityUsd?: number } = {}) {
       kalshiEvents: [],
     };
   };
-  const newEngine = (b: PaperBroker) =>
+  const newEngine = (b: PaperBroker, persist: () => void = () => setState(db, 'paper', b.exportState())) =>
     new PerpEngine({
       cfg: DEFAULT_CONFIG, db, broker: b, now: () => now, collect, alert: (m) => alerts.push(m),
-      persistBroker: () => setState(db, 'paper', b.exportState()),
+      persistBroker: persist,
       applyFunding: (r, m) => b.applyFunding(r, m),
     });
   return {
@@ -359,9 +359,216 @@ describe('vanished position not yet classified by the broker (R19)', () => {
     await h.engine.tick(); // second evaluation inside the 10 minute window
     expect(close).not.toHaveBeenCalled();
     expect(listJournal(h.db, 'awaiting_exit_classification', 10)).toHaveLength(1);
-    h.advance(10 * MIN);
-    await h.engine.tick(); // window elapsed: one more row
+    h.advance(8 * MIN);
+    await h.engine.tick(); // 9 minutes after the first sighting: still waiting, still one row (R21 ends the wait at 10)
     expect(close).not.toHaveBeenCalled();
-    expect(listJournal(h.db, 'awaiting_exit_classification', 10)).toHaveLength(2);
+    expect(loadPosition(h.db)?.side).toBe('long');
+    expect(listJournal(h.db, 'awaiting_exit_classification', 10)).toHaveLength(1);
+  });
+});
+
+const shock = (h: H) => assess(h, { direction: 'down', bucket: 'shock', credibility: 1, confidence: 0.9 });
+
+describe('tracked position the broker cannot see and never classifies (R21)', () => {
+  async function vanishedHarness() {
+    const h = harness();
+    await openLong(h);
+    vi.spyOn(h.broker, 'position').mockResolvedValue(null);
+    vi.spyOn(h.broker, 'poll').mockResolvedValue([]);
+    return h;
+  }
+
+  it('waits 10 minutes, then records exactly one conservative stop-out, clears the position and alerts', async () => {
+    const h = await vanishedHarness();
+    await h.engine.tick(); // first sighting
+    expect(listJournal(h.db, 'awaiting_exit_classification', 10)).toHaveLength(1);
+    expect(listExits(h.db, 0)).toHaveLength(0);
+    h.advance(9 * MIN);
+    await h.engine.tick();
+    expect(listExits(h.db, 0)).toHaveLength(0);
+    expect(loadPosition(h.db)?.side).toBe('long');
+    h.advance(MIN); // 10 minutes since the first sighting
+    await h.engine.tick();
+    expect(listExits(h.db, 0).map((e) => [e.rule, e.side])).toEqual([['trailing_stop', 'long']]);
+    expect(loadPosition(h.db)).toBeNull();
+    expect(h.engine.status().position).toBeNull();
+    expect(h.alerts.join('\n')).toMatch(/closed outside the bot/);
+    expect(listJournal(h.db, 'broker_event', 5)).toHaveLength(1);
+    h.advance(MIN);
+    await h.engine.tick();
+    expect(listExits(h.db, 0)).toHaveLength(1);
+  });
+
+  it('ignores a late broker event after the synthetic close: no second exit, journaled as broker_event_ignored', async () => {
+    const h = await vanishedHarness();
+    await h.engine.tick();
+    h.advance(10 * MIN);
+    await h.engine.tick();
+    expect(listExits(h.db, 0)).toHaveLength(1);
+    const late: BrokerEvent = {
+      kind: 'stopped_out', rule: 'trailing_stop', side: 'long', pnlUsd: -0.1,
+      fill: { side: 'long', contracts: 1, price: 13.2, feeUsd: 0.001, tsMs: h.now() },
+    };
+    vi.spyOn(h.broker, 'poll').mockResolvedValueOnce([late]);
+    h.advance(MIN);
+    await h.engine.tick();
+    expect(listExits(h.db, 0)).toHaveLength(1);
+    expect(listJournal(h.db, 'broker_event_ignored', 5)).toHaveLength(1);
+    expect(h.alerts.join('\n')).toMatch(/ignored a broker stopped_out event/);
+  });
+
+  it('resets the waiting timer when the broker position reappears', async () => {
+    const h = await vanishedHarness();
+    await h.engine.tick(); // awaiting since T
+    h.advance(6 * MIN);
+    vi.mocked(h.broker.position).mockRestore(); // the broker sees the position again
+    await h.engine.tick();
+    vi.spyOn(h.broker, 'position').mockResolvedValue(null);
+    await h.engine.tick(); // a fresh wait starts here
+    h.advance(6 * MIN); // 12 minutes after the first sighting but only 6 after the second
+    await h.engine.tick();
+    expect(listExits(h.db, 0)).toHaveLength(0);
+    expect(loadPosition(h.db)?.side).toBe('long');
+    h.advance(4 * MIN);
+    await h.engine.tick();
+    expect(listExits(h.db, 0)).toHaveLength(1);
+  });
+});
+
+describe('bookkeeping failures after a successful broker call (R23)', () => {
+  it('close succeeds, then balance() throws: no close_failed row or alert, exit recorded, failure shown as assess_error', async () => {
+    const h = harness();
+    await openLong(h);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined); // assess_error is logged
+    const realClose = h.broker.close.bind(h.broker);
+    vi.spyOn(h.broker, 'close').mockImplementation(async () => {
+      const res = await realClose();
+      vi.spyOn(h.broker, 'balance').mockRejectedValue(new Error('balance down'));
+      return res;
+    });
+    await h.engine.onAssessment(shock(h));
+    expect(listJournal(h.db, 'close_failed', 5)).toHaveLength(0);
+    expect(h.alerts.join('\n')).not.toMatch(/close failed/);
+    expect(listExits(h.db, 0).map((e) => e.rule)).toEqual(['shock']);
+    expect(loadPosition(h.db)).toBeNull();
+    expect(listJournal(h.db, 'close', 5)).toHaveLength(1);
+    expect(listJournal(h.db, 'assess_error', 5)).toHaveLength(1);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+
+  it('open succeeds, then persistBroker throws: no open_failed row or alert, the position stays tracked, failure shown as assess_error', async () => {
+    const h = harness();
+    let armed = false;
+    const e2 = h.newEngine(h.broker, () => {
+      if (armed) throw new Error('disk full');
+    });
+    await e2.tick();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined); // assess_error is logged
+    armed = true;
+    await e2.onAssessment(assess(h));
+    expect(listJournal(h.db, 'open_failed', 5)).toHaveLength(0);
+    expect(h.alerts.join('\n')).not.toMatch(/open failed/);
+    expect((await h.broker.position())?.side).toBe('long');
+    expect(loadPosition(h.db)?.side).toBe('long');
+    expect(listJournal(h.db, 'assess_error', 5)).toHaveLength(1);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+});
+
+describe('stub-broker reconciliation (R22, R24)', () => {
+  const longBp: BrokerPosition = {
+    side: 'long', contracts: 1, entryPrice: 13.76, markPrice: 13.755, liqDistance: 0.2, feesUsd: 0.001, liqPrice: 10.8,
+    unrealizedPnlUsd: 0,
+  };
+  const storedShort: PositionState = {
+    side: 'short', contracts: 1, entryPrice: 13.7, entryTimeMs: NOW0 - H, extreme: 13.7, leverage: 3.9, stopBps: 388,
+    tightenedUntilMs: null,
+  };
+
+  function setup(positionFn: (call: number) => BrokerPosition | null, stored: PositionState | null = null) {
+    let now = NOW0;
+    const db = openPerpDb(':memory:');
+    const alerts: string[] = [];
+    let opens = 0;
+    const position = vi.fn(async () => positionFn(position.mock.calls.length));
+    const setTrailingStop = vi.fn(async (_bps: number) => undefined);
+    const stub: Broker = {
+      mode: 'paper',
+      quote: async () => ({ bid: 13.75, ask: 13.76, mark: 13.755, tsMs: now }),
+      position,
+      balance: async () => ({ equityUsd: 3.5, availableUsd: 3.5 }),
+      open: async () => {
+        opens += 1;
+        throw opens === 1 ? Object.assign(new Error('unresolved'), { positionMayBeOpen: true }) : new Error('rejected');
+      },
+      close: async () => {
+        throw new Error('close not expected');
+      },
+      setTrailingStop,
+      poll: async () => [],
+    };
+    const collect = async (): Promise<Collected> => ({
+      perp: { bid: 13.75, ask: 13.76, mark: 13.755, marketOpen: true, nextCloseTsMs: NOW0 + 3 * 24 * H, fundingEstimate: 0.0001 },
+      perpFetchedAtMs: now,
+      macro: { vix: { value: 16, change1d: 0, asOf: '2026-10-13' } },
+      macroFetchedAtMs: now,
+      events: [],
+      kalshiEvents: [],
+    });
+    if (stored !== null) savePosition(db, stored);
+    const engine = new PerpEngine({ cfg: DEFAULT_CONFIG, db, broker: stub, now: () => now, collect, alert: (m) => alerts.push(m) });
+    const item = (): ImpactAssessment => ({
+      itemId: `r22-${++seq}`, receivedAtMs: now, publishedAtMs: now - 30_000, direction: 'up', bucket: 'major',
+      horizon: 'days', credibility: 0.8, novelty: 'new', alreadyPriced: 'no', confidence: 0.75, rationale: 'test',
+    });
+    return { db, alerts, engine, position, setTrailingStop, item, advance: (ms: number) => { now += ms; } };
+  }
+
+  it.each([
+    ['reads flat', (): BrokerPosition | null => null],
+    ['read fails', (): BrokerPosition | null => { throw new Error('read failed'); }],
+  ])('R22: when the immediate reconcile after a flagged open fails or reads flat (%s), the next tick adopts the position and sets the stop', async (_label, firstRead) => {
+    const s = setup((call) => (call === 1 ? firstRead() : longBp));
+    await s.engine.tick();
+    await s.engine.onAssessment(s.item()); // open throws positionMayBeOpen; the immediate reconcile finds nothing usable
+    expect(loadPosition(s.db)).toBeNull();
+    expect(s.setTrailingStop).not.toHaveBeenCalled();
+    expect(s.alerts.join('\n')).not.toMatch(/startup/);
+    s.advance(MIN);
+    await s.engine.tick();
+    expect(loadPosition(s.db)?.side).toBe('long');
+    expect(s.setTrailingStop).toHaveBeenCalledTimes(1);
+    expect(s.setTrailingStop).toHaveBeenCalledWith(388);
+  });
+
+  it('R22: gives up after exactly 30 retries with exactly one alert and makes no further reconcile calls', async () => {
+    const s = setup(() => {
+      throw new Error('read failed');
+    });
+    await s.engine.tick();
+    await s.engine.onAssessment(s.item());
+    expect(s.position).toHaveBeenCalledTimes(1); // the immediate reconcile
+    for (let i = 0; i < 40; i++) {
+      s.advance(MIN);
+      await s.engine.tick();
+    }
+    expect(s.position).toHaveBeenCalledTimes(31); // 1 immediate + 30 retries
+    expect(s.alerts.filter((a) => /could not confirm the exchange position/.test(a))).toHaveLength(1);
+    expect(s.alerts.join('\n')).not.toMatch(/startup/);
+  });
+
+  it('R24: a stored short against a broker long adopts the broker long, halts, sets a stop and alerts the mismatch', async () => {
+    const s = setup(() => longBp, storedShort);
+    await s.engine.start();
+    expect(loadPosition(s.db)?.side).toBe('long');
+    expect(s.engine.status().position?.side).toBe('long');
+    expect(loadRiskState(s.db).halted).toBe(true);
+    expect(s.setTrailingStop).toHaveBeenCalledWith(388);
+    expect(s.alerts.join('\n')).toMatch(/side mismatch/);
+    expect(listJournal(s.db, 'reconcile', 5).map((r) => (r.payload as { result: string }).result)).toEqual([
+      'side_mismatch_adopted', 'side_mismatch',
+    ]);
   });
 });
