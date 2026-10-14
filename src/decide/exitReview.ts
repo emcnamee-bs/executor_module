@@ -104,7 +104,7 @@ const GROUP_HINT: Record<OutcomeGroup, string> = {
 };
 
 /** `useLabel` is true only for multi positions, so every other structure's prompt stays unchanged. */
-function describeMarket(m: BandMarket, useLabel = false): string {
+export function describeMarket(m: BandMarket, useLabel = false): string {
   switch (m.strikeType) {
     case 'greater': return `pays YES if the settlement quantity is above ${m.floorStrike}`;
     case 'greater_or_equal': return `pays YES if the settlement quantity is at or above ${m.floorStrike}`;

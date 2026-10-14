@@ -34,18 +34,20 @@ export interface MultiDecision {
 
 // No numeric minimum/maximum or maxItems: Anthropic structured outputs reject them (see decide.ts).
 // The bounds are enforced by the prompt and by checkMultiMoves.
+export const MULTI_MOVES_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: { market: { type: 'string' }, shift: { type: 'number' }, confidence: { type: 'number' } },
+    required: ['market', 'shift', 'confidence'],
+    additionalProperties: false,
+  },
+};
+
 const MULTI_SCHEMA = {
   type: 'object',
   properties: {
-    moves: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: { market: { type: 'string' }, shift: { type: 'number' }, confidence: { type: 'number' } },
-        required: ['market', 'shift', 'confidence'],
-        additionalProperties: false,
-      },
-    },
+    moves: MULTI_MOVES_SCHEMA,
     reasoning: { type: 'string' },
   },
   required: ['moves', 'reasoning'],
@@ -128,7 +130,7 @@ export function checkMultiMoves(rawMoves: unknown, markets: BandMarket[], group:
   return { ok: true, moves };
 }
 
-const GROUP_RULE: Record<OutcomeGroup, string> = {
+export const GROUP_RULE: Record<OutcomeGroup, string> = {
   ladder:
     'These markets are NESTED "before date X" markets for one event: an earlier date can never be more likely than a later one. Moves that break that order are repaired by code.',
   exclusive:
