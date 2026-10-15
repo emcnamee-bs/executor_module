@@ -142,7 +142,7 @@ describe('decideMulti', () => {
   const lastCall = () => db.prepare(`SELECT stage, verdict, reasoning FROM ai_calls ORDER BY id DESC LIMIT 1`).get() as any;
 
   it('returns the validated moves and logs a decide_multi call', async () => {
-    const out = await decideMulti(clientReturning({ moves: [mv('F-HOLD', -8), mv('F-CUT', 8)], reasoning: 'cut is likelier' }), db, ctx());
+    const out = await decideMulti(clientReturning({ moves: [mv('F-HOLD', -8), mv('F-CUT', 8)], reasoning: 'cut is likelier', period_matches: true, period_note: 'same meeting' }), db, ctx());
     expect(out).toEqual({ shouldTrade: true, moves: [mv('F-HOLD', -8), mv('F-CUT', 8)], reasoning: 'cut is likelier' });
     expect(lastCall()).toMatchObject({ stage: 'decide_multi', verdict: 'moves:2' });
   });

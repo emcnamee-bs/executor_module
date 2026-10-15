@@ -316,6 +316,7 @@ async function runEntryPipeline(
 
       decision = await decideTrade(anthropicClient, db, {
         loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit, triageReason: triage.reason,
+        periodCheck: paper,
       });
     }
 

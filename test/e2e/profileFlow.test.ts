@@ -41,7 +41,7 @@ class Fakes {
   gateAnswer = '{"reason":"barges carry petroleum products","relevant":true}';
   sonnet: any[] = [
     { reason: 'plausible fuel supply delay', verdict: 'escalate' },
-    { direction: 'up', magnitude_pts: 0.04, should_trade: true, reasoning: 'Midwest barge delays tighten supply' },
+    { direction: 'up', magnitude_pts: 0.04, should_trade: true, reasoning: 'Midwest barge delays tighten supply', period_matches: true, period_note: 'same week' },
   ];
   article: Article | null = { title: 'Barge limits', description: 'River levels', text: 'Petroleum-product barges headed to Midwest terminals face delays.', truncated: false };
   fetchedUrls: string[] = [];
