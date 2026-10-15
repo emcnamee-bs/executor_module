@@ -17,13 +17,13 @@ export function resolveLabConfig(env: NodeJS.ProcessEnv, repoRoot: string): LabC
     if (!Number.isFinite(n) || !ok(n)) throw new Error(`${name} must be ${rule}, got ${JSON.stringify(raw)}`);
     return n;
   };
-  const dataDir = env.LAB_DATA_DIR ?? path.join(repoRoot, 'data', 'perp');
+  const dataDir = env.LAB_DATA_DIR || path.join(repoRoot, 'data', 'perp'); // empty string counts as unset
   return {
     capUsd: num('LAB_DAILY_USD_CAP', 0.5, (n) => n > 0 && n <= 2, 'a number of dollars above 0 and at most 2 (the audit budget is small by design)'),
     days: num('LAB_DAYS', 7, (n) => Number.isInteger(n) && n >= 1 && n <= 30, 'a whole number of days from 1 to 30'),
     seed: num('LAB_SEED', 20261014, (n) => Number.isInteger(n) && n >= 0, 'a non-negative integer'),
     dataDir,
-    botDbPath: env.LAB_BOT_DB ?? path.join(dataDir, 'perp-paper.db'),
-    prefilterFile: env.PERP_PREFILTER_FILE ?? path.join(repoRoot, 'config', 'perp-prefilter.json'),
+    botDbPath: env.LAB_BOT_DB || path.join(dataDir, 'perp-paper.db'),
+    prefilterFile: env.PERP_PREFILTER_FILE || path.join(repoRoot, 'config', 'perp-prefilter.json'),
   };
 }

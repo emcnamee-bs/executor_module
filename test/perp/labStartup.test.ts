@@ -26,6 +26,14 @@ describe('resolveLabConfig', () => {
     expect(c.prefilterFile).toBe(path.join('/repo', 'config', 'perp-prefilter.json'));
     expect(Number.isInteger(c.seed)).toBe(true);
   });
+  it('treats empty path variables as unset (like the numeric ones), and honours real overrides', () => {
+    const c = resolveLabConfig(env({ LAB_DATA_DIR: '', LAB_BOT_DB: '', PERP_PREFILTER_FILE: '' }), '/repo');
+    expect(c.dataDir).toBe(path.join('/repo', 'data', 'perp'));
+    expect(c.botDbPath).toBe(path.join('/repo', 'data', 'perp', 'perp-paper.db'));
+    expect(c.prefilterFile).toBe(path.join('/repo', 'config', 'perp-prefilter.json'));
+    const o = resolveLabConfig(env({ LAB_DATA_DIR: '/d', LAB_BOT_DB: '/b.db', PERP_PREFILTER_FILE: '/p.json' }), '/repo');
+    expect(o).toMatchObject({ dataDir: '/d', botDbPath: '/b.db', prefilterFile: '/p.json' });
+  });
   it('reads overrides and rejects nonsense', () => {
     expect(resolveLabConfig(env({ LAB_DAILY_USD_CAP: '0.25', LAB_DAYS: '3', LAB_SEED: '42' }), '/r')).toMatchObject({ capUsd: 0.25, days: 3, seed: 42 });
     expect(() => resolveLabConfig(env({ LAB_DAILY_USD_CAP: '0' }), '/r')).toThrow(/LAB_DAILY_USD_CAP/);

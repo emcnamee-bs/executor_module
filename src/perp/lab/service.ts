@@ -17,6 +17,7 @@ import { CANDIDATE_WINDOW_MS, canSpendNow, chooseCandidate, listCandidates, rand
 
 export type EntryResult = 'logged' | 'duplicate' | 'skipped' | 'parse_error' | 'error';
 const DAY_MS = 86_400_000;
+export const DEFAULT_REPORT_PATH_LABEL = 'data/perp/intake-lab-week1.md';
 
 export interface LabServiceDeps {
   labDb: Database.Database;
@@ -31,6 +32,8 @@ export interface LabServiceDeps {
   audit: (row: AuditRow, stratum: Stratum, kind: AuditKind) => Promise<AuditOutcome>;
   alert: (message: string) => void | Promise<void>;
   writeReport: (markdown: string) => void;
+  /** How the report location is named in the completion alert. */
+  reportPathLabel?: string;
 }
 
 export class LabService {
@@ -94,6 +97,10 @@ export class LabService {
         .prepare('SELECT item_id, received_ms, published_ms, source_id, tier, headline, snippet FROM items WHERE item_id = ?')
         .get(pick.candidate.itemId) as AuditRow;
       return await this.d.audit(row, pick.candidate.stratum, pick.kind);
+    } catch (err) {
+      // A timer must never see a rejection: an unhandled one would crash the process and stop feature logging.
+      console.error('[perp-lab] audit tick failed:', err instanceof Error ? err.message : String(err));
+      return 'error';
     } finally {
       this.auditing = false;
     }
@@ -134,12 +141,18 @@ export class LabService {
 
   /** Once the audit window has closed: build and write the report, alert, and remember it was done. */
   async maybeReport(): Promise<boolean> {
-    if (this.auditActive() || getMeta(this.d.labDb, 'report_done') !== null) return false;
-    const md = buildReport(this.d.labDb, this.d.botDb, this.d.now());
-    this.d.writeReport(md);
-    setMeta(this.d.labDb, 'report_done', new Date(this.d.now()).toISOString());
     try {
-      await this.d.alert('[PERP-LAB] the 7-day audit is complete; the report is in data/perp/intake-lab-week1.md');
+      if (this.auditActive() || getMeta(this.d.labDb, 'report_done') !== null) return false;
+      const md = buildReport(this.d.labDb, this.d.botDb, this.d.now());
+      this.d.writeReport(md);
+      setMeta(this.d.labDb, 'report_done', new Date(this.d.now()).toISOString());
+    } catch (err) {
+      // report_done stays unset, so the next housekeeping tick retries; no alert for a report that was not written.
+      console.error('[perp-lab] report failed:', err instanceof Error ? err.message : String(err));
+      return false;
+    }
+    try {
+      await this.d.alert(`[PERP-LAB] the ${this.d.days}-day audit is complete; the report is in ${this.d.reportPathLabel ?? DEFAULT_REPORT_PATH_LABEL}`);
     } catch (err) {
       console.error('[perp-lab] alert failed:', err instanceof Error ? err.message : String(err));
     }
