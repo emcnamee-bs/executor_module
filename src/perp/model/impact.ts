@@ -16,7 +16,7 @@ const ImpactSchema = z.object({
   novelty: z.enum(['new', 'known']),
   already_priced: z.enum(['yes', 'no', 'unclear']),
   confidence: z.number().min(0).max(1),
-  rationale: z.string().max(400),
+  rationale: z.string().transform((s) => s.slice(0, 400)),
 });
 
 const IMPACT_JSON_SCHEMA = {

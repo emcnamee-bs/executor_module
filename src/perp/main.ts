@@ -9,17 +9,20 @@ import { createRedisClient } from '../redis/client.js';
 import { StreamConsumer } from '../redis/consumer.js';
 import { KalshiMarginClient } from './broker/kalshiMarginClient.js';
 import type { PaperState } from './broker/paper.js';
-import { calendarCoverageDays, loadCalendar } from './collectors/calendar.js';
+import { calendarCoverageDays, highImpactWindowOpen, loadCalendar } from './collectors/calendar.js';
 import { collectMacro } from './collectors/fred.js';
 import { collectKalshiEvents } from './collectors/kalshiEvents.js';
 import { collectPerp } from './collectors/perpMarket.js';
 import { loadPerpConfig } from './config.js';
 import { PerpEngine, type Collected } from './engine/engine.js';
 import { NewsIntake } from './intake/newsIntake.js';
+import { createPrefilterState, loadPrefilterConfig, resolvePrefilterSetting } from './intake/prefilter.js';
 import { checkSilence } from './intake/silence.js';
 import { ensureModelCallsTable } from './model/callJson.js';
 import { runPerpGate, type ModelDeps } from './model/gate.js';
 import { extractImpact } from './model/impact.js';
+import { currentCommit } from './ops/commit.js';
+import { preferIpv4 } from './ops/network.js';
 import { createBroker, resolveMode } from './startup.js';
 import { appendJournal, getState, openPerpDb, setState } from './store/db.js';
 import { createTickLoop } from './tickLoop.js';
@@ -40,6 +43,7 @@ function must(name: string): string {
 }
 
 export async function main(): Promise<void> {
+  preferIpv4(); // before any client exists: this host's IPv6 route is dead and its IPv4 connects are slow (see ops/network.ts)
   const env = process.env;
   const cfg = loadPerpConfig(env);
   const mode = resolveMode(env, cfg.ticker);
@@ -82,6 +86,11 @@ export async function main(): Promise<void> {
 
   const calendarFile = env.PERP_CALENDAR_FILE ?? path.join(REPO_ROOT, 'config', 'perp-calendar.json');
   loadCalendar(calendarFile, Date.now()); // fail at startup, loudly, if the calendar file is missing or invalid
+  const prefilterEnabled = resolvePrefilterSetting(env);
+  const prefilterFile = env.PERP_PREFILTER_FILE || path.join(REPO_ROOT, 'config', 'perp-prefilter.json');
+  // On with an unreadable or invalid config refuses to start: running unfiltered by accident would silently restore the old cost.
+  const prefilterCfg = prefilterEnabled ? loadPrefilterConfig(prefilterFile) : null;
+  const commit = currentCommit(REPO_ROOT);
   const kalshiTickers = (env.PERP_KALSHI_EVENT_TICKERS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
   let macroCache: { at: number; macro: Record<string, MacroPoint> } | null = null;
@@ -118,9 +127,14 @@ export async function main(): Promise<void> {
     db, now: () => Date.now(), alert, engine,
     gate: (item) => runPerpGate(modelDeps, item),
     extract: (item, ctx) => extractImpact(modelDeps, item, ctx, Date.now()),
+    prefilter: prefilterCfg === null ? undefined : { enabled: true, cfg: prefilterCfg, state: createPrefilterState() },
+    calendarWindowOpen: (nowMs) => {
+      try { return highImpactWindowOpen(calendarFile, nowMs); } catch { return false; } // the calendar alert already covers an unreadable file
+    },
+    commit,
   });
 
-  console.log(`[perp] starting mode=${mode.mode} ticker=${mode.marketTicker} subaccount=${mode.subaccount ?? '-'} tickMs=${tickMs} fullSnapshotMs=${fullSnapshotMs} db=${dbPath}`);
+  console.log(`[perp] starting mode=${mode.mode} ticker=${mode.marketTicker} subaccount=${mode.subaccount ?? '-'} tickMs=${tickMs} fullSnapshotMs=${fullSnapshotMs} db=${dbPath} prefilter=${prefilterEnabled ? 'on' : 'off'} commit=${commit}`);
   await engine.start();
   await engine.tick(); // first snapshot, so news arriving next has context
 
