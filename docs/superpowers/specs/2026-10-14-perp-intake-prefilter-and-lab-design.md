@@ -82,7 +82,7 @@ type Verdict = {
 5. **Hourly caps** `haikuPerHour` (default 30) and `sonnetPerHour` (default 6). Over the Haiku cap, only items whose score is >= the current
    hour's cap-admitting minimum pass (floor = min(scoreCap, threshold + passesInLastHour - haikuPerHour + 1); official_macro bypasses); the rest are `haiku_cap`.
 
-Fail closed: if `prefilter` throws for an item, the intake drops it, journals `prefilter_error`, and counts it; five in an hour raise one alert.
+Fail closed: if `prefilter` throws for an item, the intake drops it, journals `prefilter_error`, and counts it; five in one UTC day raise one alert.
 Kill switch: `PERP_PREFILTER=off` restores today's behaviour exactly (every hygiene-passing item goes to Haiku).
 
 ### Gate and escalation
