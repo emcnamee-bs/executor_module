@@ -18,6 +18,7 @@
     "perp-backtest": "tsx scripts/perp-backtest.ts",
     "perp-bot": "tsx src/perp/main.ts",
     "perp-report": "tsx scripts/perp-report.ts",
+    "perp-history": "tsx scripts/perp-history.ts",
     "perp-clear-halt": "tsx scripts/perp-clear-halt.ts",
     "perp-paper-fund": "tsx scripts/perp-paper-fund.ts",
     "typecheck": "tsc --noEmit",
