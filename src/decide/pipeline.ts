@@ -34,7 +34,9 @@ import { hasSellTrigger } from '../paper/exits.js';
 import { placeOrder, deriveClientOrderId } from '../execute/order.js';
 import { positionForTicker, type KalshiClient } from '../execute/kalshiClient.js';
 import { fetchArticle } from '../fetch/excerpt.js';
-import { recordPaperPosition, hasPaperPosition, paperExposureCents, PAPER_CAPS } from '../paper/paper.js';
+import { recordPaperPosition, hasPaperPosition, paperExposureCents, paperOpenCostByMarket, PAPER_CAPS } from '../paper/paper.js';
+import { paperGuardsFromEnv } from './guards.js';
+import { marketEventLine } from './periodCheck.js';
 import type { LoadedProfile } from '../profile/profile.js';
 
 export type ExitWiring = Pick<
@@ -303,7 +305,7 @@ async function runEntryPipeline(
         if (outcomeGroup === undefined) throw new Error('multi profile has no outcomeGroup'); // the schema forbids this
         const multi = await decideMulti(anthropicClient, db, {
           loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit,
-          triageReason: triage.reason, markets: ladder.bands, group: outcomeGroup,
+          triageReason: triage.reason, markets: ladder.bands, group: outcomeGroup, marketEvent: marketEventLine(ladder),
         });
         if (!multi.shouldTrade) {
           record(skipRecord(item, multi.reasoning, { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
@@ -315,6 +317,8 @@ async function runEntryPipeline(
 
       decision = await decideTrade(anthropicClient, db, {
         loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit, triageReason: triage.reason,
+        periodCheck: paper,
+        marketEvent: marketEventLine(ladder),
       });
     }
 
@@ -401,8 +405,14 @@ async function runEntryPipeline(
     // live $1.25 cap almost every edge sizes to zero contracts. Written before and
     // independently of the real-cap sizing below, so a failure in the simulated-order
     // path can never lose the evidence of what the model decided.
+    const guards = paperGuardsFromEnv();
     const paperSizing = paper
-      ? evaluateSizing({ ...sizingBase, currentTotalExposureCents: paperExposureCents(db, ladder.eventTicker), caps: PAPER_CAPS })
+      ? evaluateSizing({
+          ...sizingBase,
+          currentTotalExposureCents: paperExposureCents(db, ladder.eventTicker),
+          caps: PAPER_CAPS,
+          ...(guards === null ? {} : { guards, openCostByMarket: paperOpenCostByMarket(db, ladder.eventTicker) }),
+        })
       : null;
     // A position in this market has already had an exit trigger: do not buy it back on paper.
     if (paperSizing?.wouldTrade && paperSizing.marketTicker !== null && hasSellTrigger(db, paperSizing.marketTicker)) {

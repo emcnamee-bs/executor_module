@@ -12,7 +12,8 @@ import type { DecisionRecord } from './ledger.js';
 import type { MultiMove } from './decideMulti.js';
 import { evaluateMultiSizing } from './sizing.js';
 import { skipRecord } from './skipRecord.js';
-import { recordPaperLegs, paperExposureCents, PAPER_CAPS } from '../paper/paper.js';
+import { recordPaperLegs, paperExposureCents, paperOpenCostByMarket, PAPER_CAPS } from '../paper/paper.js';
+import { paperGuardsFromEnv } from './guards.js';
 import { hasSellTrigger } from '../paper/exits.js';
 
 export interface MultiEntryArgs {
@@ -45,6 +46,7 @@ export function applyMultiEntry(a: MultiEntryArgs): void {
     reasons.push(`exit trigger already fired on ${m.market}; not re-entering`);
     return false;
   });
+  const guards = paperGuardsFromEnv();
   const sizing = evaluateMultiSizing({
     markets: ladder.bands,
     moves: movesToSize,
@@ -52,6 +54,7 @@ export function applyMultiEntry(a: MultiEntryArgs): void {
     rung: a.rung,
     currentTotalExposureCents: paperExposureCents(db, ladder.eventTicker),
     caps: PAPER_CAPS,
+    ...(guards === null ? {} : { guards, openCostByMarket: paperOpenCostByMarket(db, ladder.eventTicker) }),
   });
   reasons.push(...sizing.reasons);
   const legs = sizing.legs;

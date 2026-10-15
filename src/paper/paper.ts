@@ -84,6 +84,24 @@ export function recordPaperLegs(db: Database.Database, sourceItemId: string, leg
  */
 export const PAPER_CAPS = { perTradeCents: 1000, totalExposureCents: 5000 } as const;
 
+/**
+ * What the paper ledger still holds per market of one event: open cost in cents (entry price x contracts not yet
+ * sold) over unsettled positions. Feeds the per-market stacking cap (src/decide/guards.ts), so a story that keeps
+ * re-surfacing cannot keep adding to the same contract.
+ */
+export function paperOpenCostByMarket(db: Database.Database, eventTicker: string): Map<string, number> {
+  const rows = db
+    .prepare(
+      `SELECT p.market_ticker AS ticker,
+              SUM(p.entry_price_cents * MAX(0, p.contracts - COALESCE((SELECT SUM(e.contracts) FROM paper_exits e WHERE e.position_id = p.id), 0))) AS cost
+         FROM paper_positions p
+        WHERE p.event_ticker = ? AND p.side IS NOT NULL AND p.settled_at IS NULL AND p.market_ticker IS NOT NULL
+        GROUP BY p.market_ticker`
+    )
+    .all(eventTicker) as Array<{ ticker: string; cost: number }>;
+  return new Map(rows.map((r) => [r.ticker, r.cost]));
+}
+
 export function paperExposureCents(db: Database.Database, eventTicker: string): number {
   const row = db
     .prepare(

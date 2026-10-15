@@ -20,6 +20,7 @@ import { listOpenPaperPositions, hasExitReview, positionHasSellReview, recordExi
 import type { ExitFillInfo } from '../paper/exitFill.js';
 import { checkExitBudget } from '../paper/exitSpend.js';
 import { sendAlert } from '../alert.js';
+import { marketEventLine } from './periodCheck.js';
 
 export interface UnifiedStepDeps {
   anthropicClient: Anthropic;
@@ -149,7 +150,7 @@ export async function runUnifiedStep(
       loaded, itemId: item.item_id, articleText: prepared.articleText, excerptSource: prepared.excerptSource,
       tripwireHit: prepared.tripwireHit, sourceTrustTier: item.trust_tier, publishedAt: item.source_publish_ts ?? item.event_time,
       rung, lowTierRelaxed, markets, activeTickers: [...activeTickers], positions: reviewable.map((r) => r.view),
-      entryAllowed: canEnter, model: deps.model,
+      entryAllowed: canEnter, model: deps.model, ...(canEnter ? { marketEvent: marketEventLine(ladder!) } : {}),
     });
   } catch (err) {
     const failure = err instanceof Error ? err.message : String(err);

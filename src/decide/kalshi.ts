@@ -27,6 +27,8 @@ export interface ActiveLadder {
   eventTicker: string;
   /** Null when Kalshi leaves strike_date empty (weekly/rolling series); only echoed into the decision prompt. */
   strikeDate: string | null;
+  /** Kalshi's own event title ("CPI in October"): the market's period, whatever the profile text says. Absent when Kalshi sends none. */
+  eventTitle?: string;
   bands: BandMarket[];
 }
 
@@ -38,6 +40,7 @@ export interface MarketStatus {
 interface KalshiEvent {
   event_ticker: string;
   strike_date?: string | null;
+  title?: string;
 }
 
 interface KalshiEventsResponse {
@@ -125,7 +128,8 @@ export async function fetchActiveLadder(seriesTicker: string, db?: Database.Data
 
     const bands = await fetchEventBands(active.event_ticker);
 
-    return { eventTicker: active.event_ticker, strikeDate: active.strike_date ?? null, bands };
+    const title = typeof active.title === 'string' ? active.title.trim() : '';
+    return { eventTicker: active.event_ticker, strikeDate: active.strike_date ?? null, ...(title === '' ? {} : { eventTitle: title }), bands };
   } catch (err) {
     if (db) {
       const message = err instanceof Error ? err.message : String(err);
