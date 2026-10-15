@@ -32,17 +32,31 @@ export function clopperPearsonUpper(k: number, n: number, confidence = 0.95): nu
 
 export interface StratumCount { volume: number; n: number; k: number }
 
-/** Volume-weighted miss rate over strata that have both volume and audits; the bound is the weighted sum of the per-stratum bounds (conservative). */
-export function stratifiedEstimate(strata: StratumCount[]): { rate: number | null; upper95: number | null; n: number; k: number } {
-  const usable = strata.filter((s) => s.n > 0 && s.volume > 0);
-  if (usable.length === 0) return { rate: null, upper95: null, n: 0, k: 0 };
-  const total = usable.reduce((t, s) => t + s.volume, 0);
+export interface StratifiedEstimate { rate: number | null; upper95: number | null; n: number; k: number; coverage: number }
+
+/**
+ * Volume-weighted estimate over the strata that have dropped volume.
+ * - `rate`: miss rate over the AUDITED strata only (weights renormalised over them).
+ * - `upper95`: weighted by the TOTAL dropped volume; a stratum with volume but no audits contributes weight x 1 (no information),
+ *   an audited one weight x its Clopper-Pearson bound. So it is a conservative bound for all dropped items, not only the audited share.
+ * - `coverage`: share of the total dropped volume that sits in audited strata (0..1).
+ * Strata with no volume are ignored. If nothing with volume was audited, rate and upper95 are null.
+ */
+export function stratifiedEstimate(strata: StratumCount[]): StratifiedEstimate {
+  const withVolume = strata.filter((s) => s.volume > 0);
+  const audited = withVolume.filter((s) => s.n > 0);
+  if (audited.length === 0) return { rate: null, upper95: null, n: 0, k: 0, coverage: 0 };
+  const totalAll = withVolume.reduce((t, s) => t + s.volume, 0);
+  const totalAudited = audited.reduce((t, s) => t + s.volume, 0);
   let rate = 0;
+  for (const s of audited) rate += (s.volume / totalAudited) * (s.k / s.n);
   let upper = 0;
-  for (const s of usable) {
-    const w = s.volume / total;
-    rate += w * (s.k / s.n);
-    upper += w * clopperPearsonUpper(s.k, s.n);
-  }
-  return { rate, upper95: upper, n: usable.reduce((t, s) => t + s.n, 0), k: usable.reduce((t, s) => t + s.k, 0) };
+  for (const s of withVolume) upper += (s.volume / totalAll) * (s.n > 0 ? clopperPearsonUpper(s.k, s.n) : 1);
+  return {
+    rate,
+    upper95: upper,
+    n: audited.reduce((t, s) => t + s.n, 0),
+    k: audited.reduce((t, s) => t + s.k, 0),
+    coverage: totalAudited / totalAll,
+  };
 }

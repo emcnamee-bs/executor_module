@@ -41,7 +41,9 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
     L.push(`| ${s} | ${volume} | ${a.n} | ${k} | ${a.n === 0 ? 'n/a' : pct(clopperPearsonUpper(k, a.n))} |`);
   }
   const est = stratifiedEstimate(counts);
-  L.push('', `Overall random estimate: ${est.n} audited, ${est.k} miss${est.k === 1 ? '' : 'es'}, rate ${pct(est.rate)}, 95% upper bound ${pct(est.upper95)} (volume-weighted; the bound is the weighted sum of per-stratum bounds, so it is conservative).`);
+  const unaudited = counts.map((c, i) => ({ s: STRATA[i], volume: c.volume, n: c.n })).filter((x) => x.volume > 0 && x.n === 0);
+  const unauditedText = unaudited.map((x) => `${x.s} (${x.volume} items)`).join(', ');
+  L.push('', `Overall random estimate: ${est.n} audited, ${est.k} miss${est.k === 1 ? '' : 'es'}, rate ${pct(est.rate)}, 95% upper bound ${pct(est.upper95)} (volume-weighted; the bound is the weighted sum of per-stratum bounds, so it is conservative). Covers ${pct(est.coverage, 0)} of dropped volume${unaudited.length > 0 ? `; unaudited strata, counted at a bound of 100%: ${unauditedText}` : ''}.`);
   const bd = one<{ n: number; k: number | null }>(labDb, "SELECT COUNT(*) AS n, SUM(miss) AS k FROM audits WHERE kind = 'boundary' AND ok = 1");
   L.push('', `Boundary samples (not part of the estimate): ${bd.n} audited, ${bd.k ?? 0} miss${(bd.k ?? 0) === 1 ? '' : 'es'}.`);
   const failed = one<{ n: number }>(labDb, 'SELECT COUNT(*) AS n FROM audits WHERE ok = 0').n;
@@ -49,7 +51,7 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
 
   L.push('', '## Every miss', '');
   const misses = all<{ item_id: string; source_id: string; headline: string; stratum: string; kind: string; bucket: string; direction: string; rationale: string }>(
-    labDb, 'SELECT i.item_id, i.source_id, i.headline, a.stratum, a.kind, a.bucket, a.direction, a.rationale FROM audits a JOIN items i ON i.item_id = a.item_id WHERE a.miss = 1 ORDER BY a.at_ms'
+    labDb, 'SELECT i.item_id, i.source_id, i.headline, a.stratum, a.kind, a.bucket, a.direction, a.rationale FROM audits a JOIN items i ON i.item_id = a.item_id WHERE a.miss = 1 AND a.ok = 1 ORDER BY a.at_ms'
   );
   if (misses.length === 0) L.push('None.');
   for (const m of misses) L.push(`- [${m.kind}/${m.stratum}] ${m.source_id}: ${m.headline.slice(0, 160)} -> ${m.bucket} ${m.direction}. ${m.rationale.slice(0, 200)}`);
@@ -78,11 +80,15 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
     const avg = (stage: string): number | null => one<{ a: number | null }>(botDb, 'SELECT AVG(cost_usd) AS a FROM model_calls WHERE stage = ? AND ok = 1', stage).a;
     const g = avg('gate');
     const s = avg('impact');
-    const sonnetCalls = all<{ payload: string }>(botDb, "SELECT payload FROM journal WHERE kind = 'intake_outcome'").filter((r) => JSON.parse(r.payload).escalated === true).length;
+    // The Sonnet count must cover the same window as `items`/`passed`: only the bot's journal rows between the first and last lab item.
+    const sonnetCalls = range.a === null || range.b === null
+      ? 0
+      : all<{ payload: string }>(botDb, "SELECT payload FROM journal WHERE kind = 'intake_outcome' AND ts_ms >= ? AND ts_ms <= ?", range.a, range.b).filter((r) => JSON.parse(r.payload).escalated === true).length;
     if (g === null || s === null) L.push('The bot ledger has no gate/impact cost rows yet: spend estimate unavailable.');
     else {
-      const saved = (items - passed) * g + Math.max(0, items * BASELINE_SONNET_RATE - sonnetCalls) * s;
-      L.push(`Estimated model spend avoided: $${saved.toFixed(2)} (unfiltered Haiku reads ${items} vs ${passed}; Sonnet calls at the pre-prefilter rate ${(BASELINE_SONNET_RATE * 100).toFixed(0)}% vs ${sonnetCalls}; average cost per gate call $${g.toFixed(5)}, per impact call $${s.toFixed(5)}).`);
+      const sonnetSaved = range.a === null ? 0 : Math.max(0, items * BASELINE_SONNET_RATE - sonnetCalls) * s;
+      const saved = (items - passed) * g + sonnetSaved;
+      L.push(`Estimated model spend avoided: $${saved.toFixed(2)} (unfiltered Haiku reads ${items} vs ${passed}; Sonnet calls at the pre-prefilter rate ${(BASELINE_SONNET_RATE * 100).toFixed(0)}% vs ${sonnetCalls}, the bot's own escalations in the lab window; average cost per gate call $${g.toFixed(5)}, per impact call $${s.toFixed(5)}).`);
     }
   } catch {
     L.push('The bot ledger could not be read for costs: spend estimate unavailable.');
@@ -92,10 +98,15 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
 
   L.push('', '## Recommendation', '');
   if (est.n < MIN_AUDITS_FOR_VERDICT) L.push(`Not enough audited items (${est.n} random audits; ${MIN_AUDITS_FOR_VERDICT} needed) for a verdict: keep the production filter and keep collecting.`);
-  else if (est.k === 0) L.push(`Keep the production filter. No miss in ${est.n} random audits; the 95% upper bound on the miss rate is ${pct(est.upper95)}. Consider loosening only if the bot is starved of news it should read.`);
-  else {
-    const where = counts.map((c, i) => ({ s: STRATA[i], c })).filter((x) => x.c.k > 0).map((x) => `${x.s} (${x.c.k}/${x.c.n})`).join(', ');
-    L.push(`Review the ${est.k} miss${est.k === 1 ? '' : 'es'} above before changing anything. Misses came from: ${where}. If they share a pattern, add it to the lexicon; if they are social posts, consider allow-listing that account class (variant social_ok shows the cost).`);
+  else if (est.k === 0) {
+    const boundaryNote = (bd.k ?? 0) > 0 ? ` Boundary sampling found ${bd.k} miss${bd.k === 1 ? '' : 'es'}; review ${bd.k === 1 ? 'it' : 'them'} for lexicon additions.` : '';
+    if (unaudited.length > 0) L.push(`No miss in ${est.n} random audits, but ${unauditedText} had dropped items and no random audits, so the overall bound (${pct(est.upper95)}) is loose: it counts those strata at 100%. Do not decide to loosen the filter on this evidence; the production filter stays until every stratum with dropped items has been audited.${boundaryNote}`);
+    else L.push(`Keep the production filter. No miss in ${est.n} random audits; the 95% upper bound on the miss rate is ${pct(est.upper95)}. Consider loosening only if the bot is starved of news it should read.${boundaryNote}`);
+  } else {
+    // Only strata that contribute to the estimate (volume and audits), so the breakdown adds up to est.k.
+    const where = counts.map((c, i) => ({ s: STRATA[i], c })).filter((x) => x.c.volume > 0 && x.c.n > 0 && x.c.k > 0).map((x) => `${x.s} (${x.c.k}/${x.c.n})`).join(', ');
+    const gap = unaudited.length > 0 ? ` Note: ${unauditedText} had dropped items and no random audits, so the overall bound is loose.` : '';
+    L.push(`Review the ${est.k} miss${est.k === 1 ? '' : 'es'} above before changing anything. Misses came from: ${where}. If they share a pattern, add it to the lexicon; if they are social posts, consider allow-listing that account class (variant social_ok shows the cost).${gap}`);
   }
   L.push('');
   return L.join('\n');
