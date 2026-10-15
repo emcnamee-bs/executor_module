@@ -85,7 +85,7 @@ export async function main(): Promise<void> {
   const calendarFile = env.PERP_CALENDAR_FILE ?? path.join(REPO_ROOT, 'config', 'perp-calendar.json');
   loadCalendar(calendarFile, Date.now()); // fail at startup, loudly, if the calendar file is missing or invalid
   const prefilterEnabled = resolvePrefilterSetting(env);
-  const prefilterFile = env.PERP_PREFILTER_FILE ?? path.join(REPO_ROOT, 'config', 'perp-prefilter.json');
+  const prefilterFile = env.PERP_PREFILTER_FILE || path.join(REPO_ROOT, 'config', 'perp-prefilter.json');
   // On with an unreadable or invalid config refuses to start: running unfiltered by accident would silently restore the old cost.
   const prefilterCfg = prefilterEnabled ? loadPrefilterConfig(prefilterFile) : null;
   const commit = currentCommit(REPO_ROOT);

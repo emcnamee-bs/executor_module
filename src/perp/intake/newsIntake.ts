@@ -171,6 +171,7 @@ export class NewsIntake {
         this.consecutiveErrors = 0;
         return this.count(impact === 'none' || !gate.relevant ? 'gated_out' : 'not_escalated');
       }
+      // The Sonnet slot is consumed before the call on purpose: the hourly cap limits attempts, so a failing call cannot be retried past it.
       if (pf !== null) pf.state.sonnetAtMs.push(now);
       const assessment = await this.d.extract(item, context);
       await this.d.engine.onAssessment(assessment);

@@ -50,11 +50,15 @@ export async function main(): Promise<void> {
   const anthropic = new Anthropic();
   const modelDeps: ModelDeps = { client: anthropic as unknown as ModelDeps['client'], db: labDb, dailyUsdCap: cfg.capUsd };
   const reportPath = path.join(cfg.dataDir, 'intake-lab-week1.md');
+  // The alert names the real location: relative to the checkout when inside it, else the absolute path (LAB_DATA_DIR may point elsewhere).
+  const relReport = path.relative(REPO_ROOT, reportPath);
+  const reportPathLabel = relReport.startsWith('..') || path.isAbsolute(relReport) ? reportPath : relReport.split(path.sep).join('/');
   const service = new LabService({
     labDb, botDb, evaluator: makeEvaluator(prefilterCfg), cfg: prefilterCfg, now: () => Date.now(), commit, capUsd: cfg.capUsd, days: cfg.days, rng: makeRng(cfg.seed),
     audit: (row, stratum, kind) => (botDb === null ? Promise.resolve('no_context' as const) : auditItem({ labDb, botDb, modelDeps, now: () => Date.now() }, row, stratum, kind)),
     alert: (m) => sendAlert(m),
     writeReport: (md) => writeFileSync(reportPath, md),
+    reportPathLabel,
   });
 
   console.log(`[perp-lab] starting capUsd=${cfg.capUsd} days=${cfg.days} seed=${cfg.seed} commit=${commit} lab=${labPath} bot=${cfg.botDbPath}`);
@@ -75,7 +79,9 @@ export async function main(): Promise<void> {
     setInterval(safe('audit', () => service.auditTick()), AUDIT_TICK_MS),
     setInterval(safe('marks', () => service.fillMarks()), MARKS_TICK_MS),
     setInterval(safe('heartbeat', () => service.recordHeartbeat()), HEARTBEAT_MS),
-    setInterval(safe('housekeeping', async () => { await service.silenceTick(); await service.maybeReport(); }), HOUSEKEEPING_MS),
+    // Separate wrappers: a failing silence check must not block the day-7 report.
+    setInterval(safe('silence', () => service.silenceTick()), HOUSEKEEPING_MS),
+    setInterval(safe('report', () => service.maybeReport()), HOUSEKEEPING_MS),
   ];
 
   try {

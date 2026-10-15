@@ -17,23 +17,26 @@ if (!args.ok) {
 }
 const hours = Number(args.values.hours ?? 6);
 if (!Number.isFinite(hours) || hours <= 0 || hours > 72) {
-  console.error('--hours must be a number from 0 to 72');
+  console.error('--hours must be a number greater than 0 and at most 72');
   process.exit(2);
 }
 const cfg = loadPrefilterConfig(path.resolve(args.values.config ?? 'config/perp-prefilter.json'));
 const client = createRedisClient();
-await client.connect();
 const items: Item[] = [];
-let from = `${Date.now() - hours * 3_600_000}-0`;
-for (;;) {
-  const page = await client.xRange('iip:items', from, '+', { COUNT: 1000 });
-  if (page.length === 0) break;
-  for (const e of page) {
-    const parsed = parseItemFields(e.message as Record<string, string>);
-    if (parsed.ok) items.push(parsed.item);
+try {
+  await client.connect();
+  let from = `${Date.now() - hours * 3_600_000}-0`;
+  for (;;) {
+    const page = await client.xRange('iip:items', from, '+', { COUNT: 1000 });
+    if (page.length === 0) break;
+    for (const e of page) {
+      const parsed = parseItemFields(e.message as Record<string, string>);
+      if (parsed.ok) items.push(parsed.item);
+    }
+    from = `(${page[page.length - 1].id}`;
+    if (page.length < 1000) break;
   }
-  from = `(${page[page.length - 1].id}`;
-  if (page.length < 1000) break;
+} finally {
+  await client.quit().catch(() => undefined);
 }
-await client.quit();
 console.log(formatReplay(replayItems(items, cfg)));
