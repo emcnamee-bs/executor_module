@@ -1,13 +1,12 @@
-TRADE: Whether the AAA national average regular gas price exceeds $4.5600 on Oct 12, 2026.
-SETTLES ON: AAA's reported national average regular gasoline retail price for Oct 12, 2026; resolves Yes if strictly greater than $4.5600.
+TRADE: Whether the AAA national average price for regular gasoline on Oct 19, 2026 exceeds a strike near $4.56 per gallon.
+SETTLES ON: AAA national average regular gas price (gasprices.aaa.com) for Oct 19, 2026; Yes if strictly greater than the strike, to four decimals.
 MOVES THE PRICE:
-- Crude oil supply: OPEC+ production cuts or increases, US shale output changes, Strategic Petroleum Reserve releases or purchases, pipeline outages
-- Refinery operations: refinery outages or fires, planned/unplanned maintenance, seasonal switchover to summer/winter blend gasoline, refinery utilization rates
-- Geopolitics: Middle East conflict, Russia sanctions or export disruptions, Venezuela/Iran sanctions, shipping disruptions in Strait of Hormuz or Red Sea
-- Demand factors: holiday travel surges, summer driving season, economic recession or growth signals, airline fuel demand
-- Scheduled data releases: EIA Weekly Petroleum Status Report, EIA Short-Term Energy Outlook, API inventory data, weekly AAA price updates
-- Weather: hurricanes hitting Gulf Coast refineries, winter storms disrupting production or distribution, extreme heat affecting refinery operations
-- Policy/regulatory: federal or state gas tax changes, EPA fuel standard changes, environmental regulations on blends, tariffs on crude or refined products
-- Currency and macro: US dollar strength/weakness, inflation trends, Fed interest rate decisions affecting oil demand expectations
-SETTLEMENT-SENSITIVE FACTS: AAA price is a slow-moving daily average reflecting retail station surveys, not real-time futures prices; it lags crude oil and wholesale price moves by several days to weeks; regional price variation is smoothed into one national figure; AAA updates once daily, so intraday news has no immediate settlement effect; seasonal blend changes (cheaper winter blend vs pricier summer blend) occur around this time of year and can shift national average independent of crude prices.
-IGNORE: diesel prices, natural gas prices, electricity prices, stock market moves unrelated to energy, crude oil futures price levels without connection to retail gasoline, airline ticket prices, propane or heating oil markets, unrelated commodity news like gold or wheat.
+- Crude oil prices: WTI and Brent moves, OPEC+ output decisions, Saudi or Russian export changes, sanctions on oil exporters, SPR releases or refills
+- Refining and wholesale: RBOB futures, refinery outages, fires, unplanned maintenance, low refinery utilization, crack spreads, West Coast and Midwest refinery problems, pipeline disruptions
+- Inventories and scheduled data: EIA weekly petroleum status report (gasoline stocks, crude stocks, implied demand, refinery runs), API inventory data, EIA STEO, IEA and OPEC monthly reports
+- Seasonal and fuel-spec factors: the switch from summer-blend to cheaper winter-blend gasoline in autumn, the end of the driving season, RVP rule changes, California fuel spec transitions
+- Weather and disasters: Gulf of Mexico hurricanes, Gulf Coast refinery flooding or port closures, freezes, wildfires affecting Western supply
+- Geopolitics: Middle East conflict, Strait of Hormuz or Red Sea shipping disruption, Russia-Ukraine attacks on refineries or ports, Venezuela or Iran supply news, tanker attacks
+- Policy and demand: federal or state gas tax holidays or increases, Jones Act waivers, EPA fuel waivers, ethanol (E15) rules, recession signals, consumer travel demand, dollar strength
+SETTLEMENT-SENSITIVE FACTS: retail pump prices lag wholesale and crude moves by one to two weeks (rises pass through quickly, falls slowly), the national average usually moves only a cent or two per day, it is a volume-weighted average of all stations, California and West Coast prices weigh heavily, AAA reports a single daily figure so only the Oct 19 value counts, strikes are tightly spaced at $0.02 so small moves matter
+IGNORE: diesel-only price news, jet fuel, natural gas and electricity prices, electric vehicle sales, auto industry earnings, non-US or Europe gasoline prices, oil company stock moves without price effects, local single-state price stories that do not shift the national average

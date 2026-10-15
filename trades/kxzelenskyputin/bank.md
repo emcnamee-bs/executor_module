@@ -1,13 +1,13 @@
-TRADE: Probability that Volodymyr Zelenskyy and Vladimir Putin directly meet in person or speak by phone/video before the deadline.
-SETTLES ON: Resolves YES if the two leaders have any direct, real-time interaction (in-person meeting or call where both speak to each other) before Jan 1, 2028 (or earlier deadline variant); resolves NO otherwise.
+TRADE: Whether Zelenskyy and Putin hold a direct, real-time meeting or call before the deadline (end 2026, end 2027, or Jan 20 2029).
+SETTLES ON: Kalshi rules text. Yes if the two speak directly in real time, in person or by phone/video, before the date. Letters, intermediaries, same-event presence without interaction, cancelled meetings and near-misses do not count.
 MOVES THE PRICE:
-- Diplomatic initiatives: announced peace talks, ceasefire negotiations, summit proposals, mediator efforts (US, Turkey, China, Vatican, Gulf states)
-- Statements from leaders: Zelenskyy or Putin publicly expressing willingness or refusal to meet, preconditions set by either side
-- Third-party pressure: Trump, Biden, Xi, Erdogan, or UN officials pushing for direct talks or offering to host
-- Battlefield developments: major offensives, territorial gains/losses, ceasefire agreements, or escalations that make talks more or less likely
-- Scheduled events: G20, UN General Assembly, peace conferences, or other multilateral summits where both might attend
-- Domestic politics: elections, leadership changes, political instability in Ukraine or Russia affecting negotiation posture
-- Sanctions/economic pressure: new sanctions packages or easing that could incentivize or block dialogue
-- Prisoner exchanges or humanitarian deals: often cited as precursors to broader talks
-SETTLEMENT-SENSITIVE FACTS: Only direct real-time contact counts, so reports of letters, special envoys, or indirect messages do NOT trigger YES, even if framed as 'talks'; a meeting that is announced but then cancelled or postponed does not count; being at the same summit without speaking does not count; resolution requires confirmation of direct conversation, which may lag initial rumor-stage reporting; market may stay NO for long stretches even amid active diplomacy if contact remains indirect.
-IGNORE: Meetings between lower-level officials (foreign ministers, generals, negotiators) without the two principals present, Zelenskyy or Putin meeting with other heads of state (Trump, Xi, Macron) separately, written letters or messages exchanged via intermediaries, speculative punditry about 'eventual' talks with no concrete movement, military aid packages or troop movements unrelated to diplomatic contact, routine diplomatic statements reiterating existing positions without new meeting plans.
+- Peace negotiations: ceasefire talks, Istanbul-style delegation rounds, draft peace plans, Witkoff or Kushner Moscow visits, Kremlin or Kyiv statements on readiness or refusal to meet
+- US mediation: Trump-Putin calls or summits, Trump pressure on Kyiv or Moscow, trilateral summit proposals, Alaska or Budapest-style summit planning
+- Battlefield: major offensives, city captures, energy infrastructure strikes, missile attacks on Kyiv, shifts in leverage and willingness to talk
+- Sanctions and economics: US/EU sanctions packages, oil price cap, frozen assets decisions, tariffs on buyers of Russian oil
+- Third-party diplomacy: Turkey, Saudi Arabia, UAE, Vatican, China or India offering to host; Macron, Merz, Starmer and coalition-of-the-willing moves
+- Domestic politics: Ukrainian elections or martial law extensions, territory referendums, Putin's preconditions, Russian claims Zelenskyy is illegitimate, leadership change or health
+- Territory and security: Donbas withdrawal demands, NATO membership, security guarantees, prisoner exchanges
+- Scheduled events: G20, UN General Assembly, peace conferences, election dates
+SETTLEMENT-SENSITIVE FACTS: only direct real-time contact counts, so delegation talks, envoy meetings and Trump-relayed messages do not count; a call counts as much as an in-person summit; a summit announced but cancelled does not count; the first qualifying contact resolves all later deadlines Yes; no contact has happened since the 2019 Paris summit; Kremlin denials often precede later talks.
+IGNORE: Trump-Zelenskyy meetings without Putin, Putin-Trump talks with no Zelenskyy contact, Russia-Ukraine prisoner swap logistics, Medvedev or Lavrov rhetoric alone, unrelated Russia domestic news, Middle East or China-Taiwan diplomacy

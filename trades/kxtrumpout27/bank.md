@@ -1,12 +1,13 @@
-TRADE: Probability that Donald Trump leaves office or announces departure before Jan 20, 2029 (excluding normal end-of-term exit or death).
-SETTLES ON: Kalshi determination based on actual departure from office or a credible announcement of departure within the next year; scheduled constitutional term-limit expiration does not count; death triggers special settlement based on last traded price.
+TRADE: Whether Donald Trump leaves the US presidency early, or announces he will within a year, for any reason other than death or normal term expiry.
+SETTLES ON: Kalshi rules text. Yes if Trump leaves office before Jan 20, 2029, or if he announces departure within the next year. A statement that he leaves only because of the mandated term limit does not count. Death alone triggers a last-traded-price settlement, not Yes.
 MOVES THE PRICE:
-- Health/medical: hospitalization, reports of cognitive decline, surgery, medical emergency, death rumors
-- Legal/impeachment: new indictment, impeachment inquiry launched, impeachment vote in House, Senate conviction proceedings, 25th Amendment invocation talk
-- Political pressure: cabinet resignations, loss of GOP congressional support, mass protests, approval rating collapse, primary challenge rumors
-- Resignation signals: Trump statements about stepping down, leaked reports of resignation talks, VP transition planning, White House staff turnover suggesting instability
-- Legal rulings: court rulings on eligibility, Supreme Court case outcomes affecting his tenure, disqualification lawsuits
-- Geopolitical/national security crisis: war escalation, assassination attempt (failed), major national emergency prompting power transfer discussion
-- Succession planning: Vance positioning as successor, cabinet reshuffles hinting at transition
-SETTLEMENT-SENSITIVE FACTS: Only applies before Jan 20, 2029 (full term); 'announcement of departure within next year' counts even without actual departure; must be voluntary or forced exit, not death (death has separate settlement using last traded price); statements about leaving strictly due to term limit expiration do NOT count as YES; rumors/speculation without official confirmation unlikely to move price much unless from credible sources (Trump himself, White House, major wire services).
-IGNORE: General policy announcements unrelated to his tenure, routine cabinet appointments, midterm election results not tied to his personal status, unrelated impeachment chatter about other officials, normal travel/schedule news, fundraising or campaign-style rallies, unrelated legal cases not threatening removal from office, speculation about 2028 successor candidates unrelated to early exit.
+- Health and incapacity: hospitalization, cognitive-fitness reports, medical disclosures, physician statements, long absences from public view, 25th Amendment talk
+- Impeachment and removal: House impeachment votes, Senate trial and conviction math, Republican defections, articles of impeachment filed, party leaders breaking with Trump
+- Resignation or deal scenarios: resignation rumors, plea or pardon arrangements, legal-jeopardy stories, hand-off to the vice president, retirement hints
+- Political standing: midterm election results, approval polling collapse, GOP congressional revolt, primary challengers, cabinet resignations en masse
+- Legal and judicial: Supreme Court rulings on presidential power, criminal or civil cases, emoluments or contempt findings, investigations by Congress or the DOJ
+- Succession and 25th Amendment: Vice President or Cabinet statements on invoking Section 4, constitutional crisis, disputes over presidential capacity
+- Geopolitics and crises: war escalation, national security failures, major scandals, economic crash or recession that sparks calls to resign
+- Scheduled events: congressional hearings, court dates, election days, annual physicals, State of the Union and other public appearances
+SETTLEMENT-SENSITIVE FACTS: death does not resolve Yes, announcements of departure within 12 months count even before he actually leaves, the term-expiry acknowledgement is excluded, the markets are nested by date so an earlier exit implies the later deadlines too, loose rumors or denials by aides do not count without an actual announcement or exit, a third-term talk or term-limit remarks are not departures
+IGNORE: Trump cabinet or staff firings and resignations, ordinary policy or tariff news, Trump golf or travel schedule, other leaders' resignations, Trump family business news, 2028 candidate speculation, Trump third-term jokes without an exit, routine approval polls with no movement

@@ -1,17 +1,18 @@
 {
   "name": "kxinsurrection",
   "seriesTicker": "KXINSURRECTION",
-  "title": "Will Trump invoke the Insurrection Act before the deadline?",
-  "settlement": "This market resolves to Yes if the President of the United States has invoked the Insurrection Act to deploy the U.S. military and/or the federalized National Guard within the United States before the stated deadline date. It resolves No if no such invocation occurs before that date.",
+  "title": "Will Trump invoke the Insurrection Act?",
+  "settlement": "If the President of the United States has invoked the Insurrection Act to deploy the United States military and/or the federalized National Guard within the United States before the stated date, the market resolves to Yes. Nested markets cover before Dec 1, 2026, Jan 1, 2027, Jan 1, 2028 and Jan 20, 2029.",
   "gateModel": "qwen2.5:7b-instruct-q4_K_M",
   "gateKeepAlive": "10m",
-  "decideContext": "You are estimating how much a news item shifts the implied probability (in percentage points) that Trump will formally invoke the Insurrection Act before the market's deadline. Resolution requires an actual legal invocation triggering military/National Guard domestic deployment, not just threats or unrelated deployments.",
+  "decideContext": "Estimate how this news item changes the probability that the President formally invokes the Insurrection Act to deploy troops or federalized Guard domestically before the market's deadline. The market resolves Yes on formal invocation, not on threats or other deployment authorities.",
   "directSources": [],
-  "marketStructure": "capture",
-  "magnitudeUnit": "percentage points",
+  "marketStructure": "multi",
+  "outcomeGroup": "ladder",
+  "magnitudeUnit": "%",
   "maxMagnitude": 40,
   "ledgerPath": "data/kxinsurrection/decisions.db",
   "consumerGroup": "execmod-kxinsurrection",
-  "generatedAt": "2026-10-11T22:14:19.890Z",
-  "generatorModel": "claude-sonnet-5"
+  "generatedAt": "2026-10-14T14:48:00.394Z",
+  "generatorModel": "claude-sonnet-5-5"
 }

@@ -1,17 +1,18 @@
 {
   "name": "kxbalancepowercombo",
   "seriesTicker": "KXBALANCEPOWERCOMBO",
-  "title": "Will Republicans control both the House and Senate after the 2026 midterms?",
-  "settlement": "This market resolves YES only if Republicans win control of both the House and the Senate in the 2026 midterm elections, per Kalshi's CONTROL rulesets for each chamber. If either chamber's control resolves No or becomes impossible, the whole contract resolves No.",
+  "title": "2026 Midterms: Which party will control the House and Senate?",
+  "settlement": "Each of the four outcomes (Republicans sweep, R-House/D-Senate, D-House/R-Senate, Democrats sweep) pays Yes only if both the House Control and Senate Control components resolve to that combination under Kalshi's CONTROL rulesets. If any component resolves differently or becomes impossible, the combination resolves No. CONTROL components may resolve early once control is determined.",
   "gateModel": "qwen2.5:7b-instruct-q4_K_M",
   "gateKeepAlive": "10m",
-  "decideContext": "Estimate the probability that Republicans achieve a full Congressional sweep (House + Senate) in the 2026 midterms; price moves with polling, special election results, redistricting, retirements, fundraising, and macro/political conditions affecting the generic ballot.",
+  "decideContext": "Estimate how this news shifts the probability that each party wins a majority in the US House and in the Senate after the November 2026 midterms. The market resolves on the combination of chamber control outcomes, and exactly one of the four combinations will pay Yes.",
   "directSources": [],
-  "marketStructure": "capture",
-  "magnitudeUnit": "¢",
-  "maxMagnitude": 15,
+  "marketStructure": "multi",
+  "outcomeGroup": "exclusive",
+  "magnitudeUnit": "%",
+  "maxMagnitude": 20,
   "ledgerPath": "data/kxbalancepowercombo/decisions.db",
   "consumerGroup": "execmod-kxbalancepowercombo",
-  "generatedAt": "2026-10-11T22:20:03.858Z",
-  "generatorModel": "claude-sonnet-5"
+  "generatedAt": "2026-10-14T14:53:10.523Z",
+  "generatorModel": "claude-sonnet-5-5"
 }

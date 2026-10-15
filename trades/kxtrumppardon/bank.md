@@ -1,12 +1,12 @@
-TRADE: Betting on which specific named individuals (e.g., Michael Cohen, Jho Low, Charlie Javice, Leonard Glenn Francis, Tal Alexander, Rachel Cherwitz) will receive a Trump pardon, commutation, or reprieve in 2026.
-SETTLES ON: Each named person's market resolves YES only upon an official White House/DOJ announcement of a presidential pardon, commutation, or reprieve for that specific individual before Jan 1, 2027; otherwise NO.
+TRADE: Which named individuals receive a Trump pardon, commutation, or reprieve in his second term before Jan 1, 2027 (one market per person, e.g. Michael Cohen, Leonard Glenn Francis, Charlie Javice, Jho Low, Tal Alexander, Rachel Cherwitz)
+SETTLES ON: Official presidential clemency action (White House announcement, DOJ Office of the Pardon Attorney records, credible reporting); a pardon, commutation or reprieve for the named person in the second term up to Dec 31, 2026 resolves Yes.
 MOVES THE PRICE:
-- White House signals: Trump public statements, Truth Social posts, press briefing comments naming or hinting at a clemency candidate.
-- Legal/advocacy activity: formal pardon petitions filed, lawyers or lobbyists publicly pushing for clemency, DOJ pardon attorney recommendations.
-- Political allies/connections: reports of the individual's ties to Trump, GOP donors, or administration officials lobbying on their behalf.
-- Case status changes: convictions, sentencing dates, appeals outcomes, prison release dates that make clemency timely or moot.
-- Precedent/pattern: other pardons granted in same period suggesting a batch or theme (e.g., financial crimes, January 6 figures, white-collar fraud cases).
-- Media investigative pieces: journalists reporting backchannel negotiations or leaked clemency lists.
-- Public pressure campaigns: celebrity, political, or interest-group campaigns for/against a specific person's pardon.
-SETTLEMENT-SENSITIVE FACTS: Only a formal, confirmed executive clemency grant counts; mere rumors, petitions, or lawyer statements do not resolve YES; a commutation or reprieve counts same as full pardon; timing must fall within second term before Jan 1, 2027; each individual is judged independently, so one pardon does not affect others' markets directly.
-IGNORE: General pardon policy debates unrelated to named individuals, pardons from prior Trump term (first term 2017-2021), state-level governor pardons, unrelated criminal justice reform legislation, pardons granted by other countries' leaders, generic clemency statistics unrelated to these specific names.
+- Direct signals from Trump or the White House: Trump saying he is looking at a pardon, Truth Social posts, press-gaggle remarks, signed clemency warrants, officials confirming a review
+- Lobbying and allies: pardon czar Alice Johnson, pardon attorney Ed Martin, donors, lawyers, paid lobbyists pushing clemency, celebrity or congressional appeals, family campaigns
+- Case status: sentencing, appeals, prison reporting dates, early release, DOJ sentencing positions, convictions of fraud, bribery or sex-crime defendants, fugitive status
+- Political alignment: defendant praising Trump, donations, claims of weaponized DOJ or Biden-era prosecution, testimony against Trump foes, ties to Trump allies
+- Past clemency patterns: batches of pardons for white-collar fraudsters, political allies, crypto figures, mass actions like Jan 6, holiday-timed clemency rounds
+- Backlash and legal constraints: congressional criticism, victims' opposition, judges' rulings, DOJ pushback, midterm election considerations
+- Foreign and diplomatic: foreign governments requesting release of nationals, extradition fights (Jho Low), prisoner swaps, trade or diplomacy deals
+SETTLEMENT-SENSITIVE FACTS: only federal clemency counts, state convictions cannot be pardoned by the president, a pardon must actually be granted and not merely discussed, commutations and reprieves count as well as full pardons, clemency earlier in the second term (2025) counts, social media announcements often precede paperwork, unconvicted people or fugitives can still be pardoned, each person's market is independent so several can resolve Yes, rumors and 'considering' do not count
+IGNORE: state governors' pardons, Biden pardons, first-term pardons, the Thanksgiving turkey pardon, foreign leaders' pardons, general clemency policy op-eds with no named person, immigration deportation news

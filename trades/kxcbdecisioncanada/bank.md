@@ -1,12 +1,12 @@
-TRADE: Direction and size (in bps) of the Bank of Canada's policy rate decision at the Oct 28, 2026 meeting (hike >25, hike 25, hold, cut 25, cut >25).
-SETTLES ON: Official Bank of Canada rate announcement and policy statement released Oct 28, 2026; resolution matches the actual change to the target overnight rate versus the prior setting.
+TRADE: Size and direction of the Bank of Canada overnight policy rate change at its next scheduled monetary policy decision.
+SETTLES ON: Bank of Canada official rate announcement on the meeting date; the outcome bucket matching the announced change (hike >25bps, hike 25bps, hold, cut 25bps, cut >25bps) resolves Yes.
 MOVES THE PRICE:
-- Inflation data: Canada CPI prints (headline/core), trimmed-mean and median CPI trends, inflation expectations surveys, wage growth data.
-- Labour market: Statistics Canada jobs reports, unemployment rate changes, employment growth, labour force participation shifts.
-- Growth/output: GDP growth reports, retail sales, business outlook surveys, housing starts, consumer spending trends.
-- BoC communications: speeches by Governor Tiff Macklem or deputy governors, Monetary Policy Report releases, forward guidance language, meeting minutes/summary of deliberations.
-- External/global factors: US Federal Reserve rate decisions, oil price moves (Canada is a major energy exporter), Canadian dollar exchange rate swings, global trade tensions or tariffs affecting Canadian exports.
-- Financial conditions: bond yield moves, mortgage rate trends, household debt levels, bank lending conditions, credit market stress signals.
-- Fiscal policy: federal budget announcements, government spending or tax changes that could affect inflation or growth outlook.
-SETTLEMENT-SENSITIVE FACTS: BoC typically moves in 25bps increments, larger moves (50bps+) are rare and usually only in crisis conditions, 'hold' is the modal outcome when economy is stable, the Bank's own forward guidance in prior statements heavily anchors market expectations, overnight rate target is the operative instrument (not prime rate), BoC decisions come with a press conference and MPR that can clarify intent even if the headline number surprises.
-IGNORE: US Federal Reserve rate decisions in isolation (only relevant if explicitly tied to BoC policy spillover), general Canadian political news unrelated to monetary policy, stock market daily moves, long-term structural economic commentary not tied to the Oct 2026 meeting, speculation about meetings after Oct 2026, commentary on other countries' central banks (ECB, BoE) without Canada linkage.
+- Inflation data: Canadian CPI headline and core measures (CPI-trim, CPI-median), monthly price surprises, shelter and food inflation, gasoline prices, import price pass-through
+- Labour market and growth: Labour Force Survey jobs and unemployment rate, wage growth, monthly GDP, retail sales, housing starts and home sales, consumer confidence
+- Bank communications: Governor Macklem and Deputy Governors speeches, Monetary Policy Report, Summary of Deliberations, Business Outlook Survey, Canadian Survey of Consumer Expectations
+- Trade and tariffs: US-Canada tariffs, CUSMA/USMCA review, export disruptions, steel, aluminum, autos and lumber duties, retaliation measures
+- Global central banks and rates: Federal Reserve decisions and guidance, US yields, Canadian bond yields, overnight index swap pricing, Canadian dollar moves
+- Commodities and geopolitics: oil price shocks, OPEC decisions, wars or sanctions affecting energy, global recession fears, financial market stress
+- Fiscal and domestic policy: federal budget and deficit spending, immigration targets affecting population growth, household debt and mortgage renewals
+SETTLEMENT-SENSITIVE FACTS: decisions are announced at 9:45am ET on scheduled dates, the Bank moves in 25bps steps typically so larger moves are rare, markets price meetings heavily in advance so only surprises shift odds, emergency intercalary moves are very rare, a hold is the default when data is mixed, only the target overnight rate change counts not guidance or QT
+IGNORE: Federal Reserve, ECB or Bank of England rate decisions on their own, commercial bank prime rate or mortgage promotions, Canadian stock market earnings, provincial budgets, cryptocurrency, Bank of Canada digital currency or banknote design news

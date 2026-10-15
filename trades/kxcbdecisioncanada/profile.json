@@ -1,17 +1,18 @@
 {
   "name": "kxcbdecisioncanada",
   "seriesTicker": "KXCBDECISIONCANADA",
-  "title": "Bank of Canada decision in Oct 2026?",
-  "settlement": "This market resolves based on the Bank of Canada's official interest rate decision announced at its October 28, 2026 policy meeting. It resolves Yes for the specific bracket (e.g., Hike 25bps) that matches the actual change to the Bank's target overnight rate announced that day, as published in the Bank of Canada's official policy statement.",
+  "title": "What will the Bank of Canada decide at its next policy meeting?",
+  "settlement": "Resolves to the outcome matching the Bank of Canada's announced change to its overnight policy rate at the scheduled meeting: hike more than 25bps, hike 25bps, maintain, cut 25bps, or cut more than 25bps. Exactly one outcome resolves Yes, per the Bank's official announcement.",
   "gateModel": "qwen2.5:7b-instruct-q4_K_M",
   "gateKeepAlive": "10m",
-  "decideContext": "You are estimating the magnitude and direction (in basis points) of the Bank of Canada's policy rate change at the Oct 28, 2026 meeting (hike, hold, or cut, and by how much), which determines which of the five brackets resolves Yes.",
+  "decideContext": "Estimate how the news shifts the likelihood of the Bank of Canada's rate action (hike, hold, or cut, and size) at its next scheduled meeting. The market resolves on the Bank's official policy rate announcement, with one outcome Yes among five.",
   "directSources": [],
-  "marketStructure": "capture",
+  "marketStructure": "multi",
+  "outcomeGroup": "exclusive",
   "magnitudeUnit": "bps",
   "maxMagnitude": 50,
   "ledgerPath": "data/kxcbdecisioncanada/decisions.db",
   "consumerGroup": "execmod-kxcbdecisioncanada",
-  "generatedAt": "2026-10-08T21:49:41.631Z",
-  "generatorModel": "claude-sonnet-5"
+  "generatedAt": "2026-10-14T14:45:45.779Z",
+  "generatorModel": "claude-sonnet-5-5"
 }
