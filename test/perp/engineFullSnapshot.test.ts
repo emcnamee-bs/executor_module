@@ -55,6 +55,16 @@ describe("full vs light ticks", () => {
     expect(h.rows()).toBe(2); // t=0 and t=300 s
   });
 
+  it("records a mark on every tick, light or full (the compact price record)", async () => {
+    const h = harness(5 * MIN);
+    for (let i = 0; i < 8; i++) {
+      await h.engine.tick();
+      h.advance(15 * SEC);
+    }
+    expect(h.rows()).toBe(1); // one stored snapshot row
+    expect((h.db.prepare("SELECT COUNT(*) n FROM marks").get() as { n: number }).n).toBe(8);
+  });
+
   it("a light tick still moves the engine to the newest mark", async () => {
     const h = harness(5 * MIN);
     await h.engine.tick();

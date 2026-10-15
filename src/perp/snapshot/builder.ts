@@ -4,7 +4,7 @@ import type { MacroPoint, ScheduledEvent, Snapshot } from '../types.js';
 type History = Array<{ tsMs: number; mark: number }>;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
-const MAX_WINDOW_GAP_MS = 3 * HOUR_MS;
+export const MAX_WINDOW_GAP_MS = 3 * HOUR_MS;
 /** 5 trading days x 24 hours; an approximation, only used when VIX is unavailable. */
 const HOURS_PER_WEEK_FOR_SCALING = 120;
 const MIN_HOURLY_RETURNS = 24;

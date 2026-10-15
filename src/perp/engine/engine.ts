@@ -10,14 +10,14 @@ import { computeGovernors } from '../risk/governor.js';
 import { evaluateKillSwitch } from '../risk/killSwitch.js';
 import { applyEntry, applyExit, haltRisk, type RiskState } from '../risk/state.js';
 import { buildSnapshot, vixOf } from '../snapshot/builder.js';
+import { loadCompactHistory } from '../snapshot/history.js';
 import {
-  appendJournal, equityPeak, getState, listAssessments, listExits, loadPosition, loadRiskState, markSeries,
-  recordAssessment, recordEquity, recordExit as recordExitRow, saveRiskState, savePosition, saveSnapshot, setState,
+  appendJournal, equityPeak, getState, listAssessments, listExits, loadPosition, loadRiskState, markExtreme,
+  recordAssessment, recordEquity, recordExit as recordExitRow, recordMark, saveRiskState, savePosition, saveSnapshot, setState,
   snapshotNear,
 } from '../store/db.js';
 import { minutesToClose } from '../time/windows.js';
 import type { Action, ExitRule, ImpactAssessment, MacroPoint, PositionState, ScheduledEvent, Side, Snapshot } from '../types.js';
-import { extremeSince } from './helpers.js';
 import { Mutex } from './mutex.js';
 
 const MIN = 60_000;
@@ -165,7 +165,8 @@ export class PerpEngine {
     const c = await this.d.collect();
     const every = this.d.fullSnapshotMs ?? 0;
     const full = every <= 0 || this.lastFullMs === null || now - this.lastFullMs >= every;
-    if (full) this.historyCache = markSeries(this.d.db, now - 8 * DAY);
+    recordMark(this.d.db, now, c.perp.mark); // every tick: the compact price record behind the history queries
+    if (full) this.historyCache = loadCompactHistory(this.d.db, now);
     const snapshot = buildSnapshot({
       nowMs: now,
       perp: c.perp,
@@ -327,7 +328,7 @@ export class PerpEngine {
     const weeklyExtreme =
       this.position === null
         ? null
-        : extremeSince(markSeries(db, Math.max(this.position.entryTimeMs, now - 7 * DAY)), this.position.side);
+        : markExtreme(db, Math.max(this.position.entryTimeMs, now - 7 * DAY), this.position.side === 'long' ? 'max' : 'min');
 
     const input: PolicyInput = {
       nowMs: now,
