@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import Database from 'better-sqlite3';
+import { describe, it, expect, vi } from 'vitest';
 import type { ImpactAssessment, Snapshot } from '../../src/perp/types.js';
 import { SpendCapError } from '../../src/perp/model/callJson.js';
 import { openPerpDb, saveSnapshot } from '../../src/perp/store/db.js';
@@ -91,5 +92,25 @@ describe('auditItem', () => {
     await auditItem(deps, row, 'social', 'random');
     await auditItem(deps, row, 'social', 'random');
     expect((labDb.prepare('select count(*) as n from audits').get() as { n: number }).n).toBe(1);
+  });
+});
+
+describe('auditItem degrades when the bot ledger is unreadable', () => {
+  const noContext = async (mutate: (botDb: Database.Database) => Database.Database) => {
+    const extract = vi.fn(async () => assessment('major'));
+    const s = setup(extract);
+    const botDb = mutate(s.botDb);
+    const out = await auditItem({ ...s.deps, botDb }, s.row, 'social', 'random');
+    expect(out).toBe('no_context');
+    expect(auditRow(s.labDb)).toBeUndefined();
+    expect(extract).not.toHaveBeenCalled();
+  };
+  it('a bot db with no snapshots table at all', async () => { await noContext(() => new Database(':memory:')); });
+  it('a closed bot db', async () => { await noContext((b) => { b.close(); return b; }); });
+  it('a snapshot row with invalid JSON', async () => {
+    await noContext((b) => { b.prepare('INSERT OR REPLACE INTO snapshots (ts_ms, mark, json) VALUES (?, ?, ?)').run(NOW - 1000, 13.7, '{not json'); return b; });
+  });
+  it('latestContext itself returns null instead of throwing', () => {
+    expect(latestContext(new Database(':memory:'), NOW)).toBeNull();
   });
 });

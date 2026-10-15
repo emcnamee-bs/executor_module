@@ -26,11 +26,15 @@ export interface AuditDeps {
   extract?: typeof extractImpact;
 }
 
-/** The bot's market context from its newest snapshot (read-only), as if flat with no news pressure; null when none is fresh. */
+/** The bot's market context from its newest snapshot (read-only), as if flat with no news pressure; null when none is fresh or the ledger cannot be read. */
 export function latestContext(botDb: Database.Database, nowMs: number, maxAgeMs: number = CONTEXT_MAX_AGE_MS): string | null {
-  const row = botDb.prepare('SELECT ts_ms, json FROM snapshots ORDER BY ts_ms DESC LIMIT 1').get() as { ts_ms: number; json: string } | undefined;
-  if (row === undefined || nowMs - row.ts_ms > maxAgeMs) return null;
-  return summarizeContext({ snapshot: JSON.parse(row.json) as Snapshot, position: null, pressureNow: 0, topItems: [] });
+  try {
+    const row = botDb.prepare('SELECT ts_ms, json FROM snapshots ORDER BY ts_ms DESC LIMIT 1').get() as { ts_ms: number; json: string } | undefined;
+    if (row === undefined || nowMs - row.ts_ms > maxAgeMs) return null;
+    return summarizeContext({ snapshot: JSON.parse(row.json) as Snapshot, position: null, pressureNow: 0, topItems: [] });
+  } catch {
+    return null; // missing table, locked or closed ledger, corrupt row: no market context, so no audit and no spend
+  }
 }
 
 export function rowToItem(row: Pick<AuditRow, 'item_id' | 'received_ms' | 'published_ms' | 'source_id' | 'tier' | 'headline' | 'snippet'>): Item {
@@ -54,8 +58,9 @@ export async function auditItem(deps: AuditDeps, row: AuditRow, stratum: Stratum
       .get(row.item_id) as { cost_usd: number } | undefined;
     deps.labDb
       .prepare(
-        `INSERT OR IGNORE INTO audits (item_id, at_ms, stratum, kind, bucket, direction, credibility, novelty, already_priced, confidence, rationale, miss, cost_usd, model, ok, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)`
+        `INSERT INTO audits (item_id, at_ms, stratum, kind, bucket, direction, credibility, novelty, already_priced, confidence, rationale, miss, cost_usd, model, ok, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
+         ON CONFLICT(item_id) DO NOTHING`
       )
       .run(row.item_id, now, stratum, kind, a.bucket, a.direction, a.credibility, a.novelty, a.alreadyPriced, a.confidence, a.rationale,
         MISS_BUCKETS.has(a.bucket) ? 1 : 0, cost?.cost_usd ?? null, deps.modelDeps.impactModel ?? 'claude-sonnet-5-5');
@@ -64,7 +69,8 @@ export async function auditItem(deps: AuditDeps, row: AuditRow, stratum: Stratum
     if (err instanceof SpendCapError) return 'cap';
     deps.labDb
       .prepare(
-        `INSERT OR IGNORE INTO audits (item_id, at_ms, stratum, kind, miss, ok, error) VALUES (?, ?, ?, ?, NULL, 0, ?)`
+        `INSERT INTO audits (item_id, at_ms, stratum, kind, miss, ok, error) VALUES (?, ?, ?, ?, NULL, 0, ?)
+         ON CONFLICT(item_id) DO NOTHING`
       )
       .run(row.item_id, now, stratum, kind, (err instanceof Error ? err.message : String(err)).slice(0, 300));
     return 'error';

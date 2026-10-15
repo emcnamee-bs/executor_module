@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { describe, it, expect } from 'vitest';
 import { openPerpDb, recordMark } from '../../src/perp/store/db.js';
 import { insertItem, openLabDb, type LabItemRow } from '../../src/perp/lab/labDb.js';
@@ -62,5 +63,23 @@ describe('sigma4h / movedFlag', () => {
     expect(movedFlag(0.0199, 0.01)).toBe(false);
     expect(movedFlag(null, 0.01)).toBe(false);
     expect(movedFlag(0.05, null)).toBe(false);
+  });
+});
+
+describe('an unreadable bot ledger degrades instead of throwing', () => {
+  it('markAtIngest, sigma4h and fillReturns on a db without a marks table', () => {
+    const bad = new Database(':memory:');
+    const lab = openLabDb(':memory:');
+    insertItem(lab, item({ item_id: 'due' }));
+    expect(markAtIngest(bad, NOW)).toBeNull();
+    expect(sigma4h(bad, NOW)).toBeNull();
+    expect(fillReturns(lab, bad, NOW)).toBe(0);
+    expect((lab.prepare('select ret_1h, ret_4h from items').get() as { ret_1h: number | null; ret_4h: number | null })).toEqual({ ret_1h: null, ret_4h: null });
+  });
+  it('a closed bot db too', () => {
+    const bad = openPerpDb(':memory:');
+    bad.close();
+    expect(markAtIngest(bad, NOW)).toBeNull();
+    expect(sigma4h(bad, NOW)).toBeNull();
   });
 });

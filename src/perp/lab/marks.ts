@@ -10,12 +10,21 @@ const LATER_GAP_MS = 300_000;
 const FILL_LOOKBACK_MS = 12 * H;
 
 export function markAtIngest(botDb: Database.Database, receivedMs: number): { tsMs: number; mark: number } | null {
-  return markNear(botDb, receivedMs, INGEST_GAP_MS);
+  try {
+    return markNear(botDb, receivedMs, INGEST_GAP_MS);
+  } catch {
+    return null; // unreadable bot ledger: no mark, features are still logged
+  }
 }
 
 /** Sample standard deviation of non-overlapping 4 h returns over the last 7 days of hourly marks; null with fewer than 6 returns. */
 export function sigma4h(botDb: Database.Database, nowMs: number): number | null {
-  const hm = hourlyMarks(botDb, nowMs - 7 * 24 * H);
+  let hm: Array<{ tsMs: number; mark: number }>;
+  try {
+    hm = hourlyMarks(botDb, nowMs - 7 * 24 * H);
+  } catch {
+    return null; // unreadable bot ledger: no flag
+  }
   if (hm.length === 0) return null;
   const byHour = new Map<number, number>();
   for (const m of hm) byHour.set(Math.floor(m.tsMs / H), m.mark);
@@ -38,7 +47,7 @@ export function movedFlag(ret4h: number | null, sigma: number | null): boolean {
   return ret4h !== null && sigma !== null && Math.abs(ret4h) >= 2 * sigma;
 }
 
-/** Fill ret_1h / ret_4h for items whose horizon has passed (within the last 12 h). Returns the number of rows changed. Never invents a return. */
+/** Fill ret_1h / ret_4h for items whose horizon has passed (within the last 12 h). Returns the number of rows changed (so far, if the bot ledger becomes unreadable). Never invents a return. */
 export function fillReturns(labDb: Database.Database, botDb: Database.Database, nowMs: number): number {
   const rows = labDb
     .prepare(
@@ -50,14 +59,24 @@ export function fillReturns(labDb: Database.Database, botDb: Database.Database, 
   const upd1 = labDb.prepare('UPDATE items SET ret_1h = ? WHERE item_id = ?');
   const upd4 = labDb.prepare('UPDATE items SET ret_4h = ? WHERE item_id = ?');
   let changed = 0;
+  // Only the bot-ledger read is guarded: if it fails, stop and keep what was filled. A lab-db write error still throws.
+  const later = (targetMs: number): { mark: number } | null | 'unreadable' => {
+    try {
+      return markNear(botDb, targetMs, LATER_GAP_MS);
+    } catch {
+      return 'unreadable';
+    }
+  };
   for (const r of rows) {
     let did = false;
     if (r.ret_1h === null && r.received_ms <= nowMs - H) {
-      const m = markNear(botDb, r.received_ms + H, LATER_GAP_MS);
+      const m = later(r.received_ms + H);
+      if (m === 'unreadable') return changed;
       if (m !== null && r.mark > 0) { upd1.run(m.mark / r.mark - 1, r.item_id); did = true; }
     }
     if (r.ret_4h === null && r.received_ms <= nowMs - 4 * H) {
-      const m = markNear(botDb, r.received_ms + 4 * H, LATER_GAP_MS);
+      const m = later(r.received_ms + 4 * H);
+      if (m === 'unreadable') return did ? changed + 1 : changed;
       if (m !== null && r.mark > 0) { upd4.run(m.mark / r.mark - 1, r.item_id); did = true; }
     }
     if (did) changed += 1;
