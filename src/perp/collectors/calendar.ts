@@ -35,3 +35,11 @@ export function calendarCoverageDays(file: string, nowMs: number): number {
   if (all.length === 0) return 0;
   return Math.max(0, (all[all.length - 1].tsMs - nowMs) / 86_400_000);
 }
+
+/**
+ * True when a HIGH-impact scheduled event lies within `windowMs` (default 2 h) before or after `nowMs`. Used by the news
+ * escalation policy: a minor item is worth Sonnet's time around CPI/FOMC. A missing or invalid file THROWS, like loadCalendar.
+ */
+export function highImpactWindowOpen(file: string, nowMs: number, windowMs = 2 * 3_600_000): boolean {
+  return readAll(file).some((e) => e.impact === 'high' && Math.abs(e.tsMs - nowMs) <= windowMs);
+}

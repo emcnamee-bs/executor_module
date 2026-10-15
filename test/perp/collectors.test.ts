@@ -2,8 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { collectMacro, latestPoint, MACRO_SERIES, parseFredCsv } from '../../src/perp/collectors/fred.js';
-import { calendarCoverageDays, loadCalendar } from '../../src/perp/collectors/calendar.js';
+import { calendarCoverageDays, highImpactWindowOpen, loadCalendar } from '../../src/perp/collectors/calendar.js';
 import { collectKalshiEvents } from '../../src/perp/collectors/kalshiEvents.js';
 import { collectPerp } from '../../src/perp/collectors/perpMarket.js';
 
@@ -198,5 +200,27 @@ describe('collectPerp', () => {
   it('propagates a failing market request', async () => {
     const client = { get: async () => { throw new Error('market 503'); } };
     await expect(collectPerp(client as never, 'KXUS500PERP', NOW)).rejects.toThrow('market 503');
+  });
+});
+
+describe('highImpactWindowOpen', () => {
+  const NOW = Date.UTC(2026, 9, 14, 15, 0, 0);
+  const file = () => {
+    const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cal-')), 'c.json');
+    fs.writeFileSync(f, JSON.stringify([
+      { at: '2026-10-14T15:30:00Z', name: 'CPI', impact: 'high' },
+      { at: '2026-10-14T20:00:00Z', name: 'Retail sales', impact: 'medium' },
+    ]));
+    return f;
+  };
+  it('is open within 2 hours before or after a high-impact event', () => {
+    expect(highImpactWindowOpen(file(), NOW)).toBe(true); // 30 min before CPI
+    expect(highImpactWindowOpen(file(), NOW + 3_600_000)).toBe(true); // 30 min after
+    expect(highImpactWindowOpen(file(), NOW + 2.5 * 3_600_000 + 1)).toBe(false);
+    expect(highImpactWindowOpen(file(), NOW - 2 * 3_600_000)).toBe(false);
+  });
+  it('ignores medium-impact events and throws on a missing file', () => {
+    expect(highImpactWindowOpen(file(), Date.UTC(2026, 9, 14, 20, 0, 0))).toBe(false);
+    expect(() => highImpactWindowOpen('/nonexistent/cal.json', NOW)).toThrow();
   });
 });
