@@ -1,7 +1,7 @@
 # Perp intake prefilter (A) and intake lab (C)
 
-Date: 2026-10-14. Status: **draft for the user's review** (design sections 1-4 approved in conversation on 2026-10-14; no code
-written). Scope: the US500 perp bot (`src/perp/`, paper mode) and a new shadow service that validates its filter.
+Date: 2026-10-14. Status: **implemented on branch `feat/perp-intake-prefilter-lab`, not yet deployed** (design approved in conversation on
+2026-10-14; both plans built and reviewed; the runbook has the deploy checklist). Scope: the US500 perp bot (`src/perp/`, paper mode) and a new shadow service that validates its filter.
 
 ## 1. Intent and evidence
 
@@ -61,7 +61,8 @@ type Verdict = {
   sourceClass: 'official_macro' | 'market_wire' | 'press' | 'social' | 'unknown';
   score: number;          // lexicon score after weights and cap
   hits: string[];         // distinct pattern ids that matched
-  dupOf?: string;         // item_id of the earlier near-duplicate
+  strongHits: string[];   // the strong-pattern subset of `hits` (the cooldown compares these)
+  dupOf?: string;         // item_id of the earlier near-duplicate (a cooldown verdict also records it)
 };
 ```
 
@@ -83,7 +84,10 @@ type Verdict = {
    hour's cap-admitting minimum pass (floor = min(scoreCap, threshold + passesInLastHour - haikuPerHour + 1); official_macro bypasses); the rest are `haiku_cap`.
 
 Fail closed: if `prefilter` throws for an item, the intake drops it, journals `prefilter_error`, and counts it; five in one UTC day raise one alert.
-Kill switch: `PERP_PREFILTER=off` restores today's behaviour exactly (every hygiene-passing item goes to Haiku).
+Kill switch: `PERP_PREFILTER=off` restores the old FLOW (every hygiene-passing item goes to the Haiku gate and `relevant` alone
+decides extraction; no journal rows). It does NOT revert the gate prompt: Haiku now returns an impact rating
+(`relevant = impact !== 'none'`), so in off mode every `minor` also goes to Sonnet and the cost can be higher than the
+2026-10-14 baseline, bounded by `PERP_DAILY_USD_CAP`.
 
 ### Gate and escalation
 
@@ -106,7 +110,7 @@ same `prefilter` and `escalate`, and records the git commit on every row.
 
 - **Input.** Its own Redis consumer group `perp-lab` on `iip:items` (start `$`), so it sees every item the bot sees.
 - **Read-only access to the bot's data.** `perp-paper.db` opened `mode=ro` for: `marks` (price), `snapshots` (latest market context), `journal` (the bot's own
-  `intake_item` rows), `assessments`.
+  `intake_item` and `intake_outcome` rows).
 - **Own store** `data/perp/lab.db`:
 
 ```sql
@@ -133,6 +137,8 @@ heartbeat(ts_ms INTEGER, last_item_ms INTEGER, stream_ok INTEGER, bot_db_ok INTE
   - The audit calls the bot's own `extractImpact` (Sonnet) with a context text built from the bot's newest snapshot (at most 10 minutes old), summarised as if flat with no news pressure (no open position, pressure 0, no top items); if there is no such snapshot,
     that item is skipped (no row, no spend).
   - **Miss** = audited bucket in {`moderate`,`major`,`shock`}. A model error skips the audit (no retries, no storm).
+  - **Scope of the audit.** The lab audits prefilter drops only. Items the prefilter passes and Haiku rates `minor` that the code does not escalate
+    (`not_escalated`) are journaled by the bot as `intake_outcome` with `escalated:false` but are NOT audited by the lab (a possible follow-up: a sixth stratum).
 - **Second signal.** A dropped item with `|ret_4h|` >= 2 sigma (sample standard deviation of non-overlapping 4 h returns over the last 7 days of hourly marks; at least 6 returns, else no flag) is flagged `moved` for manual review in the report.
 - **Day 7.** After `LAB_DAYS` (default 7) days since the first row the lab stops all model spend and keeps logging features (free); the tile says "audit complete"; the report is generated once.
 - **Process starts.** The prefilter's dedup and cap state lives in the lab process's memory and is cold after every start, so the `prod_*` columns can under-report duplicates in the first hours after a restart. Each start is recorded (`meta` rows `start_<ms>` -> commit) and the report lists them.
@@ -143,7 +149,7 @@ heartbeat(ts_ms INTEGER, last_item_ms INTEGER, stream_ok INTEGER, bot_db_ok INTE
 
 **Tile.** Project `intake-lab`, pinned to `LAB_WALL_SLOT` (default **10**), v2 template (`Grafana-Dashboard-Skill-Creator-/skills/grafana-wall/references/tile-spec.md`),
 published by `~/wall/intake-lab-publish.py` (read-only; wall key read from the slot-writer's own `.env`, never printed) on a 2-minute user timer, same pattern as
-`executor-wall-publish.py`. Status pill "Day n/7 · auditing" then "audit complete"; chips: branch, last-item age; six stat chips: Items 24h, To Haiku %, Audited, Misses (+95% bound),
+`executor-wall-publish.py`. Status pill "Day n/7 · auditing" then "audit complete"; chips: branch, last-item age; at most three stat chips per chart, drawn from: Items 24h, To Haiku %, Audited, Misses (+95% bound),
 Lab spend vs $0.50, Est. saved; health lights: lab service, news stream, perp bot service, audit budget, bot ledger readable, marks fresh; three charts (12 h, hourly): funnel
 (seen / passed / escalated), audit (cumulative audited and misses), spend (lab spend vs cap pace, estimated saved). No headlines on the tile.
 Until the lab exists the publisher shows a baseline from `perp-paper.db` (gate calls, Sonnet calls and spend per hour) with status "Design phase", so the tile is useful immediately.

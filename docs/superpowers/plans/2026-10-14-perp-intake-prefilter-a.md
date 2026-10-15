@@ -4,7 +4,7 @@
 
 **Goal:** Put deterministic code in front of the perp bot's Haiku gate (a source-class + macro-lexicon + dedup + cap prefilter), make Haiku return an impact estimate instead of a yes/no, and let code decide which items escalate to Sonnet; cut the bot's Haiku calls by 80%+ and Sonnet calls by 70%+ with no change to any trading rule.
 
-**Architecture:** A pure `prefilter(item, cfg, state, nowMs)` function (rules in `config/perp-prefilter.json`) runs inside `NewsIntake.handleItem` before the gate; every verdict and every gate outcome is journaled. The gate returns `{impact, reason}` (reason truncated in code, never a validation error); a pure `escalate()` decides what reaches Sonnet. A kill switch (`PERP_PREFILTER=off`) restores today's behaviour exactly. Plan C (the lab) reuses `prefilter`, `escalate` and the new `hygieneSkip`.
+**Architecture:** A pure `prefilter(item, cfg, state, nowMs)` function (rules in `config/perp-prefilter.json`) runs inside `NewsIntake.handleItem` before the gate; every verdict and every gate outcome is journaled. The gate returns `{impact, reason}` (reason truncated in code, never a validation error); a pure `escalate()` decides what reaches Sonnet. A kill switch (`PERP_PREFILTER=off`) restores the old flow (not the old gate prompt or cost). Plan C (the lab) reuses `prefilter`, `escalate` and the new `hygieneSkip`.
 
 **Tech Stack:** TypeScript (ESM, Node 22), better-sqlite3, zod, vitest.
 
