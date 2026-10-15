@@ -48,12 +48,31 @@ export interface SeriesSpec {
   title: string;
   rulesText: string;
   strikeTypes: Array<string | null>;
+  /** Every floor/cap strike of the event's markets, ascending. Kept OUT of the model prompt (see buildTradeProfile); used to check and record. */
+  strikes: number[];
   marketCount: number;
   sampleSubtitles: string[];
   /** Set when the event's markets are separate outcomes of one question (custom strikes): tells Sonnet to write for the whole question. */
   outcomeNote?: string;
   /** Set when the series has several open events (weeks, months, cards): tells Sonnet to write for the recurring question, not one period. */
   recurringNote?: string;
+}
+
+/**
+ * A ladder profile's decideContext must not quote strikes: it is the text the decide prompt starts with, and the
+ * live ladder moves (2026-10-14: the gas profile said "strikes around $4.46-$4.56" while the market traded
+ * $4.16-$4.56, and the Hormuz one said "strikes range from 22 to 75" while the live rungs were 15-25). null when clean.
+ * The sentence pattern is mirrored by scripts/ops/trade-refresh/refresh.py (QUOTED_STRIKES_RE), which treats a profile
+ * that still matches as stale: keep the two in step or a rebuild loop results.
+ */
+export const QUOTED_STRIKES_RE = /[^.!?]*\bstrikes?\b[^.!?]*\d/i;
+export function quotedStrikeProblem(text: string, strikes: number[]): string | null {
+  const sentence = QUOTED_STRIKES_RE.exec(text);
+  const decimals = (text.match(/\d+\.\d+/g) ?? []).map(Number);
+  const hit = decimals.find((d) => strikes.some((s) => Math.abs(s - d) < 1e-9));
+  if (sentence === null && hit === undefined) return null;
+  const shown = sentence !== null ? sentence[0].trim().slice(0, 120) : String(hit);
+  return `decideContext quotes strike values ("${shown}"): describe the quantity and the resolution rule without any strike number, range or spacing`;
 }
 
 // A custom-strike event with at least this many markets is a "who/which" question with one market per outcome.
@@ -108,6 +127,7 @@ export async function fetchSeriesSpec(
     title,
     rulesText: [withRules.rules_primary, withRules.rules_secondary].filter(Boolean).join(' ').slice(0, 1500),
     strikeTypes,
+    strikes: [...new Set(list.flatMap((m) => [m.floor_strike, m.cap_strike]).filter((v): v is number => typeof v === 'number' && Number.isFinite(v)))].sort((a, b) => a - b),
     marketCount: list.length,
     sampleSubtitles: list.slice(0, 6).map((m) => String(m.yes_sub_title ?? m.ticker)),
     ...(events.events.length >= 2
@@ -169,6 +189,7 @@ SETTLEMENT-SENSITIVE FACTS: <comma-separated facts about how the resolution sour
 IGNORE: <comma-separated look-alike topics that are NOT relevant (at least 4)>
 
 "title" is one question line for the market, "settlement" is 1-3 sentences from the rules text, "decideContext" is 1-3 sentences telling an analyst what quantity they are estimating the effect on and how the market resolves, "magnitudeUnit" is the unit of the settlement quantity (for example pts, %, USD/gal, count), and "maxMagnitude" is a generous positive sanity ceiling on how far one news item could plausibly move that quantity in that unit.
+ For a market with a ladder of strikes (an "above X" family), do NOT quote any specific strike value, strike range or spacing in "title", "settlement" or "decideContext" (write "the strike", "the threshold"): the live strikes move and are supplied separately with every decision, and a number copied here goes stale and misleads the analyst.
  "outcomeGroup" says how this event's markets relate (always answer; it only matters when the event has several separate outcome markets): "ladder" = nested "before date X" markets where an earlier date implies every later one; "exclusive" = exactly one market can resolve YES, so the probabilities sum to 100% (one market per candidate or per decision outcome); "independent" = every market is its own separate yes/no question.`;
 
 /**
@@ -364,7 +385,11 @@ export async function buildTradeProfile(
   fs.mkdirSync(path.dirname(absLedger), { recursive: true });
   const db = openLedger(absLedger);
   try {
-    const specText = JSON.stringify(spec, null, 2);
+    // The strike list never reaches the model, and for a ladder neither do the sample subtitles ("Above 4.46"): both only
+    // invite copying numbers into text that outlives them.
+    const { strikes: _strikes, ...promptSpec } = spec;
+    const ladderTrade = structure === 'threshold' || structure === 'band';
+    const specText = JSON.stringify(ladderTrade ? { ...promptSpec, sampleSubtitles: [] } : promptSpec, null, 2);
     let generated: any = null;
     let profile: TradeProfile | null = null;
     let lastError = '';
@@ -385,6 +410,10 @@ export async function buildTradeProfile(
         }
         if (typeof parsed.magnitudeUnit !== 'string' || parsed.magnitudeUnit.trim() === '') {
           throw new Error('magnitudeUnit must be a non-empty string');
+        }
+        if (ladderTrade) {
+          const quoted = quotedStrikeProblem(parsed.decideContext ?? '', spec.strikes);
+          if (quoted !== null) throw new Error(quoted);
         }
         // The assembled profile must pass the SAME schema the loader enforces, or the
         // build would "succeed" and write a profile the process refuses to start with.
@@ -475,7 +504,18 @@ export async function buildTradeProfile(
       const bankText = fs.readFileSync(path.join(staged, 'bank.md'), 'utf-8');
       fs.writeFileSync(
         path.join(staged, 'bank.meta.json'),
-        JSON.stringify({ sha256: crypto.createHash('sha256').update(bankText).digest('hex'), generatedAt: profile.generatedAt, model: SONNET_MODEL }, null, 2) + '\n'
+        JSON.stringify(
+          {
+            sha256: crypto.createHash('sha256').update(bankText).digest('hex'),
+            generatedAt: profile.generatedAt,
+            model: SONNET_MODEL,
+            // What the live ladder looked like when this profile was built; trade-refresh rebuilds when it drifts.
+            // The loader reads only sha256, so older processes ignore the extra key.
+            ...(spec.strikes.length >= 2 ? { strikeRange: { min: spec.strikes[0], max: spec.strikes[spec.strikes.length - 1], count: spec.strikes.length, eventTicker: spec.eventTicker } } : {}),
+          },
+          null,
+          2
+        ) + '\n'
       );
       const hadOld = fs.existsSync(dir);
       if (hadOld) rename(dir, old);
