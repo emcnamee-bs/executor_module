@@ -217,6 +217,60 @@ class StrikeStaleness(unittest.TestCase):
             self.assertEqual(refresh.read_meta(repo, "t")["strikeRange"]["max"], 2)
 
 
+def titled_event(ticker, title, opened_h=-5000):
+    # opened long ago: a monthly series' next event is open for months before it becomes the active one
+    return {"event_ticker": ticker, "title": title, "strike_date": None, "markets": [{"open_time": iso(opened_h), "close_time": iso(8)}]}
+
+
+class EventChanged(unittest.TestCase):
+    cpi = {"generatedAt": iso(-24 * 6), "marketStructure": "threshold", "title": "Will September 2026 CPI month-over-month increase exceed a given threshold?",
+           "decideContext": "Estimate the effect on the September 2026 CPI."}
+
+    def test_kxcpi_case_legacy_profile_names_september_live_event_is_october(self):
+        ev = titled_event("KXCPI-26OCT", "CPI in October")
+        self.assertFalse(refresh.is_stale(self.cpi, ev))   # the old rule can never fire: the event opened months ago
+        self.assertIn("different month", refresh.stale_reason(self.cpi, {}, ev, T0))
+
+    def test_month_check_ignores_matching_months_abbreviations_missing_months_and_young_profiles(self):
+        ok = {**self.cpi, "title": "Will October 2026 CPI exceed X?"}
+        self.assertIsNone(refresh.stale_reason(ok, {}, titled_event("E", "CPI in October"), T0))
+        abbrev = {**self.cpi, "title": "Fed funds rate after Oct 28 FOMC meeting?"}
+        self.assertIsNone(refresh.stale_reason(abbrev, {}, titled_event("E", "Fed funds rate after Oct 2026 meeting?"), T0))
+        self.assertIsNone(refresh.stale_reason({**self.cpi, "title": "Will US real GDP growth in Q3 exceed X?"}, {}, titled_event("E", "US real GDP growth in Q3 2026?"), T0))
+        self.assertIsNone(refresh.stale_reason({**self.cpi, "title": "Who will Trump pardon?"}, {}, titled_event("E", "CPI in October"), T0))
+        young = {**self.cpi, "generatedAt": iso(-2)}   # built 2 h ago: never re-flagged for a month mismatch (no rebuild loop)
+        self.assertIsNone(refresh.stale_reason(young, {}, titled_event("E", "CPI in October"), T0))
+
+    def test_recorded_event_decides_when_present(self):
+        ev = titled_event("KXCPI-26OCT", "CPI in October")
+        self.assertIn("event changed from KXCPI-26SEP to KXCPI-26OCT", refresh.stale_reason(self.cpi, {"eventTicker": "KXCPI-26SEP"}, ev, T0))
+        young_same = {**self.cpi, "generatedAt": iso(-1)}
+        self.assertIsNone(refresh.stale_reason(young_same, {"eventTicker": "KXCPI-26OCT"}, ev, T0))
+        # With a record the month heuristic is not used, even if the title and event title disagree on wording.
+        self.assertIsNone(refresh.stale_reason(self.cpi, {"eventTicker": "KXCPI-26OCT"}, ev, T0))
+
+    def test_orchestration_rebuilds_the_mismatched_profile_and_then_leaves_it_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, out = f"{tmp}/repo", f"{tmp}/out"
+            os.makedirs(f"{repo}/trades/kxcpi")
+            jdump({**self.cpi, "name": "kxcpi", "seriesTicker": "KXCPI", "directSources": []}, f"{repo}/trades/kxcpi/profile.json")
+            jdump(["a"], f"{repo}/trades/kxcpi/keyphrases.json")
+            restarts = []
+
+            def run(cmd, env, cwd):
+                p = f"{repo}/trades/kxcpi/profile.json"
+                data = jload(p); data["generatedAt"] = iso(0); data["title"] = "Will October 2026 CPI month-over-month exceed a given threshold?"; jdump(data, p)
+                jdump({"eventTicker": "KXCPI-26OCT"}, f"{repo}/trades/kxcpi/bank.meta.json")
+                return 0, "ok"
+            d = refresh.Deps(repo=repo, out=out, trades=lambda: ["kxcpi"], events=lambda s: [titled_event("KXCPI-26OCT", "CPI in October")],
+                             run=run, restart=lambda t: restarts.append(t) or True, now=lambda: T0, sleep=lambda s: None, env=lambda: {}, log=lambda m: None)
+            res = refresh.refresh(d)
+            self.assertEqual((res["rebuilt"], res["failed"]), (["kxcpi"], []))
+            self.assertIn("different month", res["reasons"]["kxcpi"])
+            self.assertEqual(refresh.refresh(d)["stale"], [])
+            self.assertEqual(restarts, ["kxcpi"])
+
+
 class StrikeOrchestration(unittest.TestCase):
     def test_a_quoting_profile_is_rebuilt_even_when_its_event_has_not_rolled_over(self):
         with tempfile.TemporaryDirectory() as tmp:

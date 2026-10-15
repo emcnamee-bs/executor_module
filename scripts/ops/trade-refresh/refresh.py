@@ -96,10 +96,38 @@ def quotes_strikes(profile):
     return bool(QUOTED_STRIKES_RE.search(profile.get("decideContext") or ""))
 
 
-def stale_reason(profile, meta, event):
-    """Why this profile needs a rebuild, or None. Event rollover first, then (ladder trades only) quoted strikes and drift."""
+MONTH_RE = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", re.IGNORECASE)
+# Legacy-profile month check runs only on profiles older than this, so a profile whose title legitimately names another
+# month than the event title (the model's wording) is rebuilt at most once a day, never in a loop.
+MONTH_CHECK_MIN_AGE_SECONDS = 24 * 3600
+
+
+def months_in(text):
+    return {m.group(1).lower() for m in MONTH_RE.finditer(text or "")}
+
+
+def month_mismatch(profile, event, now_ts):
+    """True when the profile TITLE names month(s) and the live event TITLE names month(s) and they share none: kxcpi's
+    profile said September while the market (KXCPI-26OCT, 'CPI in October') settles on October. Only for profiles older
+    than MONTH_CHECK_MIN_AGE_SECONDS; titles with no month name never trigger."""
+    generated = parse_ts(profile.get("generatedAt"))
+    if generated is None or now_ts - generated < MONTH_CHECK_MIN_AGE_SECONDS:
+        return False
+    mine, theirs = months_in(profile.get("title")), months_in(event.get("title"))
+    return bool(mine) and bool(theirs) and not (mine & theirs)
+
+
+def stale_reason(profile, meta, event, now_ts=None):
+    """Why this profile needs a rebuild, or None. Event rollover, then a changed event (recorded) or a month mismatch
+    (legacy profiles with no record), then (ladder trades only) quoted strikes and drift."""
     if is_stale(profile, event):
         return "event rolled over"
+    recorded_event = (meta or {}).get("eventTicker")
+    if recorded_event:
+        if recorded_event != event.get("event_ticker"):
+            return f"event changed from {recorded_event} to {event.get('event_ticker')}"
+    elif month_mismatch(profile, event, time.time() if now_ts is None else now_ts):
+        return f"profile title names a different month than the live event ('{event.get('title')}')"
     if profile.get("marketStructure") not in LADDER_STRUCTURES:
         return None
     if quotes_strikes(profile):
@@ -211,7 +239,7 @@ def refresh(d, dry=False, only=None, restart=True):
         except Exception as e:
             res["errors"].append(f"{trade}: kalshi lookup failed ({e})")
             continue
-        reason = None if event is None else stale_reason(profile, read_meta(d.repo, trade), event)
+        reason = None if event is None else stale_reason(profile, read_meta(d.repo, trade), event, d.now())
         if reason is None:
             continue
         res["stale"].append(trade)

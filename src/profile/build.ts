@@ -509,6 +509,9 @@ export async function buildTradeProfile(
             sha256: crypto.createHash('sha256').update(bankText).digest('hex'),
             generatedAt: profile.generatedAt,
             model: SONNET_MODEL,
+            // The event this profile was written for: trade-refresh rebuilds when the series' current event is a different one
+            // (a monthly series' next event can have been open for months, so "opened after the profile" never fires: kxcpi).
+            eventTicker: spec.eventTicker,
             // What the live ladder looked like when this profile was built; trade-refresh rebuilds when it drifts.
             // The loader reads only sha256, so older processes ignore the extra key.
             ...(spec.strikes.length >= 2 ? { strikeRange: { min: spec.strikes[0], max: spec.strikes[spec.strikes.length - 1], count: spec.strikes.length, eventTicker: spec.eventTicker } } : {}),

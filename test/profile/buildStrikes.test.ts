@@ -108,6 +108,7 @@ describe('buildTradeProfile on a ladder', () => {
     const { dir } = await buildTradeProfile(opts(), { client: k.c, fetchImpl: fakeFetch(), now: () => new Date('2026-10-14T12:00:00Z') });
     const meta = JSON.parse(fs.readFileSync(path.join(dir, 'bank.meta.json'), 'utf-8'));
     expect(meta.strikeRange).toEqual({ min: 4.26, max: 4.34, count: 5, eventTicker: 'KXAAAGASW-26OCT19' });
+    expect(meta.eventTicker).toBe('KXAAAGASW-26OCT19'); // recorded for every profile, ladder or not
     expect(() => loadProfile('kxaaagasw', path.join(root, 'trades'))).not.toThrow();
   });
 });
