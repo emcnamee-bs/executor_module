@@ -13,6 +13,7 @@ import { StreamConsumer } from '../../redis/consumer.js';
 import { loadPrefilterConfig } from '../intake/prefilter.js';
 import type { ModelDeps } from '../model/gate.js';
 import { currentCommit } from '../ops/commit.js';
+import { preferIpv4 } from '../ops/network.js';
 import { auditItem } from './audit.js';
 import { makeEvaluator } from './features.js';
 import { openLabDb, recordProcessStart } from './labDb.js';
@@ -28,6 +29,7 @@ const HOUSEKEEPING_MS = 5 * 60_000;
 
 export async function main(): Promise<void> {
   assertPaperOnly(process.env);
+  preferIpv4(); // before any client exists: this host's IPv6 route is dead and its IPv4 connects are slow (see ops/network.ts)
   const cfg = resolveLabConfig(process.env, REPO_ROOT);
   const prefilterCfg = loadPrefilterConfig(cfg.prefilterFile);
   mkdirSync(cfg.dataDir, { recursive: true });
