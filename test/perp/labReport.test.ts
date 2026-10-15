@@ -149,6 +149,80 @@ describe('buildReport', () => {
     const { lab, bot } = fixture();
     expect(buildReport(lab, bot, NOW)).toMatch(/## Lab process starts\s+None recorded\./);
   });
+  describe('success criteria and caveats', () => {
+    const D = 24 * H;
+    /** `n` items over exactly 2 days (first at NOW - 2 d, last at NOW), the first `passed` of them passed. */
+    function twoDayLab(n: number, passed: number) {
+      const lab = openLabDb(':memory:');
+      const tx = lab.transaction(() => {
+        for (let i = 0; i < n; i++) {
+          const at = i === 0 ? NOW - 2 * D : i === n - 1 ? NOW : NOW - D;
+          insertItem(lab, row({ item_id: `w${i}`, received_ms: at, prod_pass: i < passed ? 1 : 0, prod_reason: i < passed ? 'pass' : 'low_score' }));
+        }
+      });
+      tx();
+      return lab;
+    }
+    function journal(bot: ReturnType<typeof openPerpDb>, kind: string, payload: string, count: number, ts = NOW - D) {
+      const j = bot.prepare('insert into journal (ts_ms, kind, payload) values (?, ?, ?)');
+      for (let i = 0; i < count; i++) j.run(ts, kind, payload);
+    }
+
+    it('computes the per-day reduction against the 2026-10-14 baseline and says MET', () => {
+      const lab = twoDayLab(5280, 528);        // 2640 items/day, 264 passed/day: 1 - 264/2640 = 90.0%
+      const bot = openPerpDb(':memory:');
+      journal(bot, 'intake_item', '{}', 3);
+      journal(bot, 'intake_outcome', '{"escalated":true}', 100);   // 50/day: 1 - 50/830 = 94.0%
+      journal(bot, 'intake_outcome', '{"escalated":true}', 7, NOW - 5 * D);   // outside the window
+      const md = buildReport(lab, bot, NOW);
+      expect(md).toContain('## Success criteria');
+      expect(md).toContain('Window: 2.00 days');
+      expect(md).toContain('2640 Haiku calls/day, 830 Sonnet calls/day');
+      expect(md).toContain('- Items per day: 2640');
+      expect(md).toContain('264 vs 2640: reduction 90.0%. Target (Haiku calls down at least 80%): MET.');
+      expect(md).toContain('- Bot escalations to Sonnet per day: 50 vs 830: reduction 94.0%. Target (Sonnet escalations down at least 70%): MET.');
+    });
+    it('says NOT MET when the reductions fall short of the targets', () => {
+      const lab = twoDayLab(2640, 2640);       // 1320 passed/day: 1 - 1320/2640 = 50.0%
+      const bot = openPerpDb(':memory:');
+      journal(bot, 'intake_item', '{}', 1);
+      journal(bot, 'intake_outcome', '{"escalated":true}', 664);   // 332/day: 1 - 332/830 = 60.0%
+      const md = buildReport(lab, bot, NOW);
+      expect(md).toContain('1320 vs 2640: reduction 50.0%. Target (Haiku calls down at least 80%): NOT MET.');
+      expect(md).toContain('332 vs 830: reduction 60.0%. Target (Sonnet escalations down at least 70%): NOT MET.');
+    });
+    it('skips the Sonnet reduction and says why when the bot journal has no intake_item rows in the window', () => {
+      const lab = twoDayLab(100, 10);
+      const bot = openPerpDb(':memory:');
+      ensureModelCallsTable(bot);
+      journal(bot, 'intake_outcome', '{"escalated":true}', 100);
+      bot.prepare("insert into model_calls (called_at_ms, stage, model, item_id, prompt_tokens, output_tokens, cost_usd, ok) values (?, 'gate', 'claude-haiku-5-5', 'g', 1, 1, 0.0001, 1)").run(NOW - D);
+      bot.prepare("insert into model_calls (called_at_ms, stage, model, item_id, prompt_tokens, output_tokens, cost_usd, ok) values (?, 'impact', 'claude-sonnet-5-5', 'i', 1, 1, 0.004, 1)").run(NOW - D);
+      const md = buildReport(lab, bot, NOW);
+      expect(md).toMatch(/the bot ran without the prefilter and its Sonnet figures are not comparable/);
+      expect(md).not.toContain('Bot escalations to Sonnet per day');
+      expect(md).toContain('The Sonnet part is not comparable');                      // the savings line says it too
+      expect(md).toContain('Target (Haiku calls down at least 80%): MET.');           // 5/day vs 2640
+    });
+    it('does not flag the savings line when the bot journal has intake_item rows', () => {
+      const { lab, bot } = fixture();
+      journal(bot, 'intake_item', '{}', 1, NOW - 2 * H);
+      expect(buildReport(lab, bot, NOW)).not.toContain('The Sonnet part is not comparable');
+    });
+    it('says less than a day of data instead of a per-day verdict', () => {
+      const { lab, bot } = fixture();          // every item at one instant
+      const md = buildReport(lab, bot, NOW);
+      expect(md).toMatch(/Less than a day of data/);
+      expect(md).not.toContain('Target (Haiku');
+    });
+    it('states the scope, the as-reproduced-by-the-lab wording and the sampling caveat', () => {
+      const { lab, bot } = fixture();
+      const md = buildReport(lab, bot, NOW);
+      expect(md).toMatch(/Scope: only prefilter drops are audited;.*not_escalated.*not audited by the lab/);
+      expect(md).toContain('as reproduced by the lab');
+      expect(md).toMatch(/time-weighted .*quiet hour.*boundary audits remove boundary items from the random pool.*estimate, not a guarantee/);
+    });
+  });
   it('works without a bot database and with an empty lab', () => {
     expect(() => buildReport(openLabDb(':memory:'), null, NOW)).not.toThrow();
   });

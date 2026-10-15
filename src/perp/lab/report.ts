@@ -9,10 +9,27 @@ import { clopperPearsonUpper, stratifiedEstimate, type StratumCount } from './st
 
 /** Share of gate calls that escalated to Sonnet before the prefilter existed (measured 2026-10-14 from the bot ledger). */
 export const BASELINE_SONNET_RATE = 0.31;
+/** Haiku gate calls per day before the prefilter existed (measured 2026-10-14: 661 in 6 h). */
+export const BASELINE_HAIKU_PER_DAY = 2640;
+/** Sonnet impact calls per day before the prefilter existed (measured 2026-10-14: 207 in 6 h). */
+export const BASELINE_SONNET_PER_DAY = 830;
+const DAY_MS = 86_400_000;
 const MIN_AUDITS_FOR_VERDICT = 100;
 const pct = (x: number | null, d = 2): string => (x === null ? 'n/a' : `${(x * 100).toFixed(d)}%`);
 const one = <T>(db: Database.Database, sql: string, ...args: unknown[]): T => db.prepare(sql).get(...args) as T;
 const all = <T>(db: Database.Database, sql: string, ...args: unknown[]): T[] => db.prepare(sql).all(...args) as T[];
+
+/** The bot journal inside the lab window: how many items it prefiltered and how many it escalated to Sonnet. Null when unreadable. */
+function botWindow(botDb: Database.Database | null, a: number | null, b: number | null): { intakeItems: number; escalations: number } | null {
+  if (botDb === null || a === null || b === null) return null;
+  try {
+    const intakeItems = one<{ n: number }>(botDb, "SELECT COUNT(*) AS n FROM journal WHERE kind = 'intake_item' AND ts_ms >= ? AND ts_ms <= ?", a, b).n;
+    const escalations = all<{ payload: string }>(botDb, "SELECT payload FROM journal WHERE kind = 'intake_outcome' AND ts_ms >= ? AND ts_ms <= ?", a, b).filter((r) => JSON.parse(r.payload).escalated === true).length;
+    return { intakeItems, escalations };
+  } catch {
+    return null;
+  }
+}
 
 export function buildReport(labDb: Database.Database, botDb: Database.Database | null, nowMs: number): string {
   const L: string[] = [];
@@ -21,17 +38,39 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
   const range = one<{ a: number | null; b: number | null }>(labDb, 'SELECT MIN(received_ms) AS a, MAX(received_ms) AS b FROM items');
   L.push('# Intake lab report', '');
   L.push(`Generated ${new Date(nowMs).toISOString()}. Items logged: ${items}. Window: ${range.a === null ? 'n/a' : new Date(range.a).toISOString()} to ${range.b === null ? 'n/a' : new Date(range.b).toISOString()}.`, '');
+  L.push('Scope: only prefilter drops are audited; items Haiku rates minor that the code does not escalate (not_escalated) are journaled by the bot but not audited by the lab. The prod_* columns are the prefilter verdict as reproduced by the lab (cold state after each process start; no seen/no_context skips), not a copy of the bot\'s own verdicts.', '');
+
+  const bw = botWindow(botDb, range.a, range.b);
+  L.push('## Success criteria', '');
+  if (range.a === null || range.b === null || range.b - range.a < DAY_MS) {
+    L.push(`Less than a day of data (window ${range.a === null || range.b === null ? 'empty' : ((range.b - range.a) / DAY_MS).toFixed(2) + ' days'}): the per-day comparison against the 2026-10-14 baseline is not meaningful yet. Raw counts: ${items} items, ${passed} passed to Haiku${bw === null ? '' : `, ${bw.escalations} bot escalations`}.`);
+  } else {
+    const days = (range.b - range.a) / DAY_MS;
+    const passedPerDay = passed / days;
+    const haikuCut = 1 - passedPerDay / BASELINE_HAIKU_PER_DAY;
+    L.push(`Window: ${days.toFixed(2)} days (first to last logged item). Baseline of 2026-10-14: ${BASELINE_HAIKU_PER_DAY} Haiku calls/day, ${BASELINE_SONNET_PER_DAY} Sonnet calls/day.`, '');
+    L.push(`- Items per day: ${(items / days).toFixed(0)}`);
+    L.push(`- Passed to Haiku per day (as reproduced by the lab): ${passedPerDay.toFixed(0)} vs ${BASELINE_HAIKU_PER_DAY}: reduction ${pct(haikuCut, 1)}. Target (Haiku calls down at least 80%): ${haikuCut >= 0.8 ? 'MET' : 'NOT MET'}.`);
+    if (bw === null) L.push('- Sonnet escalations: no bot ledger supplied or readable, so no figure.');
+    else if (bw.intakeItems === 0) L.push('- Sonnet escalations: the bot journal has no intake_item rows in the lab window, so the bot ran without the prefilter and its Sonnet figures are not comparable; no Sonnet reduction is computed.');
+    else {
+      const escPerDay = bw.escalations / days;
+      const sonnetCut = 1 - escPerDay / BASELINE_SONNET_PER_DAY;
+      L.push(`- Bot escalations to Sonnet per day: ${escPerDay.toFixed(0)} vs ${BASELINE_SONNET_PER_DAY}: reduction ${pct(sonnetCut, 1)}. Target (Sonnet escalations down at least 70%): ${sonnetCut >= 0.7 ? 'MET' : 'NOT MET'}.`);
+    }
+  }
+  L.push('');
 
   L.push('## Funnel', '');
   L.push(`- Items logged: ${items}`);
-  L.push(`- Passed the prefilter (to Haiku): ${passed} (${items === 0 ? 'n/a' : pct(passed / items, 1)})`);
+  L.push(`- Passed the prefilter (to Haiku): ${passed} (${items === 0 ? 'n/a' : pct(passed / items, 1)}), as reproduced by the lab`);
   L.push('', '| Drop reason | Items |', '|---|---|');
   for (const r of all<{ prod_reason: string; n: number }>(labDb, 'SELECT prod_reason, COUNT(*) AS n FROM items GROUP BY prod_reason ORDER BY n DESC')) L.push(`| ${r.prod_reason} | ${r.n} |`);
   L.push('', '| Source | Items | Passed |', '|---|---|---|');
   for (const r of all<{ source_id: string; n: number; p: number }>(labDb, 'SELECT source_id, COUNT(*) AS n, SUM(prod_pass) AS p FROM items GROUP BY source_id ORDER BY n DESC LIMIT 20')) L.push(`| ${r.source_id} | ${r.n} | ${r.p} |`);
 
   L.push('', '## Audit: did the filter drop anything that mattered?', '');
-  L.push('A miss is an audited dropped item that Sonnet rates moderate, major or shock. Random samples are unbiased; boundary samples target the likeliest misses and are reported separately.', '');
+  L.push('A miss is an audited dropped item that Sonnet rates moderate, major or shock. Random samples are unbiased; boundary samples target the likeliest misses and are reported separately. Caveat: within a stratum the random sample is time-weighted (an item that arrives in a quiet hour is more likely to be audited than one arriving in a news burst) and boundary audits remove boundary items from the random pool, so the random miss rate can lean optimistic; read the bound as an estimate, not a guarantee.', '');
   L.push('| Stratum | Volume dropped | Random audited | Random misses | 95% upper bound |', '|---|---|---|---|---|');
   const counts: StratumCount[] = [];
   for (const s of STRATA) {
@@ -67,7 +106,7 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
     for (const r of moved.slice(0, 30)) L.push(`- ${r.source_id} (${r.prod_reason}): ${r.headline.slice(0, 140)}  ret_4h ${pct(r.ret_4h)}`);
   }
 
-  L.push('', '## Rule variants', '', '| Variant | Would pass | Extra vs production | Audited extras | Misses it would have caught |', '|---|---|---|---|---|');
+  L.push('', '## Rule variants', '', '| Variant | Would pass | Extra vs the prefilter as reproduced by the lab | Audited extras | Misses it would have caught |', '|---|---|---|---|---|');
   for (const v of ['strict3', 'loose1', 'social_ok']) {
     const would = one<{ n: number }>(labDb, `SELECT COUNT(*) AS n FROM items WHERE json_extract(variants, '$.${v}') = 1`).n;
     const extra = one<{ n: number }>(labDb, `SELECT COUNT(*) AS n FROM items WHERE json_extract(variants, '$.${v}') = 1 AND prod_pass = 0`).n;
@@ -85,11 +124,12 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
     const sonnetCalls = range.a === null || range.b === null
       ? 0
       : all<{ payload: string }>(botDb, "SELECT payload FROM journal WHERE kind = 'intake_outcome' AND ts_ms >= ? AND ts_ms <= ?", range.a, range.b).filter((r) => JSON.parse(r.payload).escalated === true).length;
+    const noPrefilterNote = bw !== null && bw.intakeItems === 0 ? ' The Sonnet part is not comparable: the bot journal has no intake_item rows in the lab window (the prefilter was off).' : '';
     if (g === null || s === null) L.push('The bot ledger has no gate/impact cost rows yet: spend estimate unavailable.');
     else {
       const sonnetSaved = range.a === null ? 0 : Math.max(0, items * BASELINE_SONNET_RATE - sonnetCalls) * s;
       const saved = (items - passed) * g + sonnetSaved;
-      L.push(`Estimated model spend avoided: $${saved.toFixed(2)} (unfiltered Haiku reads ${items} vs ${passed}; Sonnet calls at the pre-prefilter rate ${(BASELINE_SONNET_RATE * 100).toFixed(0)}% vs ${sonnetCalls}, the bot's own escalations in the lab window; average cost per gate call $${g.toFixed(5)}, per impact call $${s.toFixed(5)}).`);
+      L.push(`Estimated model spend avoided: $${saved.toFixed(2)} (unfiltered Haiku reads ${items} vs ${passed}; Sonnet calls at the pre-prefilter rate ${(BASELINE_SONNET_RATE * 100).toFixed(0)}% vs ${sonnetCalls}, the bot's own escalations in the lab window; average cost per gate call $${g.toFixed(5)}, per impact call $${s.toFixed(5)}).${noPrefilterNote}`);
     }
   } catch {
     L.push('The bot ledger could not be read for costs: spend estimate unavailable.');
@@ -101,7 +141,7 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
   const starts = listProcessStarts(labDb);
   if (starts.length === 0) L.push('None recorded.');
   else for (const s of starts) L.push(`- ${new Date(s.atMs).toISOString()} commit ${s.commit}`);
-  L.push('', "The prefilter's dedup and cap state is cold after each start (it lives in the lab process's memory), so the prod_* columns in the first hours after a restart may under-report duplicates.");
+  L.push('', "The prefilter's dedup and cap state is cold after each start (it lives in the lab process's memory), so the prod_* columns (the production verdict as reproduced by the lab) in the first hours after a restart may under-report duplicates.");
 
   L.push('', '## Recommendation', '');
   if (est.n < MIN_AUDITS_FOR_VERDICT) L.push(`Not enough audited items (${est.n} random audits; ${MIN_AUDITS_FOR_VERDICT} needed) for a verdict: keep the production filter and keep collecting.`);
