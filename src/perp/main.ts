@@ -22,6 +22,7 @@ import { ensureModelCallsTable } from './model/callJson.js';
 import { runPerpGate, type ModelDeps } from './model/gate.js';
 import { extractImpact } from './model/impact.js';
 import { currentCommit } from './ops/commit.js';
+import { preferIpv4 } from './ops/network.js';
 import { createBroker, resolveMode } from './startup.js';
 import { appendJournal, getState, openPerpDb, setState } from './store/db.js';
 import { createTickLoop } from './tickLoop.js';
@@ -42,6 +43,7 @@ function must(name: string): string {
 }
 
 export async function main(): Promise<void> {
+  preferIpv4(); // before any client exists: this host's IPv6 route is dead and its IPv4 connects are slow (see ops/network.ts)
   const env = process.env;
   const cfg = loadPerpConfig(env);
   const mode = resolveMode(env, cfg.ticker);
