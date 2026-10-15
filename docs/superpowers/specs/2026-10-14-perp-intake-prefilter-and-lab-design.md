@@ -78,10 +78,9 @@ type Verdict = {
    earnings, guidance, trade deal/war/talks, sanctions, China, semiconductor, mega-cap names, central bank/ECB/BoJ/BoE/BoC, dollar, supply chain, missile/attack/strike).
    Negative patterns -2 (opinion, celebrity, sports, recipe, horoscope). Total capped at 10 and floored at 0. All lists live in the config file, versioned.
 4. **Own dedup and cooldown.** Headline normalised to a token set (lowercase, punctuation and stopwords removed). Jaccard >= 0.6 against any
-   item that passed in the last `dedupWindowMs` (default 6 h) => `duplicate`. A topic key (the two highest-weight matched patterns) that passed within
-   `cooldownMs` (default 2 h) => `cooldown`, unless the new item matches a strong pattern the earlier one did not.
+   item that passed in the last `dedupWindowMs` (default 6 h) => `duplicate`. Cooldown (`cooldownMs`, default 2 h): an item that has at least one strong hit and whose strong hits are all contained in an earlier passed item's strong hits within `cooldownMs` is a `cooldown`.
 5. **Hourly caps** `haikuPerHour` (default 30) and `sonnetPerHour` (default 6). Over the Haiku cap, only items whose score is >= the current
-   hour's cap-admitting minimum pass (a simple rising floor); the rest are `haiku_cap`.
+   hour's cap-admitting minimum pass (floor = min(scoreCap, threshold + passesInLastHour - haikuPerHour + 1); official_macro bypasses); the rest are `haiku_cap`.
 
 Fail closed: if `prefilter` throws for an item, the intake drops it, journals `prefilter_error`, and counts it; five in an hour raise one alert.
 Kill switch: `PERP_PREFILTER=off` restores today's behaviour exactly (every hygiene-passing item goes to Haiku).
@@ -96,8 +95,9 @@ Kill switch: `PERP_PREFILTER=off` restores today's behaviour exactly (every hygi
 
 ### Journal
 
-Every item the intake sees (including drops) gets one `journal` row `kind='intake_item'`, payload
-`{ itemId, sourceId, tier, verdict, reason, sourceClass, score, hits, dupOf?, haikuImpact?, escalated?, commit }`. The lab joins on `itemId`.
+The journal gets one `intake_item` row per item that reaches the prefilter (including drops), and one `intake_outcome` row per item the gate decided on.
+`intake_item` payload: `{ itemId, sourceId, tier, pass, reason, sourceClass, score, hits, strongHits, dupOf?, commit }`;
+`intake_outcome` payload: `{ itemId, impact, escalated, reason, haikuReason }`. The lab joins on `itemId`.
 
 ## 5. Part C: the intake lab (`src/perp/lab/`, service `intake-lab`)
 
