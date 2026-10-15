@@ -22,6 +22,7 @@
     "perp-history": "tsx scripts/perp-history.ts",
     "perp-clear-halt": "tsx scripts/perp-clear-halt.ts",
     "perp-paper-fund": "tsx scripts/perp-paper-fund.ts",
+    "intake-lab-report": "tsx scripts/intake-lab-report.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
