@@ -14,7 +14,7 @@
 
 All commands run **on mini-mac** (`ssh emac@mini-mac.local`) in `~/executor_module-perp-intake` (branch `feat/perp-intake-prefilter-lab`, off `main` at 4237d33; `node_modules` is a symlink to `~/executor_module-perp/node_modules`). Never touch `~/executor_module-perp` (the running bot's checkout). Single file: `npx vitest run test/perp/<file>.test.ts`; perp suite: `npx vitest run test/perp`; typecheck: `npx tsc --noEmit`.
 
-**Baseline:** before Task 1 run `npx vitest run test/perp` and record the passed count (355 expected) and `npx vitest run 2>&1 | tail -6` (the full suite has known failures in `test/main.test.ts`, `test/redis/*`, `test/keyphrases/generate.test.ts`, `test/decide/ledgerLock.test.ts`: Redis NOAUTH / no API key; about 30). The perp count may only go up; the known failures may not grow.
+**Baseline:** before Task 1 run `npx vitest run test/perp` and record the passed count (372 passed + 1 skipped expected, 28 files) and `npx vitest run 2>&1 | tail -6` (the full suite has known failures in `test/main.test.ts`, `test/redis/*`, `test/keyphrases/generate.test.ts`, `test/decide/ledgerLock.test.ts`: Redis NOAUTH / no API key; about 30). The perp count may only go up; the known failures may not grow.
 
 **Commits** use exactly:
 
@@ -1571,7 +1571,7 @@ In the spec make these clarifications (they pin what the plan implemented): sect
 - [ ] **Step 2: Full verification**
 
 Run: `npx tsc --noEmit && npx vitest run test/perp 2>&1 | tail -6 && npx vitest run 2>&1 | tail -8`
-Expected: typecheck clean; the perp suite all pass (355 + the new tests); the full suite's failures are only the known baseline files. `git status --short` clean after the commit; `git diff --stat main..HEAD` shows only the files in the File Structure list (plus the spec and plans).
+Expected: typecheck clean; the perp suite all pass (372 + the new tests); the full suite's failures are only the known baseline files. `git status --short` clean after the commit; `git diff --stat main..HEAD` shows only the files in the File Structure list (plus the spec and plans).
 
 - [ ] **Step 3: Commit**
 
