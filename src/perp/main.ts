@@ -43,8 +43,10 @@ export async function main(): Promise<void> {
   const env = process.env;
   const cfg = loadPerpConfig(env);
   const mode = resolveMode(env, cfg.ticker);
-  const tickMs = Number(env.PERP_TICK_MS ?? 60_000);
+  const tickMs = Number(env.PERP_TICK_MS ?? 15_000);
   if (!Number.isFinite(tickMs) || tickMs < 5_000) throw new Error('PERP_TICK_MS must be at least 5000');
+  const fullSnapshotMs = Number(env.PERP_FULL_SNAPSHOT_MS ?? 300_000);
+  if (!Number.isFinite(fullSnapshotMs) || fullSnapshotMs < tickMs) throw new Error('PERP_FULL_SNAPSHOT_MS must be at least PERP_TICK_MS');
   const dailyCap = Number(env.PERP_DAILY_USD_CAP ?? 5);
   if (!Number.isFinite(dailyCap) || dailyCap <= 0) throw new Error('PERP_DAILY_USD_CAP must be a positive number of dollars');
 
@@ -103,7 +105,7 @@ export async function main(): Promise<void> {
   };
 
   const engine = new PerpEngine({
-    cfg, db, broker, now: () => Date.now(), collect, alert,
+    cfg, db, broker, now: () => Date.now(), collect, alert, fullSnapshotMs,
     persistBroker: paper === null ? undefined : () => setState(db, 'paper', paper.exportState()),
     applyFunding: paper === null ? undefined : (rate, mark) => paper.applyFunding(rate, mark),
   });
@@ -116,7 +118,7 @@ export async function main(): Promise<void> {
     extract: (item, ctx) => extractImpact(modelDeps, item, ctx, Date.now()),
   });
 
-  console.log(`[perp] starting mode=${mode.mode} ticker=${mode.marketTicker} subaccount=${mode.subaccount ?? '-'} tickMs=${tickMs} db=${dbPath}`);
+  console.log(`[perp] starting mode=${mode.mode} ticker=${mode.marketTicker} subaccount=${mode.subaccount ?? '-'} tickMs=${tickMs} fullSnapshotMs=${fullSnapshotMs} db=${dbPath}`);
   await engine.start();
   await engine.tick(); // first snapshot, so news arriving next has context
 
