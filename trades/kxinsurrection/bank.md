@@ -1,12 +1,13 @@
-TRADE: Will Trump invoke the Insurrection Act (triggering military/federalized National Guard domestic deployment) before the deadline.
-SETTLES ON: Resolves Yes only upon an actual formal invocation of the Insurrection Act by the President to deploy U.S. military and/or federalized National Guard domestically before the stated date; otherwise No.
+TRADE: Whether the US President invokes the Insurrection Act to deploy active-duty military or federalized National Guard inside the US, with deadlines from Dec 1 2026 to Jan 20 2029.
+SETTLES ON: Formal invocation of the Insurrection Act (10 U.S.C. 251-255) via proclamation or order, confirmed by official or credible reporting, before the deadline date.
 MOVES THE PRICE:
-- Civil unrest: large riots, mass protests turning violent, widespread looting, city-level breakdowns of order
-- Immigration enforcement crises: mass deportation operations meeting resistance, border surges, clashes with ICE/Border Patrol requiring troop backup
-- Political rhetoric: Trump or administration officials publicly floating or threatening Insurrection Act use, statements from DHS/DOJ/Pentagon signaling intent
-- Legal/advisory developments: DOJ opinions, White House Counsel memos, court rulings on National Guard federalization authority
-- State vs federal conflict: governors refusing to deploy Guard, Trump threatening to federalize Guard over objections, disputes like past Los Angeles deployment
-- Precedent-setting actions: any deployment of troops/Guard domestically even without formal invocation (sets stage, raises probability)
-- Congressional or judicial pushback: lawsuits, injunctions, legislative attempts to limit or repeal Insurrection Act authority
-SETTLEMENT-SENSITIVE FACTS: Only a formal, explicit invocation counts, not mere troop deployment under other authorities (e.g., Title 32 Guard activation alone is insufficient), must be clearly announced/documented as Insurrection Act action, ambiguous legal deployments may require clarification before resolving Yes, historical invocations are rare (last used 1992 LA riots) so market is a low-base-rate event, any deployment framed under different statutory authority does not trigger Yes even if functionally similar.
-IGNORE: Routine National Guard deployments for natural disasters or hurricanes, state-level Guard activations without federalization, military actions abroad or overseas deployments, general crime/police stories unrelated to federal troop deployment, drills or training exercises, immigration policy changes that don't involve troop deployment.
+- Civil unrest: large protests, riots, looting, attacks on federal agents or ICE facilities, clashes in cities like Los Angeles, Chicago, Portland, Minneapolis
+- Immigration enforcement: mass deportation operations, sanctuary city standoffs, local resistance, shootings involving ICE agents
+- Presidential rhetoric: Trump saying he will or might invoke it, threats toward governors or mayors, remarks by Stephen Miller or Hegseth, DOJ or OLC legal memos
+- Courts: rulings on Guard federalization under 10 U.S.C. 12406, Posse Comitatus limits, Supreme Court or appeals decisions in Newsom v. Trump or Illinois cases
+- State and local politics: governors refusing or requesting Guard, states suing the administration, federal-state confrontations
+- Elections and political violence: contested midterm results, assassination attempts, attacks on officials
+- Congress: bills to restrict or reform the Act, hearings, party reactions
+- Disasters and geopolitics: terror attacks, border crisis, wartime emergencies prompting domestic deployment
+SETTLEMENT-SENSITIVE FACTS: Guard deployments under Title 10 12406 or Title 32 do not count without formal Insurrection Act invocation, threats and statements do not count, earlier invocation implies all later deadlines resolve Yes, deployment must be domestic, a dispersal proclamation alone may be ambiguous, courts blocking other authorities may push the administration toward the Act
+IGNORE: Guard deployments to DC under Title 32, foreign coups or insurrections, January 6 history and pardons, other countries' emergency laws, routine disaster Guard activations, border wall funding, overseas military deployments

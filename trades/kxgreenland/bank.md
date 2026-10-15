@@ -1,12 +1,12 @@
-TRADE: Whether the US purchases at least part of Greenland from Denmark before a set deadline (2027 or 2029 contracts).
-SETTLES ON: Resolves YES only if a completed or formally agreed US purchase of part/all of Greenland from Denmark occurs before the deadline; otherwise NO.
+TRADE: Whether the US government purchases at least part of Greenland from Denmark before the deadline (before 2027, or before Jan 20, 2029).
+SETTLES ON: Kalshi rules: resolves Yes if the US purchases at least part of Greenland from Denmark before the date; a completed purchase is required, not talks or offers.
 MOVES THE PRICE:
-- Trump statements: renewed interest in buying Greenland, threats of tariffs/force, public negotiation offers
-- Danish/Greenlandic government response: refusal, openness to talks, independence referendum moves, statements from PM Mette Frederiksen or Greenland's premier
-- US government action: formal proposals from State Dept/White House, congressional bills, funding appropriations for purchase
-- Diplomatic escalation: NATO tension, EU reaction, Denmark seeking EU/NATO support against US pressure
-- Geopolitical context: Arctic strategic competition with Russia/China, rare earth minerals interest, military base negotiations (Pituffik)
-- Polling/public opinion: Greenlandic independence sentiment, surveys on US annexation support
-- Legal/constitutional steps: Danish parliament debates, Greenlandic self-governance votes on status change
-SETTLEMENT-SENSITIVE FACTS: Requires an actual purchase transaction, not merely interest, rhetoric, or military agreements; informal statements or campaign rhetoric alone do not trigger YES; annexation by force or political takeover without a purchase agreement would not satisfy rules; a base-lease extension or defense pact is insufficient; independence of Greenland from Denmark followed by a separate US deal could complicate settlement and may require clear evidence of a Denmark-to-US sale.
-IGNORE: Trump statements about other territorial ambitions (Panama Canal, Canada), general Arctic policy unrelated to purchase, US military exercises or base visits without acquisition talk, Greenland's mining/resource deals with non-US companies, unrelated US-Denmark trade or NATO funding disputes.
+- US executive statements: Trump remarks, Truth Social posts, Vance or Rubio comments, dollar offers, formal purchase proposals
+- Danish and Greenlandic response: Frederiksen refusals, Greenland premier or Naleraq statements, Greenland parliament votes, independence referendum talk
+- Negotiations and treaties: US-Denmark talks, defense agreement revisions, Pituffik base expansion, lease or free association proposals
+- Congress and law: bills authorizing funds, Senate resolutions, appropriations, legal limits on acquisition
+- Geopolitics: Arctic security, Russia and China activity, NATO tensions, EU reaction, tariffs or sanctions on Denmark
+- Resources and economy: rare earths, minerals, oil, shipping lanes, Greenland mining deals, US investment
+- Military or coercion: troop deployments, naval visits, threats of force, which raise tension but do not mean a purchase
+SETTLEMENT-SENSITIVE FACTS: Requires an actual purchase from Denmark, not annexation by force, lease, investment, or alliance; Greenland has self-rule and its consent is needed; Danish constitution and Self-Government Act complicate transfer; ratification steps take long; the 2027 deadline is much less likely than 2029; past rhetoric has not produced deals.
+IGNORE: Iceland or Canada annexation talk, Alaska purchase history, Greenland weather or tourism, Danish domestic politics unrelated to Greenland, Greenland ice melt science, Panama Canal

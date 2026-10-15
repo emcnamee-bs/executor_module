@@ -1,12 +1,12 @@
-TRADE: Outcome of the FOMC's October 28, 2026 rate decision (hike >25bps, hike 25bps, hold, cut 25bps, cut >25bps) — mutually exclusive buckets.
-SETTLES ON: Official FOMC statement/press release on October 28, 2026 announcing the federal funds rate target range change (or no change); if the meeting is canceled, 'Fed maintains rate' resolves Yes.
+TRADE: The size and direction of the Federal Reserve's federal funds target rate change at the next scheduled FOMC meeting (hike >25bps, hike 25bps, hold, cut 25bps, cut >25bps).
+SETTLES ON: The Fed's official FOMC statement on the meeting date; the outcome is the announced change in the target range versus the prior range, and a canceled meeting counts as hold.
 MOVES THE PRICE:
-- Inflation data: CPI, PCE, core PCE prints, inflation expectations surveys (Michigan, NY Fed)
-- Labor market data: nonfarm payrolls, unemployment rate, wage growth, JOLTS job openings, initial jobless claims
-- Fed communications: speeches by Powell or other FOMC members, FOMC meeting minutes, dot plot projections, Jackson Hole remarks
-- Market pricing: fed funds futures, CME FedWatch tool probabilities, Treasury yield moves, SOFR futures
-- Macro growth data: GDP growth, retail sales, ISM manufacturing/services PMI, consumer spending, industrial production
-- Political pressure: White House commentary on Fed policy, Congressional hearings, Fed chair nomination/confirmation news
-- Financial stability events: banking stress, credit market disruptions, stock market volatility, geopolitical shocks affecting growth outlook
-SETTLEMENT-SENSITIVE FACTS: Only the October 28, 2026 meeting decision counts, prior meetings (Sept 2026 or earlier) do not determine this market, FOMC decisions are typically 25bps increments so 'hike/cut >25bps' outcomes require unusual 50bps+ moves, market resolves based on official Fed statement language not analyst predictions or futures pricing, a meeting cancellation triggers automatic 'maintain rate' resolution regardless of economic conditions.
-IGNORE: ECB, BOJ, BOE or other foreign central bank rate decisions, past Fed meetings from 2025 or earlier, long-term interest rate forecasts beyond October 2026, commentary on Fed policy unrelated to the specific October 28 2026 meeting, general stock market performance not tied to Fed rate expectations.
+- Inflation data: CPI, core CPI, PCE price index, PPI, import prices, sticky shelter and services inflation, inflation expectations surveys
+- Labor market: nonfarm payrolls, unemployment rate, jobless claims, JOLTS openings, wage growth, layoffs, ADP employment
+- Growth and activity: GDP, retail sales, ISM manufacturing and services, consumer sentiment, housing data, recession signals
+- Fed communication: Fed chair speeches and testimony, FOMC member remarks, meeting minutes, dot plot, forward guidance, Fed leadership or board changes
+- Fiscal and trade policy: tariffs, government spending and deficits, tax legislation, shutdowns, White House pressure on the Fed, nominations to the Fed board
+- Financial conditions: Treasury yields, fed funds futures pricing, CME FedWatch odds, credit spreads, bank stress, equity selloffs, dollar moves, liquidity strains in repo markets
+- Geopolitics and shocks: wars, oil price spikes, supply chain disruptions, pandemics, natural disasters affecting output or prices
+SETTLEMENT-SENSITIVE FACTS: The Fed moves in 25bp steps by convention so large moves are rare and need a crisis or major surprise, holds are the default when data is mixed, emergency intercycle moves are possible but rare, the decision follows data released shortly before the meeting, communications in the blackout period are limited, dissents do not change the outcome, balance sheet policy changes are not rate changes.
+IGNORE: ECB, Bank of England, Bank of Japan or other foreign central bank decisions, mortgage rate commentary, individual stock earnings, crypto price moves, credit card rate offers, state or local tax news, Fed bank regulation rules unrelated to rates

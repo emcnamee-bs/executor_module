@@ -1,12 +1,12 @@
-TRADE: Weekly total transit calls (vessel crossings) through the Strait of Hormuz, Oct 5–11, 2026, resolving YES if sum >75.
-SETTLES ON: IMF PortWatch daily transit-call data for the Strait of Hormuz; the 7 daily counts for the period are summed; final number posted and market resolves no earlier than the following Tuesday 9 AM once complete data is available.
+TRADE: Total weekly transit calls through the Strait of Hormuz, Oct 12-18 2026, versus strikes from 22 to 75
+SETTLES ON: IMF PortWatch daily Hormuz transit call counts summed over Oct 12-18 2026; Yes if the sum is above the strike; resolves no earlier than the following Tuesday 9 AM once data is complete
 MOVES THE PRICE:
-- Geopolitical tension/conflict: Iran-US or Iran-Israel military strikes, naval skirmishes, mine-laying incidents, missile attacks on tankers, Iranian threats to close the strait, seizure of vessels by IRGC
-- Shipping/insurance market reaction: spikes in war-risk insurance premiums, major shipping lines (Maersk, MSC, CMA CGM) rerouting or pausing transits, tanker owners halting voyages
-- Oil market supply dynamics: OPEC+ production changes affecting Gulf export volumes, Saudi/UAE/Kuwait/Iraq crude loadings, changes in Iranian oil exports
-- Scheduled/seasonal patterns: typical weekly baseline transit volume (historically well above 100 vessels/week), holiday or maintenance-related dips, port congestion at Gulf terminals
-- Weather and navigational hazards: tropical storms, fog, high winds, sandstorms disrupting navigation safety in the strait
-- Policy/military posture: US Navy Fifth Fleet patrols, escort convoys, sanctions enforcement actions, Gulf state naval exercises, Iranian IRGC naval drills blocking shipping lanes
-- Infrastructure/technical disruptions: PortWatch data reporting delays or revisions, AIS signal jamming or spoofing affecting vessel tracking counts
-SETTLEMENT-SENSITIVE FACTS: IMF PortWatch aggregates AIS-based vessel tracking data so undercounting can occur if ships spoof or disable AIS; baseline weekly transit volume is typically well above 100, so values crossing into the 30-75 range imply a major disruption; data can be revised after initial posting, affecting final resolution; counts include all transit types (tankers, cargo, LNG) not just oil tankers.
-IGNORE: General Middle East political news unrelated to the strait or shipping, oil price movements alone without physical disruption to transit, OPEC+ meeting outcomes affecting production quotas but not Hormuz passage, unrelated port congestion in other regions (e.g., Suez Canal, Panama Canal), diplomatic statements/sanctions announcements with no operational shipping impact.
+- Military conflict and attacks: strikes on tankers, missile or drone attacks, naval clashes, sea mines, vessel seizures
+- Closure or blockade: Iranian threats or declarations to close the strait, naval blockades, reopening announcements, escorted convoys
+- Diplomacy: ceasefires, US-Iran talks, sanctions changes, deals, mediation by Oman or Qatar
+- Shipping industry behavior: war-risk insurance premiums, carriers rerouting or pausing transits, P&I coverage, GPS jamming or spoofing, AIS shutoffs
+- Energy demand and exports: Gulf crude, LNG and product export volumes, OPEC+ output decisions, Asian buyer demand, tanker charter rates
+- Naval presence: US, Iranian or coalition warship deployments, maritime security missions
+- Weather and incidents: storms, groundings, collisions, port congestion, Gulf port strikes or outages
+SETTLEMENT-SENSITIVE FACTS: counts derive from satellite AIS vessel tracking so dark or spoofed vessels may be missed, daily data is published with a lag and may be revised, the week sums seven days so a one-day disruption matters little but a multi-day halt matters a lot, counts cover all vessel types not only tankers, partial-week data is not final
+IGNORE: Suez Canal or Red Sea Houthi traffic, Panama Canal transits, oil price moves without shipping effects, Strait of Malacca, generic Iran domestic politics, stock market commentary

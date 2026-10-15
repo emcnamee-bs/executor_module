@@ -1,12 +1,12 @@
-TRADE: Whether Trump's RCP job approval average is below/above specific thresholds on Oct 8, 2026.
-SETTLES ON: RealClearPolitics 'President Trump Job Approval' table, 'Approve' value in 'RCP Average' row, read at 1:00 PM ET on Oct 8, 2026.
+TRADE: Trump's RealClearPolitics presidential job approval average (Approve %) on Oct 15, 2026 at 1:00 PM ET, in narrow bracket markets around 38-39%.
+SETTLES ON: The "Approve" value in the "RCP Average" row of the "President Trump Job Approval" table on RealClearPolitics at exactly 1:00 PM ET on Oct 15, 2026; the displayed rounded value decides the bracket.
 MOVES THE PRICE:
-- Economy: inflation data, jobs reports, stock market swings, gas prices, recession fears, tariff impacts
-- Major policy actions: executive orders, legislation signed/vetoed, government shutdown, immigration crackdowns, healthcare/tax policy changes
-- Scandals/controversies: investigations, indictments, leaked documents, ethics complaints, controversial statements
-- Geopolitics: war developments, foreign policy decisions, diplomatic incidents, military action, hostage situations
-- Domestic unrest: protests, natural disasters response, mass shootings, crime statistics, civil rights issues
-- New poll releases: individual polls from major pollsters (Rasmussen, Quinnipiac, Fox, Economist/YouGov, Gallup) entering the RCP average, methodology shifts
-- Media narrative: major news cycle events, viral moments, press conferences, debates
-SETTLEMENT-SENSITIVE FACTS: RCP average is a simple average of recent polls included in their table (not all pollsters, selection varies), lag exists between news events and poll releases/inclusion, polls partisan lean affects weighting, average updates irregularly as new polls drop (not daily), old polls roll off after newer ones published, house effects of specific pollsters can shift average even without real opinion change, RCP may pause/resume updating approval tables, single new poll can move average by 0.5-2pts depending on how many polls are in rotation.
-IGNORE: Trump's favorability/net approval separate metrics, approval ratings of other politicians (Vance, cabinet members), FiveThirtyEight/Silver Bulletin or other aggregators' approval numbers, generic congressional approval or generic ballot polling, Trump approval on single issues (economy-only, immigration-only) unless tied to overall number, historical approval comparisons to past presidents.
+- New national polls: Gallup, Quinnipiac, Reuters/Ipsos, Economist/YouGov, Emerson, Rasmussen, Morning Consult, AP-NORC, Fox News, CNN, NYT/Siena releasing job approval numbers
+- Economy and prices: inflation or CPI prints, gas prices, jobs reports, unemployment, stock market drops or rallies, recession fears, tariff-driven cost increases
+- Policy actions: tariffs, immigration enforcement and deportations, executive orders, tax or spending bills, government shutdown, healthcare changes, Supreme Court rulings
+- Geopolitics and security: war or ceasefire developments, Ukraine, Russia, China, Middle East, trade deals, terrorist attacks, military deployments
+- Scandals and personal events: investigations, indictments, Epstein-related news, health concerns, cabinet resignations, controversial statements
+- Political calendar: midterm election campaign events in fall 2026, primaries, congressional fights, party defections, generic ballot shifts, rallies, debates
+- Domestic crises: hurricanes and disaster response, protests, civil unrest, National Guard deployments, shootings
+SETTLEMENT-SENSITIVE FACTS: RCP is an unweighted average of the most recent poll from each included pollster so one poll entering or leaving shifts it by tenths of a point, older polls drop out of the window automatically, Rasmussen and other Trump-friendly pollsters raise the average while some outlets are excluded or included at RCP's discretion, the value is rounded to one decimal so brackets are 0.1 points wide, the snapshot at 1:00 PM ET could miss polls added later that day, a single news event usually moves the average only 0.1 to 0.5 points over weeks
+IGNORE: Disapprove percentages or net approval spread, approval ratings of other politicians or Congress, Biden or Obama historical approval, 538 or Silver Bulletin or other aggregator averages, right-track/wrong-track polls, favorability of non-Trump figures, foreign leaders' approval ratings, 2024 election results
