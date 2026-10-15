@@ -47,6 +47,8 @@ export async function main(): Promise<void> {
   if (!Number.isFinite(tickMs) || tickMs < 5_000) throw new Error('PERP_TICK_MS must be at least 5000');
   const fullSnapshotMs = Number(env.PERP_FULL_SNAPSHOT_MS ?? 300_000);
   if (!Number.isFinite(fullSnapshotMs) || fullSnapshotMs < tickMs) throw new Error('PERP_FULL_SNAPSHOT_MS must be at least PERP_TICK_MS');
+  const readTimeoutMs = Number(env.PERP_READ_TIMEOUT_MS ?? 5_000);
+  if (!Number.isFinite(readTimeoutMs) || readTimeoutMs < 1_000 || readTimeoutMs > 30_000) throw new Error('PERP_READ_TIMEOUT_MS must be between 1000 and 30000');
   const dailyCap = Number(env.PERP_DAILY_USD_CAP ?? 5);
   if (!Number.isFinite(dailyCap) || dailyCap <= 0) throw new Error('PERP_DAILY_USD_CAP must be a positive number of dollars');
 
@@ -65,10 +67,10 @@ export async function main(): Promise<void> {
   const prodClient =
     mode.mode === 'demo'
       ? null
-      : new KalshiMarginClient({ env: 'prod', apiKeyId: must('KALSHI_API_KEY_ID'), privateKeyPath: must('KALSHI_PRIVATE_KEY_PATH') });
+      : new KalshiMarginClient({ env: 'prod', apiKeyId: must('KALSHI_API_KEY_ID'), privateKeyPath: must('KALSHI_PRIVATE_KEY_PATH'), readTimeoutMs });
   const demoClient =
     mode.mode === 'demo'
-      ? new KalshiMarginClient({ env: 'demo', apiKeyId: must('KALSHI_DEMO_API_KEY_ID'), privateKeyPath: must('KALSHI_DEMO_PRIVATE_KEY_PATH') })
+      ? new KalshiMarginClient({ env: 'demo', apiKeyId: must('KALSHI_DEMO_API_KEY_ID'), privateKeyPath: must('KALSHI_DEMO_PRIVATE_KEY_PATH'), readTimeoutMs })
       : null;
   const marketClient = demoClient ?? prodClient;
   if (marketClient === null) throw new Error('no Kalshi client for market data');

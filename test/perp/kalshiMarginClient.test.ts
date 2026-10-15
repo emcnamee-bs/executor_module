@@ -30,6 +30,41 @@ function fakeFetch(reply: (call: Call) => Response): { fn: typeof fetch; calls: 
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
+describe('KalshiMarginClient timeouts', () => {
+  /** A fetch that never answers on its own: it settles only when the request's abort signal fires, like a hung connection. */
+  function hangingFetch(): { fn: typeof fetch; signals: AbortSignal[] } {
+    const signals: AbortSignal[] = [];
+    const fn = ((_url: string, init: RequestInit) => {
+      const signal = init.signal as AbortSignal;
+      signals.push(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason));
+      });
+    }) as unknown as typeof fetch;
+    return { fn, signals };
+  }
+
+  it('gives up on a hung GET after readTimeoutMs', async () => {
+    const { fn } = hangingFetch();
+    const client = new KalshiMarginClient({ env: 'prod', apiKeyId: 'k', privateKeyPath: keyPath, readTimeoutMs: 60 }, { fetchFn: fn });
+    const t0 = Date.now();
+    await expect(client.get('/margin/markets/X')).rejects.toThrow(/timeout|abort/i);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('defaults GET to 5 s but keeps writes at 10 s (a timed-out order has an unknown outcome)', async () => {
+    const { fn, signals } = hangingFetch();
+    const client = new KalshiMarginClient({ env: 'prod', apiKeyId: 'k', privateKeyPath: keyPath }, { fetchFn: fn });
+    void client.get('/margin/markets/X').catch(() => undefined);
+    void client.post('/margin/orders', { x: 1 }).catch(() => undefined);
+    void client.put('/margin/isolated/positions/X/exit_trigger', { x: 1 }).catch(() => undefined);
+    void client.del('/margin/isolated/positions/X/exit_trigger').catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 1500)); // throttle spaces the requests ~200 ms apart; none can have timed out yet
+    expect(signals).toHaveLength(4);
+    expect(signals.every((s) => !s.aborted)).toBe(true);
+  });
+});
+
 describe('KalshiMarginClient', () => {
   it('signs timestamp+METHOD+pathname (no query) with RSA-PSS and sends the key id', async () => {
     const { fn, calls } = fakeFetch(() => json({ ok: true }));

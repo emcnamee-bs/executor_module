@@ -8,7 +8,10 @@ export const MARGIN_HOSTS: Record<MarginEnv, string> = {
   demo: 'https://external-api.demo.kalshi.co',
 };
 const API_PREFIX = '/trade-api/v2';
-const REQUEST_TIMEOUT_MS = 10_000;
+/** Reads are safe to give up on and repeat on the next tick, so they time out fast. */
+const DEFAULT_READ_TIMEOUT_MS = 5_000;
+/** A write that times out has an UNKNOWN outcome (the order may have filled), so it gets longer before we give up. */
+const WRITE_TIMEOUT_MS = 10_000;
 
 export class MarginApiError extends Error {
   constructor(
@@ -27,6 +30,8 @@ export interface MarginClientConfig {
   apiKeyId: string;
   privateKeyPath: string;
   requestsPerSecond?: number;
+  /** Timeout of GET requests, ms (default 5000). Writes (POST/PUT/DELETE) always use 10000. */
+  readTimeoutMs?: number;
 }
 
 export type Query = Record<string, string | number | undefined>;
@@ -87,7 +92,7 @@ export class KalshiMarginClient {
       method,
       headers,
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(method === 'GET' ? (this.cfg.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS) : WRITE_TIMEOUT_MS),
     });
     const text = await res.text();
     if (!res.ok) {
