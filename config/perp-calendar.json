@@ -1,1 +1,10 @@
-[]
+[
+  {"at": "2026-10-28T14:00:00-04:00", "name": "FOMC rate decision (Oct 27-28)", "impact": "high"},
+  {"at": "2026-11-06T08:30:00-05:00", "name": "Employment Situation, Oct report (BLS)", "impact": "high"},
+  {"at": "2026-11-10T08:30:00-05:00", "name": "CPI, Oct report (BLS)", "impact": "high"},
+  {"at": "2026-12-04T08:30:00-05:00", "name": "Employment Situation, Nov report (BLS)", "impact": "high"},
+  {"at": "2026-12-09T14:00:00-05:00", "name": "FOMC rate decision + SEP (Dec 8-9)", "impact": "high"},
+  {"at": "2026-12-10T08:30:00-05:00", "name": "CPI, Nov report (BLS)", "impact": "high"},
+  {"at": "2027-01-08T08:30:00-05:00", "name": "Employment Situation, Dec report (BLS)", "impact": "high"},
+  {"at": "2027-01-13T08:30:00-05:00", "name": "CPI, Dec report (BLS)", "impact": "high"}
+]
