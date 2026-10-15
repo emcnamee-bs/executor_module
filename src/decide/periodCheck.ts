@@ -19,7 +19,13 @@ export const PERIOD_REQUIRED = ['period_matches', 'period_note'] as const;
 /** The prompt paragraph, naming the market's own period so the model has something to compare against. */
 export function periodRule(profile: Pick<TradeProfile, 'title' | 'settlement'>): string {
   return `PERIOD CHECK. This market is: "${profile.title}". It settles as follows: ${profile.settlement}
-Before you recommend any entry, compare the period, date, release or event the article's figures or events belong to with the period this market settles on. Answer period_matches: true if your shift rests on evidence about the period this market settles on, or on drivers of it that are not tied to a different period. Answer false if your shift treats an article about a DIFFERENT period (another month, week, year, meeting or release: for example the September CPI report for an October CPI market, or last week's count for this week's market) as if it were this market's own settlement data. period_note: one sentence naming the period the article covers and the period this market settles on. When period_matches is false the entry is not made.`;
+Before you recommend any entry, compare the period, date, release or event the article's figures or events belong to with the period this market settles on. Answer period_matches: true if your shift rests on evidence about the period this market settles on, or on drivers of it that are not tied to a different period. Answer false if your shift treats an article about a DIFFERENT period (another month, week, year, meeting or release: for example the September CPI report for an October CPI market, or last week's count for this week's market) as if it were this market's own settlement data. period_note: one sentence naming the period the article covers and the period this market settles on. When period_matches is false the entry is not made.
+The user message names the live market event (its ticker and Kalshi's own title, for example "KXCPI-26OCT: CPI in October"). When the market description above is general, for example "the upcoming reference month", THAT event's period is the one that counts.`;
+}
+
+/** The line added to the user message so the model knows exactly which event it is trading. */
+export function marketEventLine(ladder: { eventTicker: string; eventTitle?: string }): string {
+  return `Market event: ${ladder.eventTicker}${ladder.eventTitle ? ` (${ladder.eventTitle})` : ''}`;
 }
 
 export interface PeriodAnswer {

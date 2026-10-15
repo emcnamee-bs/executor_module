@@ -36,6 +36,7 @@ import { positionForTicker, type KalshiClient } from '../execute/kalshiClient.js
 import { fetchArticle } from '../fetch/excerpt.js';
 import { recordPaperPosition, hasPaperPosition, paperExposureCents, paperOpenCostByMarket, PAPER_CAPS } from '../paper/paper.js';
 import { paperGuardsFromEnv } from './guards.js';
+import { marketEventLine } from './periodCheck.js';
 import type { LoadedProfile } from '../profile/profile.js';
 
 export type ExitWiring = Pick<
@@ -304,7 +305,7 @@ async function runEntryPipeline(
         if (outcomeGroup === undefined) throw new Error('multi profile has no outcomeGroup'); // the schema forbids this
         const multi = await decideMulti(anthropicClient, db, {
           loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit,
-          triageReason: triage.reason, markets: ladder.bands, group: outcomeGroup,
+          triageReason: triage.reason, markets: ladder.bands, group: outcomeGroup, marketEvent: marketEventLine(ladder),
         });
         if (!multi.shouldTrade) {
           record(skipRecord(item, multi.reasoning, { rung, eventTicker: ladder.eventTicker, orderStatus: 'resolved' }));
@@ -317,6 +318,7 @@ async function runEntryPipeline(
       decision = await decideTrade(anthropicClient, db, {
         loaded, itemId: item.item_id, articleText, excerptSource, rung, lowTierRelaxed, tripwireHit, triageReason: triage.reason,
         periodCheck: paper,
+        marketEvent: marketEventLine(ladder),
       });
     }
 

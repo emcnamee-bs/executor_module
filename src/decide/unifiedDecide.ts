@@ -49,6 +49,8 @@ export interface UnifiedContext {
   activeTickers: string[];
   positions: UnifiedPositionView[];
   entryAllowed: boolean;
+  /** "Market event: <ticker> (<Kalshi title>)" of the active event; tells the model which event's period the period check refers to. */
+  marketEvent?: string;
   /** Defaults to Sonnet. */
   model?: string;
 }
@@ -236,6 +238,7 @@ export async function positionAwareDecide(client: Anthropic, db: Database.Databa
   const otherRows = marketRows(ctx.markets.filter((m) => !activeSet.has(m.ticker)), multi);
   const lines: string[] = [
     `Evidentiary rung: ${ctx.rung}${ctx.lowTierRelaxed === true ? ' (low-tier relaxed, paper test)' : ''}`,
+    ...(ctx.marketEvent === undefined ? [] : [ctx.marketEvent]),
     `Source trust tier: ${ctx.sourceTrustTier} (1 = most trusted, 5 = least). Published: ${ctx.publishedAt ?? 'unknown'}.`,
     `Markets of the event this news is about (ticker | what it pays | quote):\n${activeRows || 'none (no active event is available for entry)'}`,
     ...(otherRows

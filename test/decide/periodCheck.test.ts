@@ -2,7 +2,7 @@
 //
 // The entry period check: a buy needs period_matches === true (the 2026-10-14 CPI trades bought October-CPI YES on
 // the September print). Paper-only for classic decide; always on for multi and unified, which are paper-only.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,10 +11,11 @@ import type Database from 'better-sqlite3';
 import { openLedger } from '../../src/decide/ledger.js';
 import { loadProfile } from '../../src/profile/profile.js';
 import { writeProfile } from '../profile/fixtures.js';
-import { periodRule, readPeriod, periodMismatchReason } from '../../src/decide/periodCheck.js';
+import { periodRule, readPeriod, periodMismatchReason, marketEventLine } from '../../src/decide/periodCheck.js';
+import { fetchActiveLadder } from '../../src/decide/kalshi.js';
 import { decideTrade, validateDecideOutput, buildDecideSystem } from '../../src/decide/decide.js';
 import { decideMulti, buildMultiSystem } from '../../src/decide/decideMulti.js';
-import { validateUnified, unifiedSchema, buildUnifiedSystem, type UnifiedContext } from '../../src/decide/unifiedDecide.js';
+import { validateUnified, unifiedSchema, buildUnifiedSystem, positionAwareDecide, type UnifiedContext } from '../../src/decide/unifiedDecide.js';
 import { thresholdBands } from '../paper/exitFixtures.js';
 import type { BandMarket } from '../../src/decide/kalshi.js';
 
@@ -41,6 +42,57 @@ describe('readPeriod / periodRule', () => {
     expect(rule).toContain(cpi.profile.title);
     expect(rule).toContain(cpi.profile.settlement);
     expect(rule).toMatch(/September CPI report for an October CPI market/);
+  });
+});
+
+describe('the live event is named to the model (a generic profile cannot say which month it trades)', () => {
+  it('marketEventLine formats ticker and Kalshi title, and tolerates no title', () => {
+    expect(marketEventLine({ eventTicker: 'KXCPI-26OCT', eventTitle: 'CPI in October' })).toBe('Market event: KXCPI-26OCT (CPI in October)');
+    expect(marketEventLine({ eventTicker: 'KXCPI-26OCT' })).toBe('Market event: KXCPI-26OCT');
+  });
+  it('the rule tells the model that the live event governs when the description is generic', () => {
+    expect(periodRule(cpi.profile)).toMatch(/KXCPI-26OCT: CPI in October.*THAT event's period is the one that counts/s);
+  });
+  it('fetchActiveLadder carries Kalshi\'s event title, and omits the field when Kalshi sends none', async () => {
+    const respond = (events: unknown[]) => async (url: string) =>
+      new Response(JSON.stringify(String(url).includes('/events?') ? { events } : { markets: [] }), { status: 200 });
+    vi.stubGlobal('fetch', respond([{ event_ticker: 'KXCPI-26OCT', strike_date: null, title: ' CPI in October ' }]));
+    expect(await fetchActiveLadder('KXCPI')).toMatchObject({ eventTicker: 'KXCPI-26OCT', eventTitle: 'CPI in October' });
+    vi.stubGlobal('fetch', respond([{ event_ticker: 'KXCPI-26OCT', strike_date: null }]));
+    expect(await fetchActiveLadder('KXCPI')).not.toHaveProperty('eventTitle');
+    vi.unstubAllGlobals();
+  });
+  it('all three entry prompts carry the line in the user message', async () => {
+    const line = 'Market event: KXCPI-26OCT (CPI in October)';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'period-line-'));
+    const db = openLedger(path.join(dir, 'l.db'));
+    const capture = (parsed: unknown) => {
+      const calls: any[] = [];
+      const client = { messages: { parse: async (p: unknown) => { calls.push(p); return { stop_reason: 'end_turn', parsed_output: parsed, content: [{ type: 'text', text: '{}' }], usage: { input_tokens: 1, output_tokens: 1 } }; } } } as unknown as Anthropic;
+      return { client, calls };
+    };
+    try {
+      const c1 = capture({ direction: 'up', magnitude_pts: 0.1, should_trade: false, reasoning: 'r', period_matches: true, period_note: 'n' });
+      await decideTrade(c1.client, db, { loaded: cpi, itemId: 'a', articleText: 'x', excerptSource: 'snippet', rung: 'reported', tripwireHit: false, triageReason: null, periodCheck: true, marketEvent: line });
+      expect(c1.calls[0].messages[0].content).toContain(line);
+      const c1b = capture({ direction: 'up', magnitude_pts: 0.1, should_trade: false, reasoning: 'r' });
+      await decideTrade(c1b.client, db, { loaded: cpi, itemId: 'b', articleText: 'x', excerptSource: 'snippet', rung: 'reported', tripwireHit: false, triageReason: null, marketEvent: line });
+      expect(c1b.calls[0].messages[0].content).not.toContain(line); // live unit: no period check, no line
+
+      const c2 = capture({ moves: [], reasoning: 'r', period_matches: true, period_note: 'n' });
+      await decideMulti(c2.client, db, { loaded: fed, itemId: 'c', articleText: 'x', excerptSource: 'snippet', rung: 'confirmed', tripwireHit: false, triageReason: null, markets: [], group: 'exclusive', marketEvent: line });
+      expect(c2.calls[0].messages[0].content).toContain(line);
+
+      const c3 = capture({ assessment: { shift: 0, confidence: 0.1, reason: 'r' }, positions: [], entry: { action: 'none', reason: 'r', period_matches: true, period_note: 'n' } });
+      await positionAwareDecide(c3.client, db, {
+        loaded: cpi, itemId: 'd', articleText: 'x', excerptSource: 'snippet', tripwireHit: false, sourceTrustTier: 2, publishedAt: null, rung: 'reported',
+        markets: thresholdBands(1), activeTickers: thresholdBands(1).map((b) => b.ticker), positions: [], entryAllowed: true, marketEvent: line,
+      });
+      expect(c3.calls[0].messages[0].content).toContain(line);
+    } finally {
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
