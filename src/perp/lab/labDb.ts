@@ -76,6 +76,19 @@ export function getMeta(db: Database.Database, key: string): string | null {
   return row === undefined ? null : row.value;
 }
 
+/** One meta row per lab process start (`start_<ms>` -> commit): the prefilter's in-memory dedup/cap state is cold after each start. */
+export function recordProcessStart(db: Database.Database, nowMs: number, commit: string): void {
+  setMeta(db, `start_${nowMs}`, commit);
+}
+
+export function listProcessStarts(db: Database.Database): Array<{ atMs: number; commit: string }> {
+  const rows = db.prepare("SELECT key, value FROM meta WHERE key GLOB 'start_[0-9]*'").all() as Array<{ key: string; value: string }>;
+  return rows
+    .map((r) => ({ atMs: Number(r.key.slice('start_'.length)), commit: r.value }))
+    .filter((s) => Number.isFinite(s.atMs))
+    .sort((a, b) => a.atMs - b.atMs);
+}
+
 export function setMeta(db: Database.Database, key: string, value: string): void {
   db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
 }

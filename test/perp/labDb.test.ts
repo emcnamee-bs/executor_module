@@ -1,6 +1,6 @@
 // test/perp/labDb.test.ts
 import { describe, it, expect } from 'vitest';
-import { firstItemMs, getMeta, hasItem, insertItem, openLabDb, setMeta, type LabItemRow } from '../../src/perp/lab/labDb.js';
+import { firstItemMs, getMeta, hasItem, insertItem, listProcessStarts, openLabDb, recordProcessStart, setMeta, type LabItemRow } from '../../src/perp/lab/labDb.js';
 
 const row = (over: Partial<LabItemRow> = {}): LabItemRow => ({
   item_id: 'a', received_ms: 1_000, published_ms: 900, source_id: 'axios_all', tier: 3, headline: 'Inflation heats up', snippet: null,
@@ -35,6 +35,24 @@ describe('lab db', () => {
     setMeta(db, 'k', 'v1');
     setMeta(db, 'k', 'v2');
     expect(getMeta(db, 'k')).toBe('v2');
+  });
+  it('records process starts and lists them ascending by time, ignoring other meta keys', () => {
+    const db = openLabDb(':memory:');
+    expect(listProcessStarts(db)).toEqual([]);
+    recordProcessStart(db, 20_000, 'bbb2222');
+    recordProcessStart(db, 3_000, 'aaa1111');   // numerically earlier but lexically later than "20000": must sort numerically
+    setMeta(db, 'report_done', '2026-10-21T00:00:00.000Z');
+    setMeta(db, 'start_notanumber', 'junk');
+    expect(listProcessStarts(db)).toEqual([
+      { atMs: 3_000, commit: 'aaa1111' },
+      { atMs: 20_000, commit: 'bbb2222' },
+    ]);
+  });
+  it('recording the same start time twice keeps one entry (the latest commit)', () => {
+    const db = openLabDb(':memory:');
+    recordProcessStart(db, 5_000, 'old');
+    recordProcessStart(db, 5_000, 'new');
+    expect(listProcessStarts(db)).toEqual([{ atMs: 5_000, commit: 'new' }]);
   });
   it('rejects an audit kind other than random or boundary, and an unknown prod_pass', () => {
     const db = openLabDb(':memory:');

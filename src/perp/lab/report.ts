@@ -2,6 +2,7 @@
 //
 // The end-of-week report (spec section 6). Pure over the lab database (and, read-only, the bot's); returns markdown.
 import type Database from 'better-sqlite3';
+import { listProcessStarts } from './labDb.js';
 import { STRATA, type Stratum } from './sampler.js';
 import { sigma4h, movedFlag } from './marks.js';
 import { clopperPearsonUpper, stratifiedEstimate, type StratumCount } from './stats.js';
@@ -95,6 +96,12 @@ export function buildReport(labDb: Database.Database, botDb: Database.Database |
   }
   const labSpend = one<{ s: number | null }>(labDb, 'SELECT SUM(cost_usd) AS s FROM model_calls').s ?? 0;
   L.push(`Lab audit spend: $${labSpend.toFixed(2)}.`);
+
+  L.push('', '## Lab process starts', '');
+  const starts = listProcessStarts(labDb);
+  if (starts.length === 0) L.push('None recorded.');
+  else for (const s of starts) L.push(`- ${new Date(s.atMs).toISOString()} commit ${s.commit}`);
+  L.push('', "The prefilter's dedup and cap state is cold after each start (it lives in the lab process's memory), so the prod_* columns in the first hours after a restart may under-report duplicates.");
 
   L.push('', '## Recommendation', '');
   if (est.n < MIN_AUDITS_FOR_VERDICT) L.push(`Not enough audited items (${est.n} random audits; ${MIN_AUDITS_FOR_VERDICT} needed) for a verdict: keep the production filter and keep collecting.`);

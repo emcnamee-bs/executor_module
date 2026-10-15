@@ -110,30 +110,32 @@ same `prefilter` and `escalate`, and records the git commit on every row.
 - **Own store** `data/perp/lab.db`:
 
 ```sql
-items(item_id TEXT PRIMARY KEY, received_ms INTEGER, source_id TEXT, tier INTEGER, headline TEXT, snippet_len INTEGER,
+items(item_id TEXT PRIMARY KEY, received_ms INTEGER, published_ms INTEGER, source_id TEXT, tier INTEGER, headline TEXT, snippet TEXT, -- snippet: up to 1200 characters
       commit_sha TEXT, class TEXT, score INTEGER, hits TEXT, prod_pass INTEGER, prod_reason TEXT, dup_of TEXT,
       variants TEXT,            -- JSON {"strict3":bool,"loose1":bool,"social_ok":bool}
       mark_at_ms INTEGER, mark REAL, ret_1h REAL, ret_4h REAL);
 audits(item_id TEXT PRIMARY KEY, at_ms INTEGER, stratum TEXT, kind TEXT CHECK(kind IN ('random','boundary')),
        bucket TEXT, direction TEXT, credibility REAL, novelty TEXT, already_priced TEXT, confidence REAL, rationale TEXT,
        miss INTEGER, cost_usd REAL, model TEXT, ok INTEGER, error TEXT);
-spend(day TEXT PRIMARY KEY, usd REAL, calls INTEGER);
+model_calls(...);          -- the bot's own table, reused: the audit spend is recorded here, not in a separate spend table
+meta(key TEXT PRIMARY KEY, value TEXT);   -- report_done, and one start_<ms> row per lab process start (value: commit)
 heartbeat(ts_ms INTEGER, last_item_ms INTEGER, stream_ok INTEGER, bot_db_ok INTEGER, marks_fresh INTEGER);
 ```
 
 - **Per item.** Same hygiene as the bot, then `prefilter` with the production config -> `items` row; the same item is also evaluated by the variants
   `strict3` (production), `loose1` (press threshold 1) and `social_ok` (social treated as press); booleans stored. Marks: `mark_at_ms`/`mark` = nearest mark at or before the
-  item time; `ret_1h` / `ret_4h` filled later by a periodic job from `marks`.
-- **Audit sampling.** Budget `LAB_DAILY_USD_CAP` (default **0.50**, UTC day, own `spend` table, hard stop), paced by an hourly slice of cap/24 with at most 2x carry-over.
+  item time; `ret_1h` / `ret_4h` filled later by a periodic job from `marks`. The lab computes the lexicon score for social items itself (the production verdict reports 0 for them, since they are dropped by class before scoring), so boundary social posts can be found.
+- **Audit sampling.** Budget `LAB_DAILY_USD_CAP` (default **0.50**, UTC day, hard stop). The audit spend is recorded in the lab's own `model_calls` table (the same table the bot uses, so `callJson`'s daily cap enforces the $0.50), not in a separate `spend` table. Pacing: on UTC hour `h` the amount spent so far today may not exceed `allowed(h) = min(cap, cap/24 x (h+2))` (one hourly slice of slack), instead of "2x carry-over".
   About 70% random, 30% boundary:
   - *random*: stratified over dropped items by stratum (`social`, `low_score`, `duplicate`, `cooldown`, `haiku_cap`), equal allocation across non-empty strata,
     seeded RNG (`LAB_SEED`); the overall miss-rate estimate weights each stratum by its volume.
   - *boundary*: non-social items with `score == threshold-1`, and social items with `score >= threshold` (where misses are most likely). Reported separately, never mixed into the random estimate.
-  - The audit calls the bot's own `extractImpact` (Sonnet) with a context text built from the newest `snapshots` row by the same helper `model/context.ts`; if there is no snapshot
-    newer than 10 minutes, that item is skipped (not counted). Items the bot already sent to Sonnet are joined from `assessments`, never re-paid.
+  - The audit calls the bot's own `extractImpact` (Sonnet) with a context text built from the bot's newest snapshot (at most 10 minutes old), summarised as if flat with no news pressure (no open position, pressure 0, no top items); if there is no such snapshot,
+    that item is skipped (no row, no spend).
   - **Miss** = audited bucket in {`moderate`,`major`,`shock`}. A model error skips the audit (no retries, no storm).
-- **Second signal.** A dropped item with `|ret_4h|` >= 2 sigma of non-overlapping 4 h returns over the available prior history (>= 24 h) is flagged `moved` for manual review in the report.
+- **Second signal.** A dropped item with `|ret_4h|` >= 2 sigma (sample standard deviation of non-overlapping 4 h returns over the last 7 days of hourly marks; at least 6 returns, else no flag) is flagged `moved` for manual review in the report.
 - **Day 7.** After `LAB_DAYS` (default 7) days since the first row the lab stops all model spend and keeps logging features (free); the tile says "audit complete"; the report is generated once.
+- **Process starts.** The prefilter's dedup and cap state lives in the lab process's memory and is cold after every start, so the `prod_*` columns can under-report duplicates in the first hours after a restart. Each start is recorded (`meta` rows `start_<ms>` -> commit) and the report lists them.
 - **Failure handling.** Redis outage: reconnect with backoff. Bot DB unreadable: mark the light red, keep logging features. No stream entry for 30 min: one alert (reuse `sendAlert`, `[PERP-LAB]` prefix).
 - **Statistics shown.** `misses k / n audited` with the 95% upper bound (exact Clopper-Pearson; 3/n when k = 0).
 
@@ -146,7 +148,7 @@ Lab spend vs $0.50, Est. saved; health lights: lab service, news stream, perp bo
 (seen / passed / escalated), audit (cumulative audited and misses), spend (lab spend vs cap pace, estimated saved). No headlines on the tile.
 Until the lab exists the publisher shows a baseline from `perp-paper.db` (gate calls, Sonnet calls and spend per hour) with status "Design phase", so the tile is useful immediately.
 
-**Report.** `scripts/intake-lab-report.ts` writes `docs/perp/intake-lab-week1.md` (uncommitted) from `lab.db`; runs automatically on day 7 (Slack summary + path), and is re-runnable. Contents: funnel by
+**Report.** `scripts/intake-lab-report.ts` writes `data/perp/intake-lab-week1.md` (the only writable directory under `ProtectSystem=strict`; uncommitted) from `lab.db`; runs automatically on day 7 (Slack summary + path), and is re-runnable. Contents: funnel by
 source / class / reason; miss rate and bound per random stratum, boundary results separately; every miss with source, headline, bucket and rationale; `moved` list; variant table
 (production vs `loose1` vs `social_ok`: extra Haiku/Sonnet calls vs misses caught); estimated savings from the bot's actual per-call costs; a concrete proposed config change. Applying it is the user's call.
 

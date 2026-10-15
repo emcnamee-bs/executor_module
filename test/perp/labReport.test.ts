@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { openPerpDb, recordMark } from '../../src/perp/store/db.js';
 import { ensureModelCallsTable } from '../../src/perp/model/callJson.js';
-import { insertItem, openLabDb, type LabItemRow } from '../../src/perp/lab/labDb.js';
+import { insertItem, openLabDb, recordProcessStart, type LabItemRow } from '../../src/perp/lab/labDb.js';
 import { buildReport } from '../../src/perp/lab/report.js';
 
 const H = 3_600_000;
@@ -132,6 +132,22 @@ describe('buildReport', () => {
     const md = buildReport(lab, bot, NOW);
     expect(md).toContain('Estimated model spend avoided: $9.56');
     expect(md).toContain("vs 2, the bot's own escalations in the lab window");
+  });
+  it('lists the lab process starts and warns that the prefilter state is cold after each one', () => {
+    const { lab, bot } = fixture();
+    recordProcessStart(lab, Date.UTC(2026, 9, 14, 12, 0, 0), 'abc1234');
+    recordProcessStart(lab, Date.UTC(2026, 9, 17, 3, 30, 0), 'def5678');
+    const md = buildReport(lab, bot, NOW);
+    expect(md).toContain('## Lab process starts');
+    expect(md).toContain('- 2026-10-14T12:00:00.000Z commit abc1234');
+    expect(md).toContain('- 2026-10-17T03:30:00.000Z commit def5678');
+    expect(md.indexOf('abc1234')).toBeLessThan(md.indexOf('def5678'));
+    expect(md).toMatch(/dedup and cap state is cold after each start/);
+    expect(md).toMatch(/prod_\* columns .* may under-report duplicates/);
+  });
+  it('says so when no process start was recorded', () => {
+    const { lab, bot } = fixture();
+    expect(buildReport(lab, bot, NOW)).toMatch(/## Lab process starts\s+None recorded\./);
   });
   it('works without a bot database and with an empty lab', () => {
     expect(() => buildReport(openLabDb(':memory:'), null, NOW)).not.toThrow();
