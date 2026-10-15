@@ -1,5 +1,5 @@
 // test/perp/intakePrefilter.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import path from 'node:path';
 import type { Item } from '../../src/item.js';
 import { NewsIntake } from '../../src/perp/intake/newsIntake.js';
@@ -101,6 +101,32 @@ describe('NewsIntake with the prefilter', () => {
     expect(await intake.handleItem(item('thehill_news', 'Inflation heats up as gas prices surge again'))).toBe('prefiltered');
     expect(calls.gate).toBe(1);
     expect(journal('intake_item')[0]).toMatchObject({ reason: 'duplicate' });
+  });
+
+  it('a failed gate call does not record the pass: a near-duplicate from another source still reaches the gate, and the Haiku-cap window is untouched', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const state = createPrefilterState();
+    const calls = { gate: 0 };
+    const db = openPerpDb(':memory:');
+    const intake = new NewsIntake({
+      db, now: () => NOW, alert: () => undefined,
+      engine: { contextText: () => 'CTX', onAssessment: async () => undefined },
+      gate: async () => {
+        calls.gate += 1;
+        if (calls.gate === 1) throw new Error('haiku 529');
+        return { relevant: true, impact: 'moderate', reason: 'ok' };
+      },
+      extract: async (it: Item) => ({ itemId: it.item_id, receivedAtMs: NOW, publishedAtMs: NOW, direction: 'neutral', bucket: 'minor', horizon: 'days', credibility: 0.5, novelty: 'new', alreadyPriced: 'no', confidence: 0.5, rationale: 'r' }) as ImpactAssessment,
+      prefilter: { enabled: true, cfg: CFG(), state },
+    } as never);
+    expect(await intake.handleItem(item('axios_all', 'Inflation heats up as gas prices surge'))).toBe('error');
+    expect(state.passed).toHaveLength(0);
+    expect(state.passAtMs).toHaveLength(0);
+    expect(await intake.handleItem(item('thehill_news', 'Inflation heats up as gas prices surge again'))).toBe('assessed');
+    expect(calls.gate).toBe(2);
+    expect(state.passed).toHaveLength(1);
+    expect(state.passAtMs).toHaveLength(1);
+    errSpy.mockRestore();
   });
 
   it('hygiene still runs first: a replay is skipped before the prefilter', async () => {

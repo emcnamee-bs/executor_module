@@ -134,6 +134,7 @@ export class NewsIntake {
       // NEW: the code gate. Cheap, deterministic, and it decides what Haiku ever reads.
       const pf = this.d.prefilter?.enabled ? this.d.prefilter : null;
       let sourceClass: SourceClass = 'unknown';
+      let passVerdict: ReturnType<typeof prefilter> | null = null;
       if (pf !== null) {
         let verdict: ReturnType<typeof prefilter>;
         try {
@@ -148,10 +149,12 @@ export class NewsIntake {
           ...(verdict.dupOf === undefined ? {} : { dupOf: verdict.dupOf }), commit: this.d.commit ?? 'unknown',
         });
         if (!verdict.pass) return this.count('prefiltered');
-        recordPass(pf.state, item, verdict, now, pf.cfg);
+        passVerdict = verdict;
       }
 
       const gate = await this.d.gate(item);
+      // Record the pass only once the gate has answered: a failed model call must leave the dedup, cooldown and Haiku-cap state untouched.
+      if (pf !== null && passVerdict !== null) recordPass(pf.state, item, passVerdict, now, pf.cfg);
       const impact: GateImpact = gate.impact ?? (gate.relevant ? 'moderate' : 'none'); // NEW
       let escalated = gate.relevant;
       if (pf !== null) {
