@@ -2,6 +2,7 @@
 import type { BandMarket } from './kalshi.js';
 import { RUNG_STAKES, type Rung } from './rung.js';
 import { MAX_NOTIONAL_CENTS_PER_TRADE, MAX_TOTAL_EXPOSURE_CENTS } from './ledger.js';
+import { shiftProblem, tailEdgeProblem, stackingHeadroomContracts, type PaperGuards } from './guards.js';
 
 export { MAX_NOTIONAL_CENTS_PER_TRADE };
 
@@ -44,6 +45,12 @@ export interface SizingInput {
    * omitted, every cap is the live ledger constant, so real-money behaviour is unchanged.
    */
   caps?: { perTradeCents: number; totalExposureCents: number };
+  /**
+   * Paper plausibility guards (src/decide/guards.ts), passed only by paper sizing like `caps`. Omitted, nothing
+   * below changes. `openCostByMarket` is the cost (cents) the paper ledger already holds per market ticker.
+   */
+  guards?: PaperGuards;
+  openCostByMarket?: ReadonlyMap<string, number>;
 }
 
 export interface SizingResult {
@@ -379,6 +386,11 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     );
   }
 
+  if (input.guards !== undefined) {
+    const problem = shiftProblem(curve, isThreshold ? 'threshold' : 'band', signedMagnitudePts, input.guards);
+    if (problem !== null) return decline(problem);
+  }
+
   const totalExposureCap = input.caps?.totalExposureCents ?? MAX_TOTAL_EXPOSURE_CENTS;
   const remainingExposureCents = totalExposureCap - input.currentTotalExposureCents;
   if (remainingExposureCents <= 0) {
@@ -417,6 +429,19 @@ export function evaluateSizing(input: SizingInput): SizingResult {
         continue;
       }
 
+      if (input.guards !== undefined) {
+        const tail = tailEdgeProblem(candidate.askCents, candidate.edgeCents, input.guards);
+        if (tail !== null) {
+          lastGateFailureReason = tail;
+          continue;
+        }
+        const open = input.openCostByMarket?.get(candidate.ticker) ?? 0;
+        if (stackingHeadroomContracts(open, candidate.askCents, input.guards) < 1) {
+          lastGateFailureReason = `${candidate.ticker} already holds ${open}c of its ${input.guards.maxMarketCostCents}c per-market cap`;
+          continue;
+        }
+      }
+
       if (best === null || candidate.edgeCents > best.edgeCents) {
         best = candidate;
       }
@@ -428,7 +453,7 @@ export function evaluateSizing(input: SizingInput): SizingResult {
   }
 
   const kelly = kellyFraction(best.fairPriceCents, best.askCents);
-  const contracts = contractsWithinCaps({
+  let contracts = contractsWithinCaps({
     askCents: best.askCents,
     kelly,
     stake,
@@ -436,6 +461,9 @@ export function evaluateSizing(input: SizingInput): SizingResult {
     remainingExposureCents,
     perTradeCents: input.caps?.perTradeCents,
   });
+  if (input.guards !== undefined) {
+    contracts = Math.min(contracts, stackingHeadroomContracts(input.openCostByMarket?.get(best.ticker) ?? 0, best.askCents, input.guards));
+  }
 
   if (contracts <= 0) {
     return decline('sized to zero contracts after Kelly/stake/depth/exposure clamps');
@@ -548,6 +576,9 @@ export function evaluateMultiSizing(input: {
   rung: Rung;
   currentTotalExposureCents: number;
   caps?: { perTradeCents: number; totalExposureCents: number };
+  /** Paper plausibility guards; see SizingInput. Omitted = unchanged. */
+  guards?: PaperGuards;
+  openCostByMarket?: ReadonlyMap<string, number>;
 }): MultiSizingResult {
   const stake = RUNG_STAKES[input.rung];
   if (stake <= 0) return { legs: [], reasons: [`rung is ${input.rung}, stake ${stake} -- never trades`] };
@@ -582,6 +613,15 @@ export function evaluateMultiSizing(input: {
     if (!verdict.ok) { reasons.push(`${m.ticker}: ${verdict.reason}`); continue; }
     const kelly = kellyFraction(cand.fairPriceCents, cand.askCents);
     if (kelly <= 0) { reasons.push(`${m.ticker}: zero Kelly fraction`); continue; }
+    if (input.guards !== undefined) {
+      const tail = tailEdgeProblem(cand.askCents, cand.edgeCents, input.guards);
+      if (tail !== null) { reasons.push(`${m.ticker}: ${tail}`); continue; }
+      const open = input.openCostByMarket?.get(m.ticker) ?? 0;
+      if (stackingHeadroomContracts(open, cand.askCents, input.guards) < 1) {
+        reasons.push(`${m.ticker}: already holds ${open}c of its ${input.guards.maxMarketCostCents}c per-market cap`);
+        continue;
+      }
+    }
     candidates.push({ cand, kelly, shift: move.shift, confidence, fairYesCents });
   }
 
@@ -598,7 +638,7 @@ export function evaluateMultiSizing(input: {
       reasons.push(`total exposure cap reached (${exposure}c of ${totalCap}c)`);
       break;
     }
-    const contracts = contractsWithinCaps({
+    let contracts = contractsWithinCaps({
       askCents: c.cand.askCents,
       kelly: c.kelly * c.confidence,
       stake,
@@ -606,6 +646,9 @@ export function evaluateMultiSizing(input: {
       remainingExposureCents,
       perTradeCents: input.caps?.perTradeCents,
     });
+    if (input.guards !== undefined) {
+      contracts = Math.min(contracts, stackingHeadroomContracts(input.openCostByMarket?.get(c.cand.ticker) ?? 0, c.cand.askCents, input.guards));
+    }
     if (!(contracts > 0)) { reasons.push(`${c.cand.ticker}: sized to zero contracts after Kelly/stake/depth/exposure clamps`); continue; }
     const notionalCents = contracts * c.cand.askCents;
     exposure += notionalCents;
