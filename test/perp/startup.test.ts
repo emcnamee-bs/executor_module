@@ -87,3 +87,11 @@ describe('createBroker', () => {
     expect(() => createBroker(resolveMode(env2, T), { env: env2, ticker: T, prodClient: client, demoClient: client, now: () => 1 })).toThrow(/PERP_SLIPPAGE_FRAC/);
   });
 });
+
+describe('prefilter startup rules', () => {
+  it('on by default; a corrupt shipped-style config refuses to load instead of running unfiltered', async () => {
+    const { resolvePrefilterSetting, loadPrefilterConfig } = await import('../../src/perp/intake/prefilter.js');
+    expect(resolvePrefilterSetting({} as NodeJS.ProcessEnv)).toBe(true);
+    expect(() => loadPrefilterConfig('/nonexistent/perp-prefilter.json')).toThrow();
+  });
+});

@@ -3,42 +3,51 @@ import type Database from 'better-sqlite3';
 import { parseItemFields, type Item } from '../../item.js';
 import type { StreamEntry } from '../../redis/consumer.js';
 import { SpendCapError } from '../model/callJson.js';
+import type { GateImpact } from '../model/gate.js';
 import { appendJournal } from '../store/db.js';
 import type { ImpactAssessment } from '../types.js';
+import { escalate } from './escalate.js'; // NEW
+import { DEFAULT_MAX_AGE_MS, hygieneSkip } from './hygiene.js'; // NEW
+import { countLastHour, prefilter, recordPass, type PrefilterConfig, type PrefilterState, type SourceClass } from './prefilter.js'; // NEW
 
 export type IntakeResult =
-  | 'assessed' | 'gated_out' | 'skipped_replay' | 'skipped_amended' | 'skipped_old' | 'skipped_bad_time' | 'skipped_seen'
-  | 'skipped_no_context' | 'parse_error' | 'error';
+  | 'assessed' | 'gated_out' | 'not_escalated' | 'prefiltered' | 'prefilter_error' | 'skipped_replay' | 'skipped_amended' | 'skipped_old'
+  | 'skipped_bad_time' | 'skipped_seen' | 'skipped_no_context' | 'parse_error' | 'error';
 
 export interface IntakeDeps {
   db: Database.Database;
   now: () => number;
   alert: (message: string) => void | Promise<void>;
   engine: { contextText(): string | null; onAssessment(a: ImpactAssessment): Promise<void> };
-  gate: (item: Item) => Promise<{ relevant: boolean; reason: string }>;
+  gate: (item: Item) => Promise<{ relevant: boolean; reason: string; impact?: GateImpact }>;
   extract: (item: Item, contextText: string) => Promise<ImpactAssessment>;
   /** Items whose publish time is older than this are skipped. Default 6 hours. */
   maxAgeMs?: number;
+  /** NEW: the code gate in front of Haiku. Absent or `enabled: false` = the old behaviour (every hygiene-passing item reaches the gate). */
+  prefilter?: { enabled: boolean; cfg: PrefilterConfig; state: PrefilterState };
+  /** NEW: is a high-impact scheduled event within +-2 h of `nowMs`? Used by the escalation policy. */
+  calendarWindowOpen?: (nowMs: number) => boolean;
+  /** NEW: git sha recorded on journal rows. */
+  commit?: string;
 }
 
 const SEEN_LIMIT = 5000;
 const OUTAGE_ERROR_THRESHOLD = 5;
 const OUTAGE_MESSAGE_MAX = 200;
-/** A publish time further than this in the future is clock trouble or garbage, not news: skip it. */
-const MAX_FUTURE_SKEW_MS = 10 * 60_000;
+const PREFILTER_ERROR_ALERT_THRESHOLD = 5; // NEW
 const RESULTS: IntakeResult[] = [
-  'assessed', 'gated_out', 'skipped_replay', 'skipped_amended', 'skipped_old', 'skipped_bad_time', 'skipped_seen',
-  'skipped_no_context', 'parse_error', 'error',
+  'assessed', 'gated_out', 'not_escalated', 'prefiltered', 'prefilter_error', 'skipped_replay', 'skipped_amended', 'skipped_old',
+  'skipped_bad_time', 'skipped_seen', 'skipped_no_context', 'parse_error', 'error',
 ];
-
-/** Epoch ms of an ISO timestamp; NaN for a missing, empty or unparseable value. */
-const parseTs = (v: string | null | undefined): number => (typeof v === 'string' && v.trim() !== '' ? Date.parse(v) : NaN);
 
 export class NewsIntake {
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
   private capAlertDay: string | null = null;
   private outageAlertDay: string | null = null;
+  private prefilterAlertDay: string | null = null; // NEW
+  private prefilterErrorDay: string | null = null; // NEW
+  private prefilterErrorsToday = 0; // NEW
   private consecutiveErrors = 0;
   private lastEntryAt: number | null = null;
   readonly counters = Object.fromEntries(RESULTS.map((r) => [r, 0])) as Record<IntakeResult, number>;
@@ -91,26 +100,79 @@ export class NewsIntake {
     }
   }
 
+  /** NEW: fail closed. The item is dropped, the failure journaled and counted; five in one UTC day raise one alert. */
+  private async prefilterFailed(item: Item, err: unknown, now: number): Promise<IntakeResult> {
+    const msg = err instanceof Error ? err.message : String(err);
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (this.prefilterErrorDay !== day) {
+      this.prefilterErrorDay = day;
+      this.prefilterErrorsToday = 0;
+    }
+    this.prefilterErrorsToday += 1;
+    await this.journal(now, 'prefilter_error', { itemId: item.item_id, error: msg.slice(0, 300) });
+    console.error('[perp-intake] prefilter failed (item dropped):', msg);
+    if (this.prefilterErrorsToday >= PREFILTER_ERROR_ALERT_THRESHOLD && this.prefilterAlertDay !== day) {
+      const sent = await this.safe('prefilter alert', () =>
+        this.d.alert(`[PERP] the news prefilter failed ${this.prefilterErrorsToday} times today (items dropped, fail-closed; latest: ${msg.slice(0, OUTAGE_MESSAGE_MAX)}); set PERP_PREFILTER=off to bypass it`)
+      );
+      if (sent) this.prefilterAlertDay = day;
+    }
+    return this.count('prefilter_error');
+  }
+
   async handleItem(item: Item): Promise<IntakeResult> {
     const now = this.d.now();
     try {
-      if (item.replay) return this.count('skipped_replay');
-      if (item.event_type === 'item_amended') return this.count('skipped_amended');
-      // Fail closed on time: the publish time (else first-seen time) must parse and must not lie in the future.
-      const publishedRaw = parseTs(item.source_publish_ts);
-      const published = Number.isFinite(publishedRaw) ? publishedRaw : parseTs(item.first_seen_ts);
-      if (!Number.isFinite(published) || published - now > MAX_FUTURE_SKEW_MS) return this.count('skipped_bad_time');
-      if (now - published > (this.d.maxAgeMs ?? 6 * 3_600_000)) return this.count('skipped_old');
+      // NEW (extracted, same checks and order; the maxAgeMs dep override is passed through)
+      const skip = hygieneSkip(item, now, this.d.maxAgeMs ?? DEFAULT_MAX_AGE_MS);
+      if (skip !== null) return this.count(skip);
       if (this.seen.has(item.item_id)) return this.count('skipped_seen');
       const context = this.d.engine.contextText();
       if (context === null) return this.count('skipped_no_context');
       this.markSeen(item.item_id);
 
-      const gate = await this.d.gate(item);
-      if (!gate.relevant) {
-        this.consecutiveErrors = 0;
-        return this.count('gated_out');
+      // NEW: the code gate. Cheap, deterministic, and it decides what Haiku ever reads.
+      const pf = this.d.prefilter?.enabled ? this.d.prefilter : null;
+      let sourceClass: SourceClass = 'unknown';
+      let passVerdict: ReturnType<typeof prefilter> | null = null;
+      if (pf !== null) {
+        let verdict: ReturnType<typeof prefilter>;
+        try {
+          verdict = prefilter(item, pf.cfg, pf.state, now);
+        } catch (err) {
+          return await this.prefilterFailed(item, err, now);
+        }
+        sourceClass = verdict.sourceClass;
+        await this.journal(now, 'intake_item', {
+          itemId: item.item_id, sourceId: item.source_id, tier: item.trust_tier, pass: verdict.pass, reason: verdict.reason,
+          sourceClass: verdict.sourceClass, score: verdict.score, hits: verdict.hits, strongHits: verdict.strongHits,
+          ...(verdict.dupOf === undefined ? {} : { dupOf: verdict.dupOf }), commit: this.d.commit ?? 'unknown',
+        });
+        if (!verdict.pass) return this.count('prefiltered');
+        passVerdict = verdict;
       }
+
+      const gate = await this.d.gate(item);
+      // Record the pass only once the gate has answered: a failed model call must leave the dedup, cooldown and Haiku-cap state untouched.
+      if (pf !== null && passVerdict !== null) recordPass(pf.state, item, passVerdict, now, pf.cfg);
+      const impact: GateImpact = gate.impact ?? (gate.relevant ? 'moderate' : 'none'); // NEW
+      let escalated = gate.relevant;
+      if (pf !== null) {
+        const e = escalate({
+          impact, sourceClass, calendarWindowOpen: this.d.calendarWindowOpen?.(now) ?? false,
+          sonnetPassesLastHour: countLastHour(pf.state.sonnetAtMs, now), sonnetPerHour: pf.cfg.sonnetPerHour,
+        });
+        escalated = e.escalate;
+        await this.journal(now, 'intake_outcome', {
+          itemId: item.item_id, impact, escalated: e.escalate, reason: e.reason, haikuReason: gate.reason.slice(0, 300),
+        });
+      }
+      if (!escalated) {
+        this.consecutiveErrors = 0;
+        return this.count(impact === 'none' || !gate.relevant ? 'gated_out' : 'not_escalated');
+      }
+      // The Sonnet slot is consumed before the call on purpose: the hourly cap limits attempts, so a failing call cannot be retried past it.
+      if (pf !== null) pf.state.sonnetAtMs.push(now);
       const assessment = await this.d.extract(item, context);
       await this.d.engine.onAssessment(assessment);
       this.consecutiveErrors = 0;
