@@ -61,7 +61,7 @@ type Verdict = {
   sourceClass: 'official_macro' | 'market_wire' | 'press' | 'social' | 'unknown';
   score: number;          // lexicon score after weights and cap
   hits: string[];         // distinct pattern ids that matched
-  strongHits: string[];   // the strong-pattern subset of `hits` (the cooldown compares these)
+  strongHits: string[];   // the strong-pattern subset of `hits` (the cooldown only applies to items that have one)
   dupOf?: string;         // item_id of the earlier near-duplicate (a cooldown verdict also records it)
 };
 ```
@@ -79,7 +79,7 @@ type Verdict = {
    earnings, guidance, trade deal/war/talks, sanctions, China, semiconductor, mega-cap names, central bank/ECB/BoJ/BoE/BoC, dollar, supply chain, missile/attack/strike).
    Negative patterns -2 (opinion, celebrity, sports, recipe, horoscope). Total capped at 10 and floored at 0. All lists live in the config file, versioned.
 4. **Own dedup and cooldown.** Headline normalised to a token set (lowercase, punctuation and stopwords removed). Jaccard >= 0.6 against any
-   item that passed in the last `dedupWindowMs` (default 6 h) => `duplicate`. Cooldown (`cooldownMs`, default 2 h): an item that has at least one strong hit and whose strong hits are all contained in an earlier passed item's strong hits within `cooldownMs` is a `cooldown`.
+   item that passed in the last `dedupWindowMs` (default 6 h) => `duplicate`. Cooldown (`cooldownMs`, default 2 h): an item that has at least one strong hit and whose hits (strong and medium) are all contained in an earlier passed item's hits within `cooldownMs` is a `cooldown`. An item that carries any lexicon topic the earlier pass lacked is new information and passes. (Amended 2026-10-22: the first version compared strong hits only, so a story sharing just a generic strong topic such as `inflation` with an unrelated earlier pass was suppressed; the lab's week-1 audit caught a Hormuz tanker-attack item that way.)
 5. **Hourly caps** `haikuPerHour` (default 30) and `sonnetPerHour` (default 6). Over the Haiku cap, only items whose score is >= the current
    hour's cap-admitting minimum pass (floor = min(scoreCap, threshold + passesInLastHour - haikuPerHour + 1); official_macro bypasses); the rest are `haiku_cap`.
 
