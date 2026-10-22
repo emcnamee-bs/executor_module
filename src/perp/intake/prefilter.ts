@@ -47,7 +47,7 @@ const ConfigSchema = z
 export interface CompiledPattern { id: string; kind: 'strong' | 'medium' | 'negative'; weight: number; re: RegExp }
 export type PrefilterConfig = z.infer<typeof ConfigSchema> & { compiled: CompiledPattern[] };
 
-export interface PassedRecord { atMs: number; itemId: string; tokens: Set<string>; strongHits: string[] }
+export interface PassedRecord { atMs: number; itemId: string; tokens: Set<string>; hits: string[]; strongHits: string[] }
 export interface PrefilterState { passed: PassedRecord[]; passAtMs: number[]; sonnetAtMs: number[] }
 
 export function loadPrefilterConfig(file: string): PrefilterConfig {
@@ -141,10 +141,13 @@ export function prefilter(item: PrefilterItem, cfg: PrefilterConfig, state: Pref
     }
   }
 
+  // Cooldown suppresses a repeat of a strong topic, not a new story that happens to share one. An item that carries any
+  // lexicon topic (strong or medium) the earlier pass lacked is new information and goes through. This compares ids the
+  // lexicon already defines, so it names no event or keyword.
   if (strongHits.length > 0) {
     for (const p of state.passed) {
       if (nowMs - p.atMs > cfg.cooldownMs) continue;
-      if (strongHits.every((h) => p.strongHits.includes(h))) return { ...base, pass: false, reason: 'cooldown', dupOf: p.itemId };
+      if (hits.every((h) => p.hits.includes(h))) return { ...base, pass: false, reason: 'cooldown', dupOf: p.itemId };
     }
   }
 
@@ -159,7 +162,7 @@ export function prefilter(item: PrefilterItem, cfg: PrefilterConfig, state: Pref
 /** Commit a passing verdict into the state (dedup memory and the hourly Haiku count) and prune what no window needs. */
 export function recordPass(state: PrefilterState, item: PrefilterItem, verdict: Verdict, nowMs: number, cfg: PrefilterConfig): void {
   if (verdict.pass && verdict.sourceClass !== 'official_macro') {
-    state.passed.push({ atMs: nowMs, itemId: item.item_id, tokens: tokenize(item.headline), strongHits: verdict.strongHits });
+    state.passed.push({ atMs: nowMs, itemId: item.item_id, tokens: tokenize(item.headline), hits: verdict.hits, strongHits: verdict.strongHits });
     state.passAtMs.push(nowMs);
   }
   const keepFrom = nowMs - Math.max(cfg.dedupWindowMs, cfg.cooldownMs);

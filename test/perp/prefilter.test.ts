@@ -134,6 +134,22 @@ describe('prefilter: dedup and cooldown', () => {
     expect(run(c, s, mk('nyt_politics', 'CPI surprise raises Fed rate hike fears for traders')).pass).toBe(true);
     expect(run(c, s, mk('nbc_politics', 'Another CPI reading puzzles economists today'), NOW + 3 * H).pass).toBe(true);
   });
+  it.each([
+    // the 2026-10-22 miss: a Hormuz item sharing only the generic strong topic `inflation` with an unrelated earlier pass
+    ['Economy set to worsen, with higher unemployment and inflation on the way', 'Iran: 7 ships hit in the Strait of Hormuz as oil jumps and inflation fears grow'],
+    // not Hormuz-specific: any item that brings a topic the earlier pass lacked gets through
+    ['CPI report shows a 3.7% increase', 'OPEC trims crude output days after the CPI report'],
+  ])('cooldown does not suppress an item that adds a topic the earlier pass lacked: %s -> %s', (first, second) => {
+    const c = cfg(); const s = createPrefilterState();
+    expect(run(c, s, mk('guardian_world', first)).pass).toBe(true);
+    const v = run(c, s, mk('thehill_news', second));
+    expect(v).toMatchObject({ pass: true, reason: 'pass' });
+  });
+  it('cooldown still suppresses an item whose topics are all covered by the earlier pass', () => {
+    const c = cfg(); const s = createPrefilterState();
+    expect(run(c, s, mk('guardian_world', 'Inflation and unemployment worsen as oil prices jump')).pass).toBe(true);
+    expect(run(c, s, mk('thehill_news', 'Unemployment and inflation data point to a weaker economy')).reason).toBe('cooldown');
+  });
   it('very short headlines are never deduplicated', () => {
     const c = cfg(); const s = createPrefilterState();
     run(c, s, mk('axios_all', 'Fed cuts'));
